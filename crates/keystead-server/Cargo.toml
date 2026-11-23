@@ -1,0 +1,16 @@
+[package]
+name = "keystead-server"
+description = "Keystead server: stores and relays encrypted data for one organization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+keystead-core.workspace = true
+axum.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
