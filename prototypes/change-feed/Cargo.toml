@@ -1,0 +1,19 @@
+[package]
+name = "keystead-proto-change-feed"
+description = "Prototype: the server's change feed on SQLite with concurrent devices"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "change-feed"
+path = "src/main.rs"
+
+[dependencies]
+rand = "0.8"
+sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "sqlite"] }
+tokio = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true
