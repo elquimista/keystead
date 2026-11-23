@@ -1,6 +1,9 @@
 # Rust
 /target/
 
+# Server data from local runs
+keystead-data/
+
 # Swift / Xcode
 .build/
 .swiftpm/

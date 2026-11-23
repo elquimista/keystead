@@ -11,9 +11,22 @@ publish = false
 [workspace.dependencies]
 keystead-core = { path = "crates/keystead-core" }
 axum = "0.8"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hkdf = "0.12"
+hpke = "0.12"
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "sqlite"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

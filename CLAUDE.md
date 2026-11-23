@@ -19,6 +19,8 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
 
 ## Rules
 
+- `docs/format.md` is the data format spec and `crates/keystead-core` its reference
+  implementation; change them together.
 - The server never decrypts anything; all encryption and decryption happens on devices.
 - No home-made cryptography: use established constructions and audited crates.
 - Never write secrets or decrypted data to disk, logs or error messages.
