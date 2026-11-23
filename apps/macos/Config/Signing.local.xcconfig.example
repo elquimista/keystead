@@ -1,0 +1,12 @@
+// Copy this file to Signing.local.xcconfig (git ignores it) to sign with your Apple team.
+// Your team ID is the 10-character code in Xcode > Settings > Accounts, and in brackets
+// at the end of your certificate's name in Keychain Access.
+
+DEVELOPMENT_TEAM = ABCDE12345
+
+// Everyday builds: your Apple Development certificate.
+CODE_SIGN_IDENTITY = Apple Development
+
+// Release builds for distribution outside the Mac App Store need a Developer ID
+// Application certificate (paid Apple Developer Program), then notarization.
+// CODE_SIGN_IDENTITY[config=Release] = Developer ID Application

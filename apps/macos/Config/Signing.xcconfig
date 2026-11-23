@@ -1,0 +1,19 @@
+// Code signing.
+//
+// By default the app is signed ad hoc ("Sign to Run Locally"), so anyone, CI included,
+// can build and run it on their own Mac without an Apple account.
+//
+// To sign with your Apple team, which gives stable signatures and is required before
+// distributing, copy Signing.local.xcconfig.example to Signing.local.xcconfig (git
+// ignores it) and fill in your team ID. See apps/macos/README.md.
+
+// Decide the permanent bundle identifier before the first public release: it ties
+// together the app's sandbox container, notarization and updates.
+KEYSTEAD_BUNDLE_ID = io.github.elquimista.Keystead
+
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+PROVISIONING_PROFILE_SPECIFIER =
+
+#include? "Signing.local.xcconfig"

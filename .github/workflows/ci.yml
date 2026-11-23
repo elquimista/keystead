@@ -17,9 +17,28 @@ jobs:
 
   macos-app:
     runs-on: macos-15
+    defaults:
+      run:
+        working-directory: apps/macos
     steps:
       - uses: actions/checkout@v4
-      - run: swift build
-        working-directory: apps/macos
-      - run: swift test
+      - uses: Swatinem/rust-cache@v2
+      - name: Add the Intel target for a universal build
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build the Rust core
+        run: scripts/build-core.sh
+      - name: Build the app (Release, signed ad hoc)
+        run: >
+          xcodebuild -project Keystead.xcodeproj -scheme Keystead -configuration Release
+          -derivedDataPath build/DerivedData build
+      - name: Check the signature is ready for notarization
+        run: |
+          APP=build/DerivedData/Build/Products/Release/Keystead.app
+          codesign --verify --strict --deep "$APP"
+          codesign -dv "$APP" 2>&1 | grep -q 'runtime'
+          ENTITLEMENTS=$(codesign -d --entitlements - --xml "$APP")
+          echo "$ENTITLEMENTS" | grep -q 'com.apple.security.app-sandbox'
+          ! echo "$ENTITLEMENTS" | grep -q 'get-task-allow'
+      - name: Secure Enclave prototype tests
+        run: swift test
         working-directory: prototypes/secure-enclave

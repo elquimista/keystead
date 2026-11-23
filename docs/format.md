@@ -66,6 +66,11 @@ data stays readable.
 **Folder keys** use `info = "keystead/folder-key/v1"` and associated data = the
 folder id's 16 bytes, so a wrapped key can't be moved to another folder.
 
+**The account secret on a Mac** is wrapped for the device's Secure Enclave key with
+`hpke-p256-sha256-aes256gcm`, `info = "keystead/account-secret/v1"` and no associated
+data. It stays on that Mac, next to the Secure Enclave key's handle; the handle only works
+in that Mac's Secure Enclave, after Touch ID or the Mac password.
+
 ### Device keys and sign-in
 
 A device registers a public key with one of these schemes:

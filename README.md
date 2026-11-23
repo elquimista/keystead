@@ -14,7 +14,8 @@ app for colleagues who never open a terminal.
 | `crates/keystead-core` | Shared Rust library: data format, crypto, sync and search |
 | `crates/keystead-server` | The server (`keystead-server`), one binary per organization |
 | `crates/keystead-cli` | The command-line tool (`keystead`) with pass-style commands |
-| `apps/macos` | The macOS menu bar app (SwiftUI) |
+| `crates/keystead-ffi` | The core's Swift bindings (UniFFI), linked into the Mac app |
+| `apps/macos` | The macOS menu bar app (SwiftUI, Xcode project); see its [README](apps/macos/README.md) |
 | `docs/format.md` | The data format and API spec (version 1 draft) |
 | `prototypes/change-feed` | Prototype: the server's change feed on SQLite with 50 devices editing at once |
 | `prototypes/secure-enclave` | Prototype: a Secure Enclave device key unlocking the account key |
@@ -75,12 +76,12 @@ keystead show "AWS root"
 For now the CLI stores its keys unencrypted in `$KEYSTEAD_HOME/state.json` (readable only
 by you). Use it for trying things out, not for real secrets yet.
 
-Build and run the macOS app:
+Build the macOS app (signing is covered in [apps/macos/README.md](apps/macos/README.md)):
 
 ```sh
 cd apps/macos
-swift build
-swift run
+scripts/build-core.sh       # once after cloning; Xcode keeps it up to date afterwards
+open Keystead.xcodeproj
 ```
 
 If you installed rustup with Homebrew, `cargo` isn't on your PATH by default. Add

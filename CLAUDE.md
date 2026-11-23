@@ -10,7 +10,14 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
 
 - Rust: `cargo build --workspace`, `cargo test --workspace`,
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`
-- macOS app: `swift build` in `apps/macos`
+- macOS app (in `apps/macos`): `scripts/build-core.sh` first on a fresh clone, then
+  `xcodebuild -project Keystead.xcodeproj -scheme Keystead -configuration Release
+  -derivedDataPath build/DerivedData build CODE_SIGN_IDENTITY=-`. The user's
+  git-ignored `Config/Signing.local.xcconfig` signs their own builds with their Apple
+  Development certificate; always pass `CODE_SIGN_IDENTITY=-` so command-line builds stay
+  ad hoc and never trigger a keychain prompt.
+- Launching the app or unlocking shows UI or a Touch ID prompt on the user's screen; say
+  so before doing it
 - Benchmarks (always `--release`; debug numbers are meaningless):
   `cargo run --release -p keystead-proto-unlock-search`,
   `cargo run --release -p keystead-proto-change-feed`
@@ -24,4 +31,7 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
 - The server never decrypts anything; all encryption and decryption happens on devices.
 - No home-made cryptography: use established constructions and audited crates.
 - Never write secrets or decrypted data to disk, logs or error messages.
-- `unsafe` is forbidden workspace-wide; only a future FFI crate may opt out.
+- `unsafe` is forbidden workspace-wide; only `keystead-ffi` opts out, because UniFFI's
+  generated code needs it. Keep that crate a thin conversion layer.
+- Release builds of the Mac app must stay notarizable: Hardened Runtime on, no
+  `get-task-allow`, no unsigned nested binaries. CI checks this.
