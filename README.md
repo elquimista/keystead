@@ -16,6 +16,7 @@ app for colleagues who never open a terminal.
 | `crates/keystead-cli` | The command-line tool (`keystead`) with pass-style commands |
 | `apps/macos` | The macOS menu bar app (SwiftUI) |
 | `prototypes/secure-enclave` | Prototype: a Secure Enclave device key unlocking the account key |
+| `prototypes/unlock-search` | Prototype: unlock and search speed for vaults of up to 100,000 items |
 
 Windows and Ubuntu apps come after macOS.
 
