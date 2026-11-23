@@ -44,6 +44,37 @@ curl http://127.0.0.1:8080/v1/health
 
 The API is specified in [`docs/format.md`](docs/format.md).
 
+## Try it with the CLI
+
+With the server running, use `KEYSTEAD_HOME` to keep two accounts apart in separate
+terminals:
+
+```sh
+cargo build -p keystead-cli          # builds target/debug/keystead
+
+# Alice: claim the server and invite Bob
+export KEYSTEAD_HOME=/tmp/alice
+keystead setup http://127.0.0.1:8080 <setup code> --name Alice
+keystead invite Bob                  # prints the join command for Bob
+
+# Bob, in another terminal
+export KEYSTEAD_HOME=/tmp/bob
+keystead join http://127.0.0.1:8080 <token> --owner <Alice's fingerprint>
+
+# Alice: approve Bob after he reads out his fingerprint, then share
+keystead approve 2 --fingerprint <Bob's fingerprint>
+keystead folder create Production
+keystead folder share Production 2
+keystead add Production "AWS root" --username root@example.com
+
+# Bob
+keystead ls
+keystead show "AWS root"
+```
+
+For now the CLI stores its keys unencrypted in `$KEYSTEAD_HOME/state.json` (readable only
+by you). Use it for trying things out, not for real secrets yet.
+
 Build and run the macOS app:
 
 ```sh

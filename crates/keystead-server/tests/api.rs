@@ -505,6 +505,21 @@ async fn access_rules_are_enforced() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
+    // Only the owner approves, even with a correctly signed entry.
+    let mut self_approved = bob.entry();
+    self_approved.approve(&bob.keys);
+    let (status, _) = server
+        .call(
+            Method::POST,
+            &format!("/v1/users/{}/approval", bob.user_id),
+            bob.token(),
+            json(&ApprovalRequest {
+                approval: self_approved.approval.unwrap(),
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
     // A challenge can't be replayed.
     let (_, body) = server
         .call(
