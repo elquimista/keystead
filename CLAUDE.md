@@ -11,6 +11,8 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
 - Rust: `cargo build --workspace`, `cargo test --workspace`,
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`
 - macOS app: `swift build` in `apps/macos`
+- Secure Enclave prototype: `swift test` in `prototypes/secure-enclave`; `se-proto unlock`
+  shows a Touch ID or password prompt, so a person must run it
 
 ## Rules
 

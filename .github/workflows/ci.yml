@@ -21,3 +21,5 @@ jobs:
       - uses: actions/checkout@v4
       - run: swift build
         working-directory: apps/macos
+      - run: swift test
+        working-directory: prototypes/secure-enclave
