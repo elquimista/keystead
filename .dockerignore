@@ -1,0 +1,8 @@
+# The server image needs only the Rust workspace.
+.git/
+.github/
+target/
+apps/
+docs/
+prototypes/secure-enclave/
+**/keystead-data/

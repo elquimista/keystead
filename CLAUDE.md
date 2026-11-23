@@ -18,6 +18,10 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
   ad hoc and never trigger a keychain prompt.
 - Launching the app or unlocking shows UI or a Touch ID prompt on the user's screen; say
   so before doing it
+- Server in Docker: `docker compose up -d`, setup code in `docker compose logs server`.
+  For throwaway checks use another project and port
+  (`KEYSTEAD_PORT=18090 docker compose -p keystead-check up -d`, then `down -v`) so the
+  user's own server and data on 8080 are never touched.
 - Benchmarks (always `--release`; debug numbers are meaningless):
   `cargo run --release -p keystead-proto-unlock-search`,
   `cargo run --release -p keystead-proto-change-feed`

@@ -43,6 +43,15 @@ cargo run -p keystead-server
 curl http://127.0.0.1:8080/v1/health
 ```
 
+Or run it in Docker. The image is small (about 57 MB), runs as a non-root user and keeps
+its database in a named volume, so data survives restarts and rebuilds:
+
+```sh
+docker compose up -d              # build and start on 127.0.0.1:8080 (KEYSTEAD_PORT to change)
+docker compose logs server        # shows the one-time setup code on first start
+docker compose down               # stop; add -v to also delete the data
+```
+
 The API is specified in [`docs/format.md`](docs/format.md).
 
 ## Try it with the CLI

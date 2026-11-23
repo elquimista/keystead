@@ -1,0 +1,20 @@
+# Runs the Keystead server locally.
+#
+#   docker compose up -d            # build and start; data persists in a named volume
+#   docker compose logs server      # shows the one-time setup code on first start
+#   docker compose down             # stop (add -v to also delete the data)
+#
+# The port is published on localhost only. Set KEYSTEAD_PORT to use another one.
+
+services:
+  server:
+    build: .
+    image: keystead-server:dev
+    ports:
+      - "127.0.0.1:${KEYSTEAD_PORT:-8080}:8080"
+    volumes:
+      - keystead-data:/data
+    restart: unless-stopped
+
+volumes:
+  keystead-data:

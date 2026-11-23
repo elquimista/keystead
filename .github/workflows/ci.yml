@@ -15,6 +15,22 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  server-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the server image
+        run: docker build -t keystead-server:ci .
+      - name: Start it and wait until healthy
+        run: |
+          docker run -d --name keystead -p 127.0.0.1:8080:8080 keystead-server:ci
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' keystead)" = healthy ] && break
+            sleep 2
+          done
+          docker logs keystead
+          curl --fail http://127.0.0.1:8080/v1/health
+
   macos-app:
     runs-on: macos-15
     defaults:
