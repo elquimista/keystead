@@ -195,6 +195,10 @@ without the Recovery Kit. The server only passes along a public key and the secr
 for it. Nothing else changes; older apps keep working, and apps from 0.8.0 say the server
 needs updating if it's older.
 
+**Updating to 0.8.1.** Only the Mac app changed: after a copied password clears, the
+clipboard gets back what was on it before. The server is the same as 0.8.0, so updating it
+is optional.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
