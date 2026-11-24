@@ -403,9 +403,14 @@ pub(crate) async fn devices(
 /// sessions, for a lost or retired device.
 /// `POST /v1/sign-out`: the device making the request removes itself. Its sessions end and
 /// its key can't sign in again; the account and its other devices carry on.
+///
+/// Any body is read and ignored before answering. A reply sent while body bytes are still
+/// arriving makes the connection close with unread data, which resets it, and the client
+/// can lose the reply.
 pub(crate) async fn sign_out(
     State(state): State<AppState>,
     auth: Auth,
+    _body: axum::body::Bytes,
 ) -> Result<StatusCode, ApiError> {
     sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
         .bind(auth.device_id.to_string())

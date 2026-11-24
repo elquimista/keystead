@@ -556,7 +556,7 @@ impl Vault {
     /// Returns why the server couldn't be told, if it couldn't. Don't use the vault
     /// afterwards.
     pub fn sign_out(&mut self) -> Result<Option<String>> {
-        let not_told = match self.call(|client| client.post::<_, ()>("/v1/sign-out", &())) {
+        let not_told = match self.call(|client| client.post_empty::<()>("/v1/sign-out")) {
             Ok(Ok(())) => None,
             Ok(Err(Failure::Status { code: 404, .. })) => Some(NO_SIGN_OUT.to_owned()),
             Ok(Err(error)) => Some(error.to_string()),

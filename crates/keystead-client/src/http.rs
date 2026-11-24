@@ -91,6 +91,11 @@ impl Client {
         read(self.request("POST", path).send_json(body))
     }
 
+    /// A POST with no body, for requests that only need the session.
+    pub fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
+        read(self.request("POST", path).call())
+    }
+
     pub fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
         read(self.request("DELETE", path).call())
     }
