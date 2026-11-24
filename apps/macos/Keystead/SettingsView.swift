@@ -11,17 +11,35 @@ struct SettingsView: View {
     let model: AppModel
     @AppStorage(DockIcon.preferenceKey) private var showInDock = true
     @AppStorage(AutoLock.minutesKey) private var autoLockMinutes = AutoLock.defaultMinutes
+    @AppStorage(QuickSearchShortcut.preferenceKey)
+    private var shortcut = QuickSearchShortcut.standard
+    /// macOS refused the chosen shortcut, usually because another app has it.
+    @State private var shortcutTaken = false
     @State private var sheet: AccountSheet?
 
     var body: some View {
         TabView {
             Form {
-                Toggle("Show \(appName) in the Dock", isOn: $showInDock)
-                Text("When this is off, \(appName) lives only in the menu bar. Open its window "
-                    + "from the menu bar icon.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Section {
+                    Picker("Quick search shortcut", selection: $shortcut) {
+                        ForEach(QuickSearchShortcut.allCases) { Text($0.label).tag($0) }
+                    }
+                    Text(shortcutTaken
+                        ? "Another app already uses that shortcut. Choose a different one."
+                        : "Opens a search box over any app: type, then press Return to copy the "
+                            + "password, or Shift-Return for the username.")
+                        .font(.caption)
+                        .foregroundStyle(shortcutTaken ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Section {
+                    Toggle("Show \(appName) in the Dock", isOn: $showInDock)
+                    Text("When this is off, \(appName) lives only in the menu bar. Open its window "
+                        + "from the menu bar icon.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
@@ -55,6 +73,9 @@ struct SettingsView: View {
             case .signOut:
                 SignOutSheet(model: model) { self.sheet = .recoveryKit }
             }
+        }
+        .onChange(of: shortcut) {
+            shortcutTaken = QuickSearch.shared?.applyShortcut() == false
         }
         .onChange(of: showInDock) {
             DockIcon.applyPreference()

@@ -64,6 +64,10 @@ enum DebugSnapshots {
                     model.section = .sharedWithMe
                     model.selectedItemID = model.items[3].id
                 }),
+                ("6f-quick-search", { QuickSearch.shared?.show(query: "a") }),
+                // The down arrow, as the keyboard sends it: the second match is picked.
+                ("6f2-quick-search-down", { pressKey(keyCode: 125) }),
+                ("6g-quick-search-closed", { QuickSearch.shared?.close() }),
                 ("7-notices", { model.showDemoNotices() }),
             ]
         }
@@ -83,6 +87,9 @@ enum DebugSnapshots {
             if let sheet = window.attachedSheet {
                 save(sheet, to: directory.appending(path: "\(name)-sheet.png"))
             }
+            if let panel = NSApp.windows.first(where: { $0 is QuickSearchPanel && $0.isVisible }) {
+                save(panel, to: directory.appending(path: "\(name)-quick-search.png"))
+            }
         }
         if model.users.count > 1, let kit = try? await model.recoveryKit() {
             // The printed page, as the print panel would get it.
@@ -94,9 +101,23 @@ enum DebugSnapshots {
                 try? png.write(to: directory.appending(path: "9-printed-kit.png"))
             }
         }
+        report += "quick search shortcut registered: "
+            + "\(QuickSearch.shared?.isShortcutRegistered ?? false)\n"
         try? report.write(to: directory.appending(path: "report.txt"), atomically: true, encoding: .utf8)
         print("Snapshots in \(directory.path)")
         NSApp.terminate(nil)
+    }
+
+    /// Sends a key press to the key window through the app, as the keyboard would.
+    @MainActor
+    private static func pressKey(keyCode: UInt16) {
+        guard let window = NSApp.keyWindow,
+            let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: "",
+                charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode)
+        else { return }
+        NSApp.sendEvent(event)
     }
 
     @MainActor
@@ -123,8 +144,9 @@ enum DebugSnapshots {
 
     @MainActor
     private static func save(_ window: NSWindow, to url: URL) {
-        // The frame view includes the title bar and toolbar.
-        guard let view = window.contentView?.superview,
+        // The frame view includes the title bar and toolbar; a borderless panel has only its
+        // content view.
+        guard let view = window.contentView?.superview ?? window.contentView,
             let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
         else { return }
         view.cacheDisplay(in: view.bounds, to: bitmap)

@@ -13,6 +13,11 @@ account back on a new Mac with a Recovery Kit.
   password. Each login can be edited (name, username, website, password and notes; notes
   stay hidden until shown, like the password), shared with one person, or deleted for
   everyone who can open it.
+- **Quick search:** ⇧⌘Space (Settings › General: ⌥⌘K, ⌃⌥⌘K or off) opens a Spotlight-style
+  box over any app. Type, pick with the arrows, and Return copies the password (Shift-Return
+  the username) and closes it, so the app you were in is still in front to paste into. It
+  unlocks with Touch ID first if needed. It uses Carbon's hot key API, which needs no
+  Accessibility permission and works in the App Sandbox.
 - **Menu bar icon:** a quick panel to search and copy without opening the window.
 - **Dock icon:** shown by default. Settings > General can turn it off, leaving only the
   menu bar icon.

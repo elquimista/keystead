@@ -6,11 +6,13 @@ struct KeysteadApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model: AppModel
     private let autoLock: AutoLock
+    private let quickSearch: QuickSearch
 
     init() {
         let model = KeysteadApp.launchModel()
         _model = State(initialValue: model)
         autoLock = AutoLock(model: model)
+        quickSearch = QuickSearch(model: model)
     }
 
     var body: some Scene {
