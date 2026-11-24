@@ -163,8 +163,29 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// List passwords to change: logins you can change that someone could open before
+    /// losing access
+    ToChange {
+        #[command(subcommand)]
+        action: Option<ToChangeCommand>,
+    },
     /// Fetch changes from the server
     Sync,
+}
+
+#[derive(Subcommand)]
+enum ToChangeCommand {
+    /// Take logins off the list without changing them: one login, everything one person
+    /// could see, or both
+    Dismiss {
+        #[arg(required_unless_present = "user")]
+        login: Option<String>,
+        #[arg(long, requires = "login")]
+        folder: Option<String>,
+        /// Only for this person
+        #[arg(long)]
+        user: Option<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -654,7 +675,10 @@ fn run(cli: Cli) -> Result<()> {
                     anyhow::bail!("add --yes to remove them without being asked");
                 }
                 println!("Their devices stop working and they lose every folder and login.");
-                println!("Passwords they've already seen can't be taken back; change those.");
+                println!(
+                    "Passwords they've already seen can't be taken back; change those \
+                     (`keystead to-change` lists them)."
+                );
                 print!("Remove user {user_id} from the team? [y/N] ");
                 std::io::Write::flush(&mut std::io::stdout())?;
                 let mut answer = String::new();
@@ -664,8 +688,14 @@ fn run(cli: Cli) -> Result<()> {
                     return Ok(());
                 }
             }
-            let name = commands::remove_user(&home, UserId(user_id))?;
+            let (name, to_change) = commands::remove_user(&home, UserId(user_id))?;
             println!("Removed {name} from the team.");
+            if to_change > 0 {
+                println!(
+                    "They could see {to_change} password(s) you can change; \
+                     `keystead to-change` lists them."
+                );
+            }
         }
         Command::Ls => {
             let rows = commands::list(&home)?
@@ -750,6 +780,43 @@ fn run(cli: Cli) -> Result<()> {
                     println!("Not deleted: {author} saved version {version} first.");
                     println!("Your copy now has their version; check it, then run rm again.");
                 }
+            }
+        }
+        Command::ToChange { action: None } => {
+            let rows = commands::to_change(&home)?;
+            if rows.is_empty() {
+                println!("Nothing to change.");
+            }
+            // One heading per person and day they lost access, most recent first.
+            let mut heading = None;
+            for row in rows {
+                let this = (row.user_id, date(row.since));
+                if heading.as_ref() != Some(&this) {
+                    println!(
+                        "{} (user {}) lost access {} and could have seen:",
+                        row.user_name, row.user_id, this.1
+                    );
+                    heading = Some(this);
+                }
+                match row.folder {
+                    Some(folder) => println!("  {}  ({folder})", row.name),
+                    None => println!("  {}", row.name),
+                }
+            }
+        }
+        Command::ToChange {
+            action:
+                Some(ToChangeCommand::Dismiss {
+                    login,
+                    folder,
+                    user,
+                }),
+        } => {
+            let count =
+                commands::dismiss(&home, login.as_deref(), folder.as_deref(), user.map(UserId))?;
+            match count {
+                0 => println!("Nothing like that to dismiss."),
+                count => println!("Dismissed {count}."),
             }
         }
         Command::Sync => {

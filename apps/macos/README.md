@@ -22,6 +22,10 @@ account back on a new Mac with a Recovery Kit.
   A group's managers in it add people; the owner and its managers remove people, rename
   it and change its managers. Taking someone out gives the group, and the folders shared
   with it, new keys in the background. Needs a 0.4.0 server.
+- **To Change:** when someone loses access, the passwords they could see that you can
+  change are listed under To Change in the sidebar, with a warning on each login and on the
+  person's page. Saving a new password takes a login off; Keep It (or Keep All, for someone
+  who only moved teams) keeps the password as it is. Needs a 0.5.0 server.
 - **Quick search:** ⇧⌘Space (Settings › General: ⌥⌘K, ⌃⌥⌘K or off) opens a Spotlight-style
   box over any app. Type, pick with the arrows, and Return copies the password (Shift-Return
   the username) and closes it, so the app you were in is still in front to paste into. It

@@ -10,10 +10,10 @@ use anyhow::{Context, Result, bail};
 use keystead_core::api::{
     AcceptInviteRequest, AddFolderGroupRequest, AddGroupMemberRequest, AddMemberRequest,
     ApprovalRequest, Conflict, CreateFolderRequest, CreateGroupRequest, DeviceList, Directory,
-    Enrolled, GroupFolderKey, GroupMemberKey, GroupRekeyRequest, GroupShare, Groups, Health,
-    Invite, InviteRequest, KeyLink, Member, MemberKey, Members, PutItemRequest, RecoverRequest,
-    RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest, SetupRequest,
-    SyncEntry, SyncPage, UpdateGroupRequest,
+    Enrolled, Exposures, GroupFolderKey, GroupMemberKey, GroupRekeyRequest, GroupShare, Groups,
+    Health, Invite, InviteRequest, KeyLink, Member, MemberKey, Members, PutItemRequest,
+    RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest,
+    SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring};
@@ -155,6 +155,21 @@ pub struct ItemRow {
     pub shared_with_me: bool,
     /// What you may do with it.
     pub role: Role,
+}
+
+/// A password to change: someone lost access to a login while its password stayed the
+/// same, so they may still know it.
+#[derive(Debug)]
+pub struct ToChangeRow {
+    pub item_id: ItemId,
+    pub name: String,
+    /// The login's folder, if it's in one of yours.
+    pub folder: Option<String>,
+    /// Who lost access.
+    pub user_id: UserId,
+    pub user_name: String,
+    /// When they lost access, in seconds since 1970 (UTC).
+    pub since: i64,
 }
 
 /// A group on the team.
@@ -546,6 +561,12 @@ impl Vault {
         match self.call(|client| client.get::<Groups>("/v1/groups", &[]))? {
             Ok(groups) => self.profile.team_groups = groups.groups,
             Err(Failure::Status { code: 404, .. }) => self.profile.team_groups.clear(),
+            Err(error) => return Err(error.into()),
+        }
+        // Servers before 0.5.0 don't keep track of passwords to change.
+        match self.call(|client| client.get::<Exposures>("/v1/exposures", &[]))? {
+            Ok(list) => self.profile.exposures = list.exposures,
+            Err(Failure::Status { code: 404, .. }) => self.profile.exposures.clear(),
             Err(error) => return Err(error.into()),
         }
         let rekey_needed = loop {
@@ -1350,6 +1371,83 @@ impl Vault {
         Ok(rows)
     }
 
+    /// Passwords to change, from the last sync: for each login this account can change, the
+    /// people who lost access to it while its password stayed the same. Most recent first.
+    /// Saving a new password, or deleting the login, takes it off the list.
+    pub fn to_change(&self) -> Result<Vec<ToChangeRow>> {
+        let mut folders = HashMap::new();
+        let mut rows = Vec::new();
+        for exposure in &self.profile.exposures {
+            let Some(item) = self
+                .profile
+                .items
+                .get(&exposure.item_id)
+                .filter(|item| !item.deleted)
+            else {
+                continue;
+            };
+            if self.profile.item_role(item) < Role::Edit {
+                continue;
+            }
+            let folder = match item.folder_id {
+                Some(folder_id) if self.profile.folders.contains_key(&folder_id) => {
+                    if let Entry::Vacant(slot) = folders.entry(folder_id) {
+                        slot.insert(self.profile.folder_name(
+                            &self.keys,
+                            &self.groups,
+                            folder_id,
+                        )?);
+                    }
+                    folders.get(&folder_id).cloned()
+                }
+                _ => None,
+            };
+            rows.push(ToChangeRow {
+                item_id: item.id,
+                name: item.open_overview(&self.item_key(item)?)?.name,
+                folder,
+                user_id: exposure.user_id,
+                user_name: self.profile.user_name(exposure.user_id),
+                since: exposure.since,
+            });
+        }
+        rows.sort_by(|a, b| {
+            (b.since, &a.user_name, &a.folder, &a.name).cmp(&(
+                a.since,
+                &b.user_name,
+                &b.folder,
+                &b.name,
+            ))
+        });
+        Ok(rows)
+    }
+
+    /// Takes a login off the list of passwords to change for one person: someone who can
+    /// change it decided it doesn't need changing.
+    pub fn dismiss(&mut self, item_id: ItemId, user: UserId) -> Result<()> {
+        let path = format!("/v1/items/{item_id}/exposures/{user}");
+        let () = self.call(|client| client.delete(&path))??;
+        self.profile
+            .exposures
+            .retain(|exposure| (exposure.item_id, exposure.user_id) != (item_id, user));
+        self.save()
+    }
+
+    /// Takes every login off the list for one person, as when they only moved teams.
+    /// Returns how many.
+    pub fn dismiss_all(&mut self, user: UserId) -> Result<usize> {
+        let items: Vec<ItemId> = self
+            .to_change()?
+            .into_iter()
+            .filter(|row| row.user_id == user)
+            .map(|row| row.item_id)
+            .collect();
+        for &item_id in &items {
+            self.dismiss(item_id, user)?;
+        }
+        Ok(items.len())
+    }
+
     pub fn find_item(&self, name: &str, folder: Option<&str>) -> Result<ItemId> {
         let folder_id = folder
             .map(|folder| self.profile.find_folder(&self.keys, &self.groups, folder))
@@ -1423,6 +1521,7 @@ impl Vault {
             item: EncryptedItem::seal(at, &key, keys, &self.keys, &overview, &details)?,
             roles: Vec::new(),
             group_roles: Vec::new(),
+            password_changed: false,
         };
         let path = format!("/v1/items/{id}");
         let saved: EncryptedItem = self.call(|client| client.put(&path, &request))??;
@@ -1460,7 +1559,7 @@ impl Vault {
         let current = self.live_item(item_id)?.clone();
         let (_, keys) = self.next_keys(&current)?;
         let tombstone = EncryptedItem::tombstone(self.next_version(&current), keys, &self.keys);
-        let outcome = self.put_version(&current, tombstone, Vec::new(), Vec::new())?;
+        let outcome = self.put_version(&current, tombstone, Vec::new(), Vec::new(), false)?;
         self.save()?;
         Ok(outcome)
     }
@@ -1644,6 +1743,9 @@ impl Vault {
             }
             People::DropGroup(group_id) => keys.groups.retain(|copy| copy.group_id != group_id),
         }
+        // Anyone who lost access earlier doesn't know a new password.
+        let previous = current.open_details(&self.item_key(current)?)?;
+        let password_changed = previous.password != details.password;
         let item = EncryptedItem::seal(
             self.next_version(current),
             &key,
@@ -1652,7 +1754,7 @@ impl Vault {
             overview,
             details,
         )?;
-        self.put_version(current, item, roles, group_roles)
+        self.put_version(current, item, roles, group_roles, password_changed)
     }
 
     /// The key and key copies for a deletion marker after `current`: the same ones, or for
@@ -1694,18 +1796,26 @@ impl Vault {
         item: EncryptedItem,
         roles: Vec<Member>,
         group_roles: Vec<GroupShare>,
+        password_changed: bool,
     ) -> Result<EditOutcome> {
         let request = PutItemRequest {
             base_version: Some(current.version),
             item,
             roles,
             group_roles,
+            password_changed,
         };
         let path = format!("/v1/items/{}", current.id);
         Ok(
             match self.call(|client| client.put::<_, EncryptedItem>(&path, &request))? {
                 Ok(saved) => {
                     let version = saved.version;
+                    // The server forgets who could have seen the old password too.
+                    if password_changed || saved.deleted {
+                        self.profile
+                            .exposures
+                            .retain(|exposure| exposure.item_id != saved.id);
+                    }
                     self.profile.items.insert(saved.id, saved);
                     EditOutcome::Saved { version }
                 }

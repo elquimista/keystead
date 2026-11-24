@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use keystead_core::api::{GroupInfo, KeyLink, Role, Roles, ViaGroup};
+use keystead_core::api::{Exposure, GroupInfo, KeyLink, Role, Roles, ViaGroup};
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
@@ -89,6 +89,10 @@ pub struct Profile {
     /// Every group on the team, to share with, from the last sync. Empty before 0.4.0.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub team_groups: Vec<GroupInfo>,
+    /// Passwords to change: people who lost access to items this account can change, from
+    /// the last sync. Empty before 0.5.0.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposures: Vec<Exposure>,
 }
 
 impl Profile {
@@ -112,6 +116,7 @@ impl Profile {
             roles: None,
             groups: BTreeMap::new(),
             team_groups: Vec::new(),
+            exposures: Vec::new(),
         }
     }
 

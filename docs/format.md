@@ -360,6 +360,8 @@ codes (400, 401, 403, 404, 409).
 | `GET /v1/items/{id}/people` | | `Members` | Anyone who can open the item |
 | `PUT /v1/items/{id}/people/{user}` | `RoleRequest` | 204 | Managers of the item |
 | `PUT /v1/items/{id}/groups/{group}` | `RoleRequest` | 204 | Managers of the item |
+| `DELETE /v1/items/{id}/exposures/{user}` | | 204 | Editors and managers of the item |
+| `GET /v1/exposures` | | `Exposures` | Members; only items they can change |
 | `GET /v1/sync?cursor=N&limit=M` | | `SyncPage` | Members |
 
 `Health` is `{"status", "version", "item_format"}`. `item_format` is the newest item
@@ -376,8 +378,9 @@ back to format 1, and everyone newly in `people` must be approved and not remove
 or dropping a group also takes a manager; a group new to the item gets its copy at the
 group's current generation, and no copy may name a generation the group hasn't reached.
 `PutItemRequest.roles` gives the roles of people new to `people`, and `group_roles` those
-of groups new to `groups`. If another version was saved first, it answers 409 with that
-version.
+of groups new to `groups`, and `password_changed` (left out when false) that its password
+differs from the previous version's (see Passwords to change). If another version was
+saved first, it answers 409 with that version.
 
 ### Roles
 
@@ -444,7 +447,25 @@ each for a new key) and every item shared with them. Their directory entry stays
 true`, so what they signed still verifies; nobody can share with them again, and their
 account can't be recovered. A folder left without a manager gets one: whoever has been
 in it longest. Clients drop removed people's copies from items as they save them.
-Passwords someone has already seen can't be taken back; apps list the ones to change.
+
+**Passwords to change** (0.5.0 and later). New keys protect what's saved afterwards, but
+passwords someone already saw can't be taken back. So whenever someone loses access to an
+item (any of the ways above, or leaving), the server records an **exposure**: the item,
+the user and when (`since`, seconds since 1970). It ends when:
+
+- a version with a new password is saved: the client compares it with the previous
+  version's and says so with `PutItemRequest.password_changed`, as only clients can read
+  passwords;
+- the item is deleted;
+- someone who can change the item dismisses it
+  (`DELETE /v1/items/{id}/exposures/{user}`), for example when the person only moved to
+  another team;
+- or, for as long as they can open the item again (and aren't removed from the team), it
+  isn't listed.
+
+`GET /v1/exposures` lists them for the items the caller can change (edit or manage), so
+the remover sees what they can fix, and the managers of folders the remover can't open see
+the rest. Servers before 0.5.0 record nothing and answer 404; clients then show no list.
 
 **Sync** returns feed entries after the cursor, in change-number order, from one
 consistent snapshot:
@@ -472,8 +493,8 @@ with them or their groups directly, the highest of the ways in), and every page
 
 ## Not in this format yet
 
-- Adding a second device by approving it from an existing one, and recovery that the team owner approves.
-  (A recovery kit can already add a device.)
+- Adding a second device by approving it from an existing one, and recovery that the team
+  owner approves. (A recovery kit can already add a device.)
 - Signed membership changes. Roles and memberships are enforced by the server; a
   server that lied could let someone save who shouldn't, though every version stays
   signed by its author. A group's managers and key are signed; who is in it isn't.

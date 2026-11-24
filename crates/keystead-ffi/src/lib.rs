@@ -298,6 +298,21 @@ pub struct ItemSummary {
     pub role: Role,
 }
 
+/// A password to change: someone lost access to a login while its password stayed the
+/// same, so they may still know it.
+#[derive(uniffi::Record)]
+pub struct ToChange {
+    pub item_id: String,
+    pub name: String,
+    /// The login's folder, if it's in one of yours.
+    pub folder: Option<String>,
+    /// Who lost access.
+    pub user_id: i64,
+    pub user_name: String,
+    /// When they lost access, in seconds since 1970 (UTC).
+    pub since: i64,
+}
+
 #[derive(uniffi::Record)]
 pub struct SyncResult {
     pub received: u32,
@@ -656,6 +671,38 @@ impl Vault {
     /// Removes someone from the team (owner only). Returns their name.
     pub fn remove_user(&self, user_id: i64) -> Result<String, CoreError> {
         Ok(self.vault()?.remove_user(UserId(user_id))?)
+    }
+
+    /// Passwords to change, from the last sync, most recent first: logins you can change
+    /// that someone could open before losing access. Saving a new password, or deleting
+    /// the login, takes it off.
+    pub fn to_change(&self) -> Result<Vec<ToChange>, CoreError> {
+        Ok(self
+            .vault()?
+            .to_change()?
+            .into_iter()
+            .map(|row| ToChange {
+                item_id: row.item_id.to_string(),
+                name: row.name,
+                folder: row.folder,
+                user_id: row.user_id.0,
+                user_name: row.user_name,
+                since: row.since,
+            })
+            .collect())
+    }
+
+    /// Takes a login off the list for one person, without changing its password.
+    pub fn dismiss_to_change(&self, item_id: String, user_id: i64) -> Result<(), CoreError> {
+        Ok(self
+            .vault()?
+            .dismiss(item_id_from(&item_id)?, UserId(user_id))?)
+    }
+
+    /// Takes everything one person could see off the list. Returns how many.
+    pub fn dismiss_all_to_change(&self, user_id: i64) -> Result<u32, CoreError> {
+        let count = self.vault()?.dismiss_all(UserId(user_id))?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
     /// Adds a login to a folder, or with no folder as yours alone until you share it.

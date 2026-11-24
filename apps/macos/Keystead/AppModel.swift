@@ -25,6 +25,8 @@ final class AppModel {
         /// Logins shared with you one by one, outside your folders.
         case sharedWithMe
         case folder(String)
+        /// Logins whose passwords someone who lost access may still know.
+        case toChange
         case people
         case groups
     }
@@ -86,6 +88,9 @@ final class AppModel {
     private(set) var users: [User] = []
     /// The team's groups, by name.
     private(set) var groups: [GroupSummary] = []
+    /// Passwords to change: who lost access to which logins you can change, most recent
+    /// first.
+    private(set) var toChange: [ToChange] = []
     /// This account's devices, this Mac included.
     private(set) var devices: [AccountDevice] = []
     /// Why the device list couldn't be loaded, such as a server older than 0.2.0.
@@ -126,6 +131,7 @@ final class AppModel {
             switch section {
             case .folder(let folder): guard item.folder == folder else { return false }
             case .sharedWithMe: guard item.sharedWithMe else { return false }
+            case .toChange: guard toChange.contains(where: { $0.itemId == item.id }) else { return false }
             case .allLogins, .people, .groups: break
             }
             let text = "\(item.name) \(item.username) \(item.url) \(item.folder ?? "") \(item.owner ?? "")"
@@ -136,6 +142,14 @@ final class AppModel {
 
     /// Whether any login was shared with you one by one, so the sidebar shows them.
     var hasSharedWithMe: Bool { items.contains(where: \.sharedWithMe) }
+
+    /// Who lost access to this login while its password stayed the same, most recent first.
+    func toChange(for item: ItemSummary) -> [ToChange] {
+        toChange.filter { $0.itemId == item.id }
+    }
+
+    /// How many logins are on the To Change list.
+    var toChangeCount: Int { Set(toChange.map(\.itemId)).count }
 
     var filteredItems: [ItemSummary] { items(matching: search) }
 
@@ -595,10 +609,30 @@ final class AppModel {
         }
     }
 
-    /// Removes someone from the team (owner only).
+    /// Removes someone from the team (owner only), then says how many of the passwords they
+    /// could see you can change.
     func remove(user: User) async throws {
         _ = try await perform { try $0.removeUser(userId: user.userId) }
         users = try await perform { try $0.users() }
+        await reloadLocal()
+        let count = Set(toChange.filter { $0.userId == user.userId }.map(\.itemId)).count
+        if count > 0 {
+            message = "\(user.name) could see \(count == 1 ? "1 password" : "\(count) passwords") "
+                + "you can change. They're listed under To Change."
+        }
+    }
+
+    /// Takes a login off To Change without changing its password, for everyone listed on it.
+    func dismissToChange(of item: ItemSummary) async throws {
+        for entry in toChange(for: item) {
+            try await perform { try $0.dismissToChange(itemId: entry.itemId, userId: entry.userId) }
+        }
+        await reloadLocal()
+    }
+
+    /// Takes everything one person could see off To Change, as when they only moved teams.
+    func dismissAllToChange(for userId: Int64) async throws {
+        _ = try await perform { try $0.dismissAllToChange(userId: userId) }
         await reloadLocal()
     }
 
@@ -691,6 +725,7 @@ final class AppModel {
         do {
             items = try await perform { try $0.items() }
             groups = try await perform { try $0.groups() }.sorted { $0.name < $1.name }
+            toChange = try await perform { try $0.toChange() }
             let summaries = try await perform { try $0.folderSummaries() }
             folders = summaries.map(\.name).sorted()
             folderRoles = Dictionary(summaries.map { ($0.name, $0.role) }, uniquingKeysWith: { a, _ in a })
@@ -776,6 +811,15 @@ extension AppModel {
                     id: "00000000-0000-4000-8000-0000000000a2", name: "On-call",
                     members: [GroupMember(userId: 2, name: "Mo", isManager: true, isMe: false)],
                     isMember: false, canManage: true, canAdd: false),
+            ]
+            // Pat, removed from the team, could see two of Olivia's logins.
+            model.toChange = [
+                ToChange(
+                    itemId: "00000000-0000-4000-8000-000000000001", name: "AWS root",
+                    folder: "Production", userId: 4, userName: "Pat", since: 1_795_500_000),
+                ToChange(
+                    itemId: "00000000-0000-4000-8000-000000000003", name: "Bank",
+                    folder: nil, userId: 4, userName: "Pat", since: 1_795_500_000),
             ]
         }
         return model

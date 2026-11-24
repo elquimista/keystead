@@ -12,8 +12,8 @@ mod vault;
 
 pub use vault::{
     DeviceRow, EditOutcome, GroupMemberRow, GroupRow, GroupShareRow, InviteInfo, ItemRow,
-    MemberRow, NewAccount, SyncSummary, UserRow, Vault, Whoami, generate_password, join, recover,
-    setup,
+    MemberRow, NewAccount, SyncSummary, ToChangeRow, UserRow, Vault, Whoami, generate_password,
+    join, recover, setup,
 };
 
 use keystead_core::encoding::Bytes;

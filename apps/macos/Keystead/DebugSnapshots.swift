@@ -35,6 +35,8 @@ enum DebugSnapshots {
             steps += [
                 ("3-person-waiting", { model.selectedUserID = 3 }),
                 ("4-person-approved", { model.selectedUserID = 2 }),
+                // Pat was removed and could see two of Olivia's logins.
+                ("4a-person-removed", { model.selectedUserID = 4 }),
                 ("5-person-you", { model.selectedUserID = 1 }),
                 ("5a-recovery-kit", { model.sheet = .recoveryKit(afterSetup: false) }),
                 ("5b-kit-closed", { model.sheet = nil }),
@@ -90,6 +92,10 @@ enum DebugSnapshots {
                     model.sheet = .shareLogin(model.items[2])
                 }),
                 ("6e8-closed", { model.sheet = nil }),
+                ("6e9-to-change", {
+                    model.section = .toChange
+                    model.selectedItemID = model.items[0].id
+                }),
                 ("6f-quick-search", { QuickSearch.shared?.show(query: "a") }),
                 // The down arrow, as the keyboard sends it: the second match is picked.
                 ("6f2-quick-search-down", { pressKey(keyCode: 125) }),

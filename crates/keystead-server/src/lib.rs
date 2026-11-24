@@ -154,6 +154,15 @@ const MIGRATIONS: &[&str] = &[
          item_id TEXT NOT NULL
      );
      CREATE INDEX item_join_log_user ON item_join_log (user_id, seq);",
+    // 5 (0.5.0): passwords to change. Whoever loses access to an item may still know its
+    // password, until a version with a new one is saved (`vault::reconcile`, `put_item`).
+    // Nothing was recorded before, so it starts empty.
+    "CREATE TABLE exposures (
+         item_id TEXT NOT NULL,
+         user_id INTEGER NOT NULL,
+         since INTEGER NOT NULL,
+         PRIMARY KEY (item_id, user_id)
+     ) WITHOUT ROWID;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -271,6 +280,11 @@ pub fn router(state: AppState) -> Router {
             "/v1/items/{item_id}/groups/{group_id}",
             put(vault::set_item_group_role),
         )
+        .route(
+            "/v1/items/{item_id}/exposures/{user_id}",
+            delete(vault::dismiss_exposure),
+        )
+        .route("/v1/exposures", get(vault::exposures))
         .route("/v1/sync", get(vault::sync))
         .with_state(state)
 }

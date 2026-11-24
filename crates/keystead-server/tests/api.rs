@@ -225,6 +225,7 @@ impl Person {
                     item: item.clone(),
                     roles,
                     group_roles: Vec::new(),
+                    password_changed: false,
                 }),
             )
             .await
@@ -1299,7 +1300,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }
@@ -1842,6 +1843,7 @@ async fn groups_share_folders_and_logins_and_lose_access_when_someone_leaves() {
             group_id,
             role: Role::View,
         }],
+        password_changed: false,
     };
     let (status, _) = server
         .call(

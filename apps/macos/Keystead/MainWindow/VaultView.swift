@@ -72,6 +72,12 @@ struct VaultView: View {
                 model.section = .allLogins
             }
         }
+        .onChange(of: model.toChange.isEmpty) {
+            // The last one was changed or dismissed; the login stays selected.
+            if model.toChange.isEmpty && model.section == .toChange {
+                model.section = .allLogins
+            }
+        }
     }
 }
 
@@ -86,6 +92,12 @@ private struct Sidebar: View {
             if model.hasSharedWithMe {
                 Label("Shared with Me", systemImage: "shared.with.you")
                     .tag(AppModel.Section.sharedWithMe)
+            }
+            if !model.toChange.isEmpty {
+                Label("To Change", systemImage: "exclamationmark.triangle")
+                    .badge(model.toChangeCount)
+                    .tag(AppModel.Section.toChange)
+                    .help("Passwords that people who lost access may still know")
             }
             Section("Folders") {
                 ForEach(model.folders, id: \.self) { folder in
@@ -157,6 +169,7 @@ private struct LoginList: View {
         switch section {
         case .folder(let folder): folder
         case .sharedWithMe: "Shared with Me"
+        case .toChange: "To Change"
         case .allLogins, .people, .groups: "All Logins"
         }
     }
@@ -167,14 +180,16 @@ private struct LoginList: View {
             if items.isEmpty {
                 emptyState
             } else {
-                List(items, selection: $selection) { item in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.name)
-                        Text(subtitle(for: item))
-                            .font(.caption)
+                List(selection: $selection) {
+                    if section == .toChange {
+                        Text("People who lost access may still know these passwords. Change "
+                            + "each one at its website, then save the new one here.")
+                            .font(.callout)
                             .foregroundStyle(.secondary)
+                            .padding(.bottom, 4)
+                            .selectionDisabled()
                     }
-                    .padding(.vertical, 2)
+                    rows(items)
                 }
                 .contextMenu(forSelectionType: ItemSummary.ID.self) { ids in
                     if let item = items.first(where: { ids.contains($0.id) }) {
@@ -224,8 +239,26 @@ private struct LoginList: View {
         }
     }
 
-    /// The username, and outside a folder's own list, where the login lives.
+    private func rows(_ items: [ItemSummary]) -> some View {
+        ForEach(items) { item in
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name)
+                Text(subtitle(for: item))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    /// The username, and outside a folder's own list, where the login lives. On To Change,
+    /// who lost access instead.
     private func subtitle(for item: ItemSummary) -> String {
+        if section == .toChange {
+            let entries = model.toChange(for: item)
+            let names = ListFormatter.localizedString(byJoining: entries.map(\.userName))
+            return "\(names) lost access \(day(entries.first?.since ?? 0))"
+        }
         let parts = [item.username, folder == nil ? item.place : ""].filter { !$0.isEmpty }
         return parts.joined(separator: " · ")
     }
@@ -234,6 +267,11 @@ private struct LoginList: View {
     private var emptyState: some View {
         if !search.trimmed.isEmpty {
             ContentUnavailableView.search(text: search)
+        } else if section == .toChange {
+            ContentUnavailableView(
+                "Nothing to change", systemImage: "checkmark.shield",
+                description: Text("When someone loses access, the passwords they could see show "
+                    + "up here."))
         } else if section == .sharedWithMe {
             ContentUnavailableView(
                 "Nothing shared with you", systemImage: "shared.with.you",
@@ -369,6 +407,35 @@ private struct LoginDetail: View {
                 Text(item.name)
                     .font(.title2.weight(.semibold))
                     .padding(.bottom, 4)
+            }
+            let exposures = model.toChange(for: item)
+            if !exposures.isEmpty {
+                Section {
+                    Label {
+                        Text("\(ListFormatter.localizedString(byJoining: exposures.map(\.userName))) "
+                            + "could see this password until losing access \(day(exposures[0].since)), "
+                            + "and may still know it. Change it at the website, then save the new "
+                            + "one here.")
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    HStack {
+                        Button("Change Password…") { model.sheet = .editLogin(item) }
+                        Spacer()
+                        Button("Keep It") {
+                            Task {
+                                do {
+                                    try await model.dismissToChange(of: item)
+                                } catch let failure {
+                                    error = describe(failure)
+                                }
+                            }
+                        }
+                        .help("Take it off To Change without changing the password")
+                    }
+                }
             }
             Section {
                 HStack {
@@ -532,6 +599,7 @@ private struct PersonDetail: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                PasswordsToChange(model: model, user: user)
             } else {
                 Section {
                     Text("Share a folder to give \(user.name) its logins: everything in it now, "
@@ -540,6 +608,7 @@ private struct PersonDetail: View {
                     Button("Share a Folder…") { model.sheet = .share(folder: nil, user: user) }
                         .disabled(!model.folders.contains { model.manages(folder: $0) })
                 }
+                PasswordsToChange(model: model, user: user)
                 if model.isOwner && !user.isOwner {
                     Section {
                         Text("Removing \(user.name) stops their devices and takes away every "
@@ -553,6 +622,50 @@ private struct PersonDetail: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// The passwords someone could see before losing access that you can change, if any.
+private struct PasswordsToChange: View {
+    let model: AppModel
+    let user: User
+    @State private var confirming = false
+    @State private var error: String?
+
+    var body: some View {
+        let entries = model.toChange.filter { $0.userId == user.userId }
+        if !entries.isEmpty {
+            Section("Passwords to change") {
+                Text("\(user.name) could see \(entries.count == 1 ? "1 password" : "\(entries.count) passwords") "
+                    + "you can change, until losing access \(day(entries[0].since)).")
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Show") { model.section = .toChange }
+                    Spacer()
+                    Button("Keep All…") { confirming = true }
+                }
+                if let error {
+                    Text(error)
+                        .foregroundStyle(.red)
+                }
+            }
+            .confirmationDialog(
+                "Keep every password \(user.name) could see?", isPresented: $confirming
+            ) {
+                Button("Keep All") {
+                    Task {
+                        do {
+                            try await model.dismissAllToChange(for: user.userId)
+                        } catch let failure {
+                            error = describe(failure)
+                        }
+                    }
+                }
+            } message: {
+                Text("They come off To Change without new passwords. Do this when \(user.name) "
+                    + "only moved to another team; after someone leaves, change them instead.")
+            }
+        }
     }
 }
 
@@ -835,6 +948,11 @@ func status(of user: User) -> String {
     if user.isOwner { return "Owner" }
     if user.removed { return "Removed" }
     return user.approved ? "Approved" : "Waiting for approval"
+}
+
+/// "on Nov 24, 2026" from seconds since 1970.
+func day(_ seconds: Int64) -> String {
+    "on " + Date(timeIntervalSince1970: TimeInterval(seconds)).formatted(date: .abbreviated, time: .omitted)
 }
 
 /// "keys.example.com" from "https://keys.example.com".

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 pub use keystead_client::{
     DeviceRow, EditOutcome, GroupRow, GroupShareRow, InviteInfo, ItemRow, MemberRow, SyncSummary,
-    UserRow, Whoami, generate_password,
+    ToChangeRow, UserRow, Whoami, generate_password,
 };
 use keystead_client::{NewAccount, Vault};
 pub use keystead_core::api::Role;
@@ -189,9 +189,47 @@ pub fn leave_folder(home: &Path, folder: &str) -> Result<()> {
     vault.remove_from_folder(folder, me)
 }
 
-/// Removes someone from the team (owner only). Returns their name.
-pub fn remove_user(home: &Path, user: UserId) -> Result<String> {
-    open(home)?.remove_user(user)
+/// Removes someone from the team (owner only). Returns their name, and how many of the
+/// passwords they could see the caller can change.
+pub fn remove_user(home: &Path, user: UserId) -> Result<(String, usize)> {
+    let mut vault = open(home)?;
+    let name = vault.remove_user(user)?;
+    let to_change = vault.to_change()?;
+    Ok((
+        name,
+        to_change.iter().filter(|row| row.user_id == user).count(),
+    ))
+}
+
+/// Passwords to change, most recent first.
+pub fn to_change(home: &Path) -> Result<Vec<ToChangeRow>> {
+    refreshed(home)?.to_change()
+}
+
+/// Takes logins off the list of passwords to change: one login (for everyone, or one
+/// person), or everything one person could see. Returns how many entries went.
+pub fn dismiss(
+    home: &Path,
+    login: Option<&str>,
+    folder: Option<&str>,
+    user: Option<UserId>,
+) -> Result<usize> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item = login
+        .map(|name| vault.find_item(name, folder))
+        .transpose()?;
+    let entries: Vec<_> = vault
+        .to_change()?
+        .into_iter()
+        .filter(|row| item.is_none_or(|id| id == row.item_id))
+        .filter(|row| user.is_none_or(|user| user == row.user_id))
+        .map(|row| (row.item_id, row.user_id))
+        .collect();
+    for &(item_id, user) in &entries {
+        vault.dismiss(item_id, user)?;
+    }
+    Ok(entries.len())
 }
 
 pub fn folders(home: &Path) -> Result<Vec<String>> {

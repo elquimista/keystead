@@ -18,9 +18,9 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use keystead_core::api::{
-    AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, FolderRole, GroupShare, ItemRole,
-    KeyLink, Member, Members, PutItemRequest, RekeyRequest, Role, RoleRequest, Roles, SyncEntry,
-    SyncPage, ViaGroup,
+    AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, Exposure, Exposures, FolderRole,
+    GroupShare, ItemRole, KeyLink, Member, Members, PutItemRequest, RekeyRequest, Role,
+    RoleRequest, Roles, SyncEntry, SyncPage, ViaGroup,
 };
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
@@ -643,6 +643,14 @@ pub(crate) async fn put_item(
             .bind(item_id.to_string())
             .bind(group.to_string())
             .bind(role.name())
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // Nobody who lost access earlier knows a new password, and a deleted item has none.
+    if request.password_changed || item.deleted {
+        sqlx::query("DELETE FROM exposures WHERE item_id = ?")
+            .bind(item_id.to_string())
             .execute(&mut *tx)
             .await?;
     }
@@ -1471,6 +1479,16 @@ pub(crate) async fn reconcile(conn: &mut SqliteConnection, user: UserId) -> Resu
         .bind(folder_id)
         .execute(&mut *conn)
         .await?;
+        // They could see every password in it.
+        sqlx::query(&format!(
+            "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
+             WHERE folder_id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
+             {EXPOSE_AGAIN}"
+        ))
+        .bind(user.0)
+        .bind(folder_id)
+        .execute(&mut *conn)
+        .await?;
     }
 
     let reachable: BTreeSet<String> = sqlx::query_scalar(
@@ -1518,8 +1536,93 @@ pub(crate) async fn reconcile(conn: &mut SqliteConnection, user: UserId) -> Resu
             .bind(item_id)
             .execute(&mut *conn)
             .await?;
+        sqlx::query(&format!(
+            "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
+             WHERE id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
+             {EXPOSE_AGAIN}"
+        ))
+        .bind(user.0)
+        .bind(item_id)
+        .execute(&mut *conn)
+        .await?;
     }
     Ok(())
+}
+
+/// Records that someone lost access to items while their passwords stayed the same; the
+/// `SELECT` gives item id, user id and the time.
+const EXPOSE: &str = "INSERT INTO exposures (item_id, user_id, since)";
+/// Losing access again moves the time on.
+const EXPOSE_AGAIN: &str = "ON CONFLICT (item_id, user_id) DO UPDATE SET since = excluded.since";
+
+/// `GET /v1/exposures`: who may still know the passwords of the items the caller can
+/// change, because they lost access since those passwords were set. People who can open
+/// the item again (and aren't removed from the team) are left out.
+pub(crate) async fn exposures(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Exposures>, ApiError> {
+    let mut conn = state.readers.acquire().await?;
+    let rows: Vec<(String, i64, i64, String)> = sqlx::query_as(
+        "SELECT e.item_id, e.user_id, e.since, i.body FROM exposures e
+         JOIN items i ON i.id = e.item_id
+         WHERE (i.folder_id IN (SELECT folder_id FROM access WHERE user_id = ?1)
+                OR e.item_id IN (SELECT item_id FROM item_reach WHERE user_id = ?1))
+           AND NOT EXISTS (
+               SELECT 1 FROM users u
+               WHERE u.id = e.user_id AND u.removed_at IS NULL
+                 AND (i.folder_id IN (SELECT folder_id FROM access WHERE user_id = u.id)
+                      OR e.item_id IN (SELECT item_id FROM item_reach WHERE user_id = u.id)))
+         ORDER BY e.since DESC, e.item_id, e.user_id",
+    )
+    .bind(auth.user_id.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut can_change: HashMap<String, bool> = HashMap::new();
+    let mut exposures = Vec::new();
+    for (item_id, user_id, since, body) in rows {
+        let allowed = match can_change.get(&item_id) {
+            Some(&allowed) => allowed,
+            None => {
+                let item: EncryptedItem = serde_json::from_str(&body)?;
+                let role = item_role(&mut conn, auth.user_id, &item).await?;
+                let allowed = role >= Some(Role::Edit) && !item.deleted;
+                can_change.insert(item_id.clone(), allowed);
+                allowed
+            }
+        };
+        if allowed {
+            exposures.push(Exposure {
+                item_id: parse_item(&item_id)?,
+                user_id: UserId(user_id),
+                since,
+            });
+        }
+    }
+    Ok(Json(Exposures { exposures }))
+}
+
+/// `DELETE /v1/items/{item_id}/exposures/{user_id}`: someone who can change the item
+/// decides the password doesn't need changing after all.
+pub(crate) async fn dismiss_exposure(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((item_id, user_id)): Path<(ItemId, i64)>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    let item = stored_item(&mut tx, item_id).await?;
+    require(
+        item_role(&mut tx, auth.user_id, &item).await?,
+        Role::Edit,
+        "dismiss this",
+    )?;
+    sqlx::query("DELETE FROM exposures WHERE item_id = ? AND user_id = ?")
+        .bind(item_id.to_string())
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) fn parse_folder(text: &str) -> Result<FolderId, ApiError> {

@@ -302,6 +302,29 @@ pub struct PutItemRequest {
     /// Roles for the groups this version gives a key copy to for the first time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_roles: Vec<GroupShare>,
+    /// This version has a different password from the one before, so people who lost
+    /// access earlier no longer know it: the server drops the item's [`Exposure`]s.
+    /// Servers before 0.5.0 ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub password_changed: bool,
+}
+
+/// Someone who could open an item lost access to it, so they may still know its password.
+/// It stays until a version with a new password is saved, the item is deleted, someone
+/// dismisses it, or they get access again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exposure {
+    pub item_id: ItemId,
+    pub user_id: UserId,
+    /// When they last lost access, in seconds since 1970 (UTC).
+    pub since: i64,
+}
+
+/// `GET /v1/exposures`: the exposures of every item the caller can change (edit or
+/// manage). Servers before 0.5.0 answer 404.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Exposures {
+    pub exposures: Vec<Exposure>,
 }
 
 /// `POST /v1/folders/{folder_id}/groups` (folder managers): shares a folder with a group.

@@ -113,6 +113,17 @@ keystead remove-user 3               # owner: remove someone from the team (asks
 A login added without `--folder` is yours alone until you share it. `keystead share`
 shares one login, from a folder or not, without the rest of its folder.
 
+New keys protect what's saved after someone loses access, but not passwords they already
+saw. Keystead keeps a list of those for everyone who can change them, until a new password
+is saved (needs a 0.5.0 server):
+
+```sh
+keystead to-change                       # who lost access, and which passwords they could see
+keystead edit "AWS root"                 # a new password takes it off the list
+keystead to-change dismiss Bank          # keep a password as it is
+keystead to-change dismiss --user 3      # everything user 3 could see, if they only moved teams
+```
+
 Groups share folders and logins with several people at once, and people added later get
 them too. The owner makes groups; a group's managers add and remove people. Taking
 someone out gives the group, and the folders shared with it, new keys.

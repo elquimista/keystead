@@ -514,6 +514,7 @@ fn one_login_from_a_folder_can_be_shared_alone() {
                 item: old.clone(),
                 roles: Vec::new(),
                 group_roles: Vec::new(),
+                password_changed: false,
             },
         )
         .unwrap();
@@ -576,6 +577,7 @@ fn one_login_from_a_folder_can_be_shared_alone() {
                 item: legacy.clone(),
                 roles: Vec::new(),
                 group_roles: Vec::new(),
+                password_changed: false,
             },
         )
         .unwrap();
@@ -880,4 +882,112 @@ fn groups_share_folders_and_logins_and_lose_access_when_someone_leaves() {
     alice.rename_group("Ops", "Operations").unwrap();
     bob.sync().unwrap();
     assert_eq!(bob.groups()[0].name, "Operations");
+}
+
+#[test]
+fn passwords_to_change_after_someone_loses_access() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let alice_id = alice.whoami().user_id;
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+    let names = |vault: &Vault| -> Vec<(String, String)> {
+        vault
+            .to_change()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.name, row.user_name))
+            .collect()
+    };
+
+    // Bob edits in Production and Carol views it; Bob also made a login of his own.
+    alice.create_folder("Production").unwrap();
+    for (name, password) in [("Database", "db-1"), ("Deploy key", "dk-1")] {
+        let (overview, details) = login(name, password);
+        alice.add(Some("Production"), overview, details).unwrap();
+    }
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    alice
+        .share_folder("Production", carol_identity.user_id, Role::View)
+        .unwrap();
+    bob.sync().unwrap();
+    let (overview, details) = login("VPN", "vpn-1");
+    let vpn = bob.add(None, overview, details).unwrap();
+    bob.share_item(vpn, alice_id, Role::Edit).unwrap();
+    alice.sync().unwrap();
+    assert!(names(&alice).is_empty());
+
+    // Bob leaves Production: he could see both passwords. Alice can change them, so she
+    // sees them; Carol only views, so she doesn't.
+    alice.remove_from_folder("Production", bob_id).unwrap();
+    alice.sync().unwrap();
+    let rows = alice.to_change().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.user_id == bob_id
+        && row.folder.as_deref() == Some("Production")
+        && row.since > 1_700_000_000));
+    carol.sync().unwrap();
+    assert!(names(&carol).is_empty());
+
+    // Saving without a new password keeps it on the list; a new password takes it off.
+    let database = alice.find_item("Database", None).unwrap();
+    let (mut overview, details) = alice.open_item(database).unwrap();
+    overview.username = "admin".into();
+    alice.update(database, &overview, &details).unwrap();
+    alice.sync().unwrap();
+    assert_eq!(names(&alice).len(), 2);
+    alice.edit(database, "db-2").unwrap();
+    assert_eq!(names(&alice), [("Deploy key".into(), "Bob".into())]);
+    alice.sync().unwrap();
+    assert_eq!(names(&alice), [("Deploy key".into(), "Bob".into())]);
+
+    // Dismissed, it's gone for good.
+    let deploy_key = alice.find_item("Deploy key", None).unwrap();
+    assert!(
+        carol.dismiss(deploy_key, bob_id).is_err(),
+        "viewers can't dismiss"
+    );
+    alice.dismiss(deploy_key, bob_id).unwrap();
+    alice.sync().unwrap();
+    assert!(names(&alice).is_empty());
+
+    // Someone who gets access back isn't listed; removed from the team, they are again,
+    // with what they made themselves.
+    alice
+        .share_folder("Production", bob_id, Role::View)
+        .unwrap();
+    alice.remove_from_folder("Production", bob_id).unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::View)
+        .unwrap();
+    alice.sync().unwrap();
+    assert!(names(&alice).is_empty());
+    alice.remove_user(bob_id).unwrap();
+    let mut listed = names(&alice);
+    listed.sort();
+    assert_eq!(
+        listed,
+        [
+            ("Database".into(), "Bob".into()),
+            ("Deploy key".into(), "Bob".into()),
+            ("VPN".into(), "Bob".into()),
+        ]
+    );
+
+    // Deleting a login takes it off; the rest go in one step.
+    alice.delete(vpn).unwrap();
+    assert_eq!(names(&alice).len(), 2);
+    assert_eq!(alice.dismiss_all(bob_id).unwrap(), 2);
+    alice.sync().unwrap();
+    assert!(names(&alice).is_empty());
 }
