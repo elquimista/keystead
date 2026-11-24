@@ -31,6 +31,10 @@ account back on a new Mac with a Recovery Kit.
   Its details then show the current code with the seconds it has left; copying it works
   like copying the password. Logins with codes need a 0.6.0 server, and apps before 0.6.0
   can't open them.
+- **History:** History… on a login lists its earlier versions (the server keeps the last
+  10): who saved each, when, and what it changed. Each one's password can be shown or
+  copied, and Bring Back… saves it as a new version. Editors and managers only; needs a
+  0.7.0 server.
 - **Quick search:** ⇧⌘Space (Settings › General: ⌥⌘K, ⌃⌥⌘K or off) opens a Spotlight-style
   box over any app. Type, pick with the arrows, and Return copies the password (Shift-Return
   the username, Option-Return the one-time code) and closes it, so the app you were in is

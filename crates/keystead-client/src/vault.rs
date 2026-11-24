@@ -11,9 +11,9 @@ use keystead_core::api::{
     AcceptInviteRequest, AddFolderGroupRequest, AddGroupMemberRequest, AddMemberRequest,
     ApprovalRequest, Conflict, CreateFolderRequest, CreateGroupRequest, DeviceList, Directory,
     Enrolled, Exposures, GroupFolderKey, GroupMemberKey, GroupRekeyRequest, GroupShare, Groups,
-    Health, Invite, InviteRequest, KeyLink, Member, MemberKey, Members, PutItemRequest,
-    RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest,
-    SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
+    Health, Invite, InviteRequest, ItemHistory, KeyLink, Member, MemberKey, Members,
+    PutItemRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest,
+    Role, RoleRequest, SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring};
@@ -43,6 +43,9 @@ const NEEDS_0_4: &str = "the server is older than Keystead 0.4.0 and doesn't hav
 /// One-time codes came with 0.6.0 (item format 4); an older server can't store them.
 const NEEDS_0_6: &str = "the server is older than Keystead 0.6.0 and can't store one-time \
                          codes; update it to 0.6.0 or later";
+/// History came with 0.7.0; an older server keeps only each login's latest version.
+const NEEDS_0_7: &str = "the server is older than Keystead 0.7.0 and keeps no history; update \
+                         it to 0.7.0 or later";
 /// What a server answers for sign-out if it's from before sign-out existed.
 const NO_SIGN_OUT: &str = "the server is too old to forget a device that signs out; update it";
 const PAGE_SIZE: i64 = 500;
@@ -162,6 +165,25 @@ pub struct ItemRow {
     pub role: Role,
     /// It has one-time codes ([`Vault::one_time_code`]).
     pub has_one_time_code: bool,
+}
+
+/// One version of a login in its history.
+#[derive(Debug)]
+pub struct HistoryRow {
+    pub version: u64,
+    pub author: String,
+    /// When it was saved, in seconds since 1970 (UTC); unknown for versions saved before
+    /// 0.7.0.
+    pub saved_at: Option<i64>,
+    /// The login as it is now.
+    pub current: bool,
+    /// This account can open it: it holds a key this version was shared with (for example
+    /// not a version from before the login was shared with them directly).
+    pub readable: bool,
+    /// What this version changed from the one before: "name", "username", "website",
+    /// "password", "notes" and "one-time code", or "created". Empty if none of those did,
+    /// for example when only who has it changed, or if the version before isn't known.
+    pub changes: Vec<String>,
 }
 
 /// A password to change: someone lost access to a login while its password stayed the
@@ -470,6 +492,8 @@ pub struct Vault {
     server_takes_items: bool,
     /// The keys of the groups this account is in, from the profile.
     groups: GroupKeyring,
+    /// Login histories fetched this session, by login, newest first; kept encrypted.
+    history: HashMap<ItemId, Vec<EncryptedItem>>,
 }
 
 impl Vault {
@@ -490,6 +514,7 @@ impl Vault {
             client: None,
             session_valid_until: None,
             server_takes_items: false,
+            history: HashMap::new(),
         })
     }
 
@@ -511,6 +536,7 @@ impl Vault {
             client: None,
             session_valid_until: None,
             server_takes_items: false,
+            history: HashMap::new(),
             groups: GroupKeyring::default(),
         };
         vault.save()?;
@@ -1462,6 +1488,102 @@ impl Vault {
         Ok(rows)
     }
 
+    /// A login's history: the current version and the earlier ones the server keeps (up to
+    /// ten), newest first, fetched fresh. Editors and managers only. Versions whose
+    /// signature doesn't check out are left out, so a server can't slip any in.
+    pub fn history(&mut self, item_id: ItemId) -> Result<Vec<HistoryRow>> {
+        let path = format!("/v1/items/{item_id}/history");
+        let list: ItemHistory = match self.call(|client| client.get(&path, &[]))? {
+            Ok(list) => list,
+            Err(Failure::Status { code: 404, .. }) if self.server_version()? < (0, 7) => {
+                bail!(NEEDS_0_7)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut versions = Vec::new();
+        for saved in list.versions {
+            let item = saved.item;
+            let signed = self
+                .profile
+                .trusted_keys(item.author)
+                .is_some_and(|keys| item.verify(&keys).is_ok());
+            if item.id != item_id || item.deleted || item.format > ITEM_FORMAT || !signed {
+                continue;
+            }
+            let opened = self.open_version(&item).ok();
+            versions.push((saved.saved_at, item, opened));
+        }
+        let rows = versions
+            .iter()
+            .enumerate()
+            .map(|(index, (saved_at, item, opened))| {
+                let before = versions
+                    .get(index + 1)
+                    .and_then(|(_, _, opened)| opened.as_ref());
+                let changes = match (opened, before) {
+                    (Some(this), Some(before)) => changes(before, this),
+                    (Some(_), None) if item.version == 1 => vec!["created".to_owned()],
+                    _ => Vec::new(),
+                };
+                HistoryRow {
+                    version: item.version,
+                    author: self.profile.user_name(item.author),
+                    saved_at: *saved_at,
+                    current: index == 0,
+                    readable: opened.is_some(),
+                    changes,
+                }
+            })
+            .collect();
+        self.history.insert(
+            item_id,
+            versions.into_iter().map(|(_, item, _)| item).collect(),
+        );
+        Ok(rows)
+    }
+
+    /// One version from the history last fetched with [`history`](Self::history), decrypted.
+    pub fn history_version(&self, item_id: ItemId, version: u64) -> Result<(Overview, Details)> {
+        let item = self
+            .history
+            .get(&item_id)
+            .and_then(|versions| versions.iter().find(|item| item.version == version))
+            .context("that version isn't in the history; look at the history again")?;
+        self.open_version(item)
+    }
+
+    /// Brings back an earlier version's name, username, website, password, notes and
+    /// one-time code, as a new version on top of the latest. Who has the login stays as it
+    /// is. Passwords to change stay listed, as the old password isn't a new one.
+    pub fn restore(&mut self, item_id: ItemId, version: u64) -> Result<EditOutcome> {
+        let (overview, details) = self.history_version(item_id, version)?;
+        self.check_server_takes_items()?;
+        let details = self.with_one_time_code(details)?;
+        self.sync()?;
+        let current = self.live_item(item_id)?.clone();
+        if current.version == version {
+            bail!("that's already the current version");
+        }
+        let outcome = self.save_version_with(&current, &overview, &details, People::Same, false)?;
+        self.save()?;
+        Ok(outcome)
+    }
+
+    fn open_version(&self, item: &EncryptedItem) -> Result<(Overview, Details)> {
+        let key = self.item_key(item)?;
+        Ok((item.open_overview(&key)?, item.open_details(&key)?))
+    }
+
+    /// The server's version, as (major, minor).
+    fn server_version(&self) -> Result<(u64, u64)> {
+        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let mut parts = health
+            .version
+            .split('.')
+            .map(|part| part.parse().unwrap_or(0));
+        Ok((parts.next().unwrap_or(0), parts.next().unwrap_or(0)))
+    }
+
     /// Takes a login off the list of passwords to change for one person: someone who can
     /// change it decided it doesn't need changing.
     pub fn dismiss(&mut self, item_id: ItemId, user: UserId) -> Result<()> {
@@ -1716,6 +1838,19 @@ impl Vault {
         details: &Details,
         change: People<'_>,
     ) -> Result<EditOutcome> {
+        self.save_version_with(current, overview, details, change, true)
+    }
+
+    /// Like `save_version`. `password_may_be_new` is false when bringing back an earlier
+    /// version: its password isn't one nobody saw, so passwords to change stay listed.
+    fn save_version_with(
+        &mut self,
+        current: &EncryptedItem,
+        overview: &Overview,
+        details: &Details,
+        change: People<'_>,
+        password_may_be_new: bool,
+    ) -> Result<EditOutcome> {
         let me = self.profile.user_id;
         let fresh = current.owner.is_none() || current.owner == Some(me);
         let (key, mut keys) = if fresh {
@@ -1787,7 +1922,7 @@ impl Vault {
         }
         // Anyone who lost access earlier doesn't know a new password.
         let previous = current.open_details(&self.item_key(current)?)?;
-        let password_changed = previous.password != details.password;
+        let password_changed = password_may_be_new && previous.password != details.password;
         let item = EncryptedItem::seal(
             self.next_version(current),
             &key,
@@ -2113,6 +2248,29 @@ enum People<'a> {
 }
 
 /// Opens an item with whichever of its folder's keys it was saved with, or directly.
+/// Which of a login's fields differ between two of its versions.
+fn changes(before: &(Overview, Details), after: &(Overview, Details)) -> Vec<String> {
+    let ((before_overview, before_details), (after_overview, after_details)) = (before, after);
+    [
+        ("name", before_overview.name != after_overview.name),
+        (
+            "username",
+            before_overview.username != after_overview.username,
+        ),
+        ("website", before_overview.url != after_overview.url),
+        (
+            "password",
+            before_details.password != after_details.password,
+        ),
+        ("notes", before_details.notes != after_details.notes),
+        ("one-time code", before_details.otp != after_details.otp),
+    ]
+    .into_iter()
+    .filter(|(_, changed)| *changed)
+    .map(|(field, _)| field.to_owned())
+    .collect()
+}
+
 fn unlock_with(
     item: &EncryptedItem,
     folder_keys: &[FolderKey],

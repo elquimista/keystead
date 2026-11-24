@@ -289,6 +289,22 @@ pub struct LoginFields {
     pub one_time_code: String,
 }
 
+/// One version of a login in its history.
+#[derive(uniffi::Record)]
+pub struct HistoryEntry {
+    pub version: u64,
+    pub author: String,
+    /// When it was saved, in seconds since 1970 (UTC); unknown before 0.7.0.
+    pub saved_at: Option<i64>,
+    /// The login as it is now.
+    pub current: bool,
+    /// You can open it; versions from before a login was shared with you directly can't be.
+    pub readable: bool,
+    /// What it changed from the version before: "name", "username", "website", "password",
+    /// "notes", "one-time code", or "created".
+    pub changes: Vec<String>,
+}
+
 /// A login's current one-time code.
 #[derive(uniffi::Record)]
 pub struct OneTimeCode {
@@ -614,6 +630,39 @@ impl Vault {
         details.notes = fields.notes;
         details.otp = fields.one_time_code;
         Ok(vault.update(item_id, &overview, &details)?.into())
+    }
+
+    /// A login's history, newest first, fetched fresh (editors and managers).
+    pub fn history(&self, item_id: String) -> Result<Vec<HistoryEntry>, CoreError> {
+        Ok(self
+            .vault()?
+            .history(item_id_from(&item_id)?)?
+            .into_iter()
+            .map(|row| HistoryEntry {
+                version: row.version,
+                author: row.author,
+                saved_at: row.saved_at,
+                current: row.current,
+                readable: row.readable,
+                changes: row.changes,
+            })
+            .collect())
+    }
+
+    /// The password of a version from the history last fetched.
+    pub fn history_password(&self, item_id: String, version: u64) -> Result<String, CoreError> {
+        let (_, details) = self
+            .vault()?
+            .history_version(item_id_from(&item_id)?, version)?;
+        Ok(details.password.clone())
+    }
+
+    /// Brings back a version from the history last fetched, as a new version.
+    pub fn restore_version(&self, item_id: String, version: u64) -> Result<SaveOutcome, CoreError> {
+        Ok(self
+            .vault()?
+            .restore(item_id_from(&item_id)?, version)?
+            .into())
     }
 
     /// Deletes a login for everyone who can open it.

@@ -105,6 +105,15 @@ keystead edit GitHub --otp "JBSW Y3DP EHPK 3PXP"   # or --otp 'otpauth://totp/â€
 keystead otp GitHub                               # the current code
 ```
 
+The server keeps each login's last 10 earlier versions (needs a 0.7.0 server), for its
+editors and managers:
+
+```sh
+keystead history Bank                # versions, who saved each, when, and what changed
+keystead history Bank --show 3       # version 3's password
+keystead restore Bank 3              # bring version 3 back, as a new version
+```
+
 Everyone who can open a folder or a login has a role: `view`, `edit` or `manage`.
 Managers share (`--role`, edit by default), change roles and remove people; removing
 someone from a folder gives it a new key, so they can't read what's saved afterwards.

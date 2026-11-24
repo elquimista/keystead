@@ -163,6 +163,16 @@ const MIGRATIONS: &[&str] = &[
          since INTEGER NOT NULL,
          PRIMARY KEY (item_id, user_id)
      ) WITHOUT ROWID;",
+    // 6 (0.7.0): item history. Each item's earlier versions (`vault::HISTORY_KEPT` of them)
+    // and when each version was saved. Versions saved before have no time.
+    "ALTER TABLE items ADD COLUMN saved_at INTEGER;
+     CREATE TABLE item_history (
+         item_id TEXT NOT NULL,
+         version INTEGER NOT NULL,
+         saved_at INTEGER,
+         body TEXT NOT NULL,
+         PRIMARY KEY (item_id, version)
+     ) WITHOUT ROWID;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -272,6 +282,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/groups/{group_id}/rekey", post(groups::rekey_group))
         .route("/v1/items/{item_id}", put(vault::put_item))
         .route("/v1/items/{item_id}/people", get(vault::item_people))
+        .route("/v1/items/{item_id}/history", get(vault::item_history))
         .route(
             "/v1/items/{item_id}/people/{user_id}",
             put(vault::set_item_role),

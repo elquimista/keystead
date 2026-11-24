@@ -327,6 +327,24 @@ pub struct Exposures {
     pub exposures: Vec<Exposure>,
 }
 
+/// One version of an item as the server keeps it, with when it was saved.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedVersion {
+    /// Seconds since 1970 (UTC); absent for versions saved before 0.7.0. Set by the server,
+    /// so not signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<i64>,
+    pub item: EncryptedItem,
+}
+
+/// `GET /v1/items/{item_id}/history` (editors and managers of the item): its current
+/// version and the earlier ones the server keeps, newest first. Servers before 0.7.0 keep
+/// none and answer 404.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ItemHistory {
+    pub versions: Vec<SavedVersion>,
+}
+
 /// `POST /v1/folders/{folder_id}/groups` (folder managers): shares a folder with a group.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AddFolderGroupRequest {

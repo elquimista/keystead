@@ -19,8 +19,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use keystead_core::api::{
     AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, Exposure, Exposures, FolderRole,
-    GroupShare, ItemRole, KeyLink, Member, Members, PutItemRequest, RekeyRequest, Role,
-    RoleRequest, Roles, SyncEntry, SyncPage, ViaGroup,
+    GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members, PutItemRequest, RekeyRequest,
+    Role, RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage, ViaGroup,
 };
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
@@ -565,11 +565,34 @@ pub(crate) async fn put_item(
         }
     }
 
+    // The version being replaced joins the item's history, which keeps the last
+    // `HISTORY_KEPT`; deleting an item deletes its history.
+    if item.deleted {
+        sqlx::query("DELETE FROM item_history WHERE item_id = ?")
+            .bind(item_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+    } else if let Some(current) = current.as_ref().filter(|current| !current.deleted) {
+        sqlx::query(
+            "INSERT INTO item_history (item_id, version, saved_at, body)
+             SELECT id, version, saved_at, body FROM items WHERE id = ?",
+        )
+        .bind(item_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM item_history WHERE item_id = ? AND version <= ?")
+            .bind(item_id.to_string())
+            .bind(current.version as i64 - HISTORY_KEPT)
+            .execute(&mut *tx)
+            .await?;
+    }
+
     let seq = next_seq(&mut tx).await?;
     sqlx::query(
-        "INSERT INTO items (id, folder_id, version, seq, body) VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO items (id, folder_id, version, seq, body, saved_at)
+         VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
          ON CONFLICT (id) DO UPDATE SET version = excluded.version, seq = excluded.seq,
-                                        body = excluded.body",
+                                        body = excluded.body, saved_at = excluded.saved_at",
     )
     .bind(item_id.to_string())
     .bind(item.folder_id.map(|folder_id| folder_id.to_string()))
@@ -670,6 +693,48 @@ pub(crate) async fn put_item(
 
 /// `GET /v1/items/{item_id}/people`: who has the item directly (its owner, and everyone
 /// and every group it's shared with) and their roles, for anyone who can open it.
+/// How many earlier versions of each item the server keeps.
+const HISTORY_KEPT: i64 = 10;
+
+/// `GET /v1/items/{item_id}/history`: the item's current version and the earlier ones the
+/// server keeps, newest first, for anyone who can change it (edit or manage). Viewers can
+/// open only the current version.
+pub(crate) async fn item_history(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(item_id): Path<ItemId>,
+) -> Result<Json<ItemHistory>, ApiError> {
+    let mut conn = state.readers.acquire().await?;
+    let item = stored_item(&mut conn, item_id).await?;
+    if item.deleted {
+        return Err(ApiError::NotFound);
+    }
+    require(
+        item_role(&mut conn, auth.user_id, &item).await?,
+        Role::Edit,
+        "see this login's history",
+    )?;
+    let rows: Vec<(Option<i64>, String)> = sqlx::query_as(
+        "SELECT saved_at, body FROM items WHERE id = ?1
+         UNION ALL
+         SELECT saved_at, body FROM item_history WHERE item_id = ?1",
+    )
+    .bind(item_id.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut versions = rows
+        .into_iter()
+        .map(|(saved_at, body)| {
+            Ok(SavedVersion {
+                saved_at,
+                item: serde_json::from_str(&body)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    versions.sort_by_key(|saved| std::cmp::Reverse(saved.item.version));
+    Ok(Json(ItemHistory { versions }))
+}
+
 pub(crate) async fn item_people(
     State(state): State<AppState>,
     auth: Auth,

@@ -1040,3 +1040,68 @@ fn one_time_codes_are_kept_with_a_login_and_shared_with_it() {
     assert!(!alice.list().unwrap()[0].has_one_time_code);
     assert_eq!(alice.too_new(), 0);
 }
+
+#[test]
+fn a_logins_history_shows_what_changed_and_brings_back_old_versions() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let changes = |rows: &[keystead_client::HistoryRow]| -> Vec<(u64, Vec<String>)> {
+        rows.iter()
+            .map(|row| (row.version, row.changes.clone()))
+            .collect()
+    };
+
+    // Created, then a new password, then new notes.
+    let (overview, details) = login("Bank", "first");
+    let bank = alice.add(None, overview, details).unwrap();
+    alice.edit(bank, "second").unwrap();
+    let (overview, mut details) = alice.open_item(bank).unwrap();
+    details.notes = "PIN in the safe".into();
+    alice.update(bank, &overview, &details).unwrap();
+    let rows = alice.history(bank).unwrap();
+    assert_eq!(
+        changes(&rows),
+        [
+            (3, vec!["notes".to_owned()]),
+            (2, vec!["password".to_owned()]),
+            (1, vec!["created".to_owned()]),
+        ]
+    );
+    assert!(rows[0].current && !rows[1].current);
+    assert!(
+        rows.iter()
+            .all(|row| row.readable && row.saved_at.is_some() && row.author == "Alice")
+    );
+    assert_eq!(alice.history_version(bank, 1).unwrap().1.password, "first");
+
+    // Bringing back version 1 is a new version with its password and notes.
+    alice.restore(bank, 1).unwrap();
+    assert_eq!(alice.open_item(bank).unwrap().1.password, "first");
+    let rows = alice.history(bank).unwrap();
+    assert_eq!(rows[0].version, 4);
+    assert_eq!(rows[0].changes, ["password", "notes"]);
+    assert!(alice.restore(bank, 4).is_err(), "already current");
+
+    // Viewers can't see the history; an editor added later can't open versions from
+    // before it was shared with them.
+    alice.share_item(bank, bob_id, Role::View).unwrap();
+    bob.sync().unwrap();
+    let error = bob.history(bank).unwrap_err();
+    assert!(format!("{error:#}").contains("edit"), "{error:#}");
+    alice.set_item_role(bank, bob_id, Role::Edit).unwrap();
+    bob.sync().unwrap();
+    let rows = bob.history(bank).unwrap();
+    assert!(rows[0].readable);
+    assert!(!rows.iter().find(|row| row.version == 1).unwrap().readable);
+
+    // The server keeps ten earlier versions; deleting the login deletes them.
+    for n in 0..12 {
+        alice.edit(bank, &format!("p{n}")).unwrap();
+    }
+    assert_eq!(alice.history(bank).unwrap().len(), 11);
+    alice.delete(bank).unwrap();
+    assert!(alice.history(bank).is_err());
+}

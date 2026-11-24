@@ -450,6 +450,9 @@ private struct LoginDetail: View {
                     Button(item.role == .manage ? "Share…" : "Access…") {
                         model.sheet = .shareLogin(item)
                     }
+                    Button("History…") { model.sheet = .history(item) }
+                        .disabled(item.role == .view)
+                        .help("Earlier versions of this login, and bringing one back")
                     Spacer()
                     Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
                         .disabled(item.role == .view)

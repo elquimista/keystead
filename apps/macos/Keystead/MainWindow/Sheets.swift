@@ -12,6 +12,8 @@ struct SheetContent: View {
             AddLoginSheet(model: model, folder: folder)
         case .editLogin(let item):
             EditLoginSheet(model: model, item: item)
+        case .history(let item):
+            HistorySheet(model: model, item: item)
         case .deleteLogin(let item):
             DeleteLoginSheet(model: model, item: item)
         case .shareLogin(let item):
@@ -363,6 +365,161 @@ private struct EditLoginSheet: View {
             } catch {
                 loadError = describe(error)
             }
+        }
+    }
+}
+
+/// A login's earlier versions: who saved each, when, and what it changed, with their
+/// passwords and a way to bring one back.
+private struct HistorySheet: View {
+    let model: AppModel
+    let item: ItemSummary
+    @State private var entries: [HistoryEntry]?
+    @State private var loadError: String?
+    /// Passwords shown so far, by version.
+    @State private var shown: [UInt64: String] = [:]
+    @State private var restoring: HistoryEntry?
+    @State private var note: String?
+    @State private var error: String?
+
+    var body: some View {
+        SheetScaffold(
+            title: "History of \u{201C}\(item.name)\u{201D}", actionTitle: "Done", showsCancel: false
+        ) {
+            true
+        } content: {
+            if let loadError {
+                Label(loadError, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let entries {
+                List(entries, id: \.version) { entry in
+                    row(entry)
+                }
+                .frame(minHeight: 280)
+                Text("The server keeps the last 10 earlier versions. Bringing one back saves it "
+                    + "as a new version; if its password differs, change it at the website too.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+            }
+            if let note {
+                Text(note)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(width: 540)
+        .task { await load() }
+        .confirmationDialog(
+            "Bring back version \(restoring?.version ?? 0)?",
+            isPresented: Binding(get: { restoring != nil }, set: { if !$0 { restoring = nil } })
+        ) {
+            Button("Bring Back") {
+                if let entry = restoring { Task { await restore(entry) } }
+            }
+        } message: {
+            Text("Its name, username, website, password, notes and one-time code become the "
+                + "login's current ones, as a new version. Who has the login stays the same.")
+        }
+    }
+
+    private func row(_ entry: HistoryEntry) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(entry.current ? "Version \(entry.version) · now" : "Version \(entry.version)")
+                    .fontWeight(.semibold)
+                Spacer()
+                Text(saved(entry))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(changes(entry))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if entry.readable && !entry.current {
+                HStack {
+                    Text(shown[entry.version] ?? "••••••••••••")
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                    Button {
+                        Task { await reveal(entry) }
+                    } label: {
+                        Image(systemName: shown[entry.version] == nil ? "eye" : "eye.slash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(shown[entry.version] == nil ? "Show this version's password" : "Hide it")
+                    Button {
+                        Task { await model.copyHistoryPassword(of: item, version: entry.version) }
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy this version's password (cleared after 30 seconds)")
+                    Spacer()
+                    Button("Bring Back…") { restoring = entry }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// "Nov 20, 2026 · Mo".
+    private func saved(_ entry: HistoryEntry) -> String {
+        let date = entry.savedAt.map {
+            Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened)
+        }
+        return [date, entry.author].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private func changes(_ entry: HistoryEntry) -> String {
+        if !entry.readable {
+            return "Can't be opened here: it's from before this login was shared with you."
+        }
+        if entry.changes == ["created"] { return "Created" }
+        if entry.changes.isEmpty { return "No change to its fields, for example sharing it." }
+        return "Changed the " + ListFormatter.localizedString(byJoining: entry.changes)
+    }
+
+    private func load() async {
+        do {
+            entries = try await model.history(of: item)
+            loadError = nil
+        } catch {
+            loadError = describe(error)
+        }
+    }
+
+    private func reveal(_ entry: HistoryEntry) async {
+        if shown[entry.version] != nil {
+            shown[entry.version] = nil
+            return
+        }
+        do {
+            shown[entry.version] = try await model.historyPassword(of: item, version: entry.version)
+        } catch let failure {
+            error = describe(failure)
+        }
+    }
+
+    private func restore(_ entry: HistoryEntry) async {
+        do {
+            if let conflict = try await model.restore(item, version: entry.version) {
+                note = conflict
+            } else {
+                note = "Brought back version \(entry.version) as a new version."
+            }
+            shown = [:]
+            await load()
+        } catch let failure {
+            error = describe(failure)
         }
     }
 }

@@ -375,6 +375,7 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/groups/{id}/rekey` | `GroupRekeyRequest` | 204 | The group's managers in it (the owner too, if in it) |
 | `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Editors and managers of the item (see Roles) |
 | `GET /v1/items/{id}/people` | | `Members` | Anyone who can open the item |
+| `GET /v1/items/{id}/history` | | `ItemHistory` | Editors and managers of the item |
 | `PUT /v1/items/{id}/people/{user}` | `RoleRequest` | 204 | Managers of the item |
 | `PUT /v1/items/{id}/groups/{group}` | `RoleRequest` | 204 | Managers of the item |
 | `DELETE /v1/items/{id}/exposures/{user}` | | 204 | Editors and managers of the item |
@@ -465,6 +466,18 @@ each for a new key) and every item shared with them. Their directory entry stays
 true`, so what they signed still verifies; nobody can share with them again, and their
 account can't be recovered. A folder left without a manager gets one: whoever has been
 in it longest. Clients drop removed people's copies from items as they save them.
+
+**History** (0.7.0 and later). When a version replaces another, the server keeps the one
+replaced, as stored, with when it was saved (`saved_at`, seconds since 1970, set by the
+server and not signed; absent for versions saved before 0.7.0). It keeps the last 10
+earlier versions of each item, and deleting an item deletes them. `GET …/history` returns
+the current version and the kept ones, newest first, to the item's editors and managers;
+viewers get only the current version, through sync. Clients verify each version's
+signature like any other and leave out ones that fail, so a server can't slip in a version
+nobody saved. A version opens with the keys of its time: a folder's members open them all
+through the folder's key chain, but someone an item was shared with directly opens only
+versions that had a copy for them. Bringing a version back saves its overview and details
+as a new version, and doesn't count as a new password (see below), since it isn't one.
 
 **Passwords to change** (0.5.0 and later). New keys protect what's saved afterwards, but
 passwords someone already saw can't be taken back. So whenever someone loses access to an

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 pub use keystead_client::{
-    DeviceRow, EditOutcome, GroupRow, GroupShareRow, InviteInfo, ItemRow, MemberRow, SyncSummary,
-    ToChangeRow, UserRow, Whoami, generate_password,
+    DeviceRow, EditOutcome, GroupRow, GroupShareRow, HistoryRow, InviteInfo, ItemRow, MemberRow,
+    SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
 };
 use keystead_client::{NewAccount, Vault};
 pub use keystead_core::api::Role;
@@ -352,6 +352,37 @@ pub fn update(
         details.otp = otp;
     }
     vault.update(item_id, &overview, &details)
+}
+
+/// A login's history, newest first.
+pub fn history(home: &Path, name: &str, folder: Option<&str>) -> Result<Vec<HistoryRow>> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.history(item_id)
+}
+
+/// One earlier version of a login, decrypted.
+pub fn history_version(
+    home: &Path,
+    name: &str,
+    folder: Option<&str>,
+    version: u64,
+) -> Result<(Overview, Details)> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.history(item_id)?;
+    vault.history_version(item_id, version)
+}
+
+/// Brings back an earlier version of a login.
+pub fn restore(home: &Path, name: &str, folder: Option<&str>, version: u64) -> Result<EditOutcome> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.history(item_id)?;
+    vault.restore(item_id, version)
 }
 
 /// A login's current one-time code.

@@ -35,6 +35,7 @@ final class AppModel {
     enum Sheet: Identifiable {
         case addLogin(folder: String?)
         case editLogin(ItemSummary)
+        case history(ItemSummary)
         case deleteLogin(ItemSummary)
         case shareLogin(ItemSummary)
         case newFolder
@@ -59,6 +60,7 @@ final class AppModel {
         var id: String {
             switch self {
             case .addLogin(let folder): "add-\(folder ?? "")"
+            case .history(let item): "history-\(item.id)"
             case .editLogin(let item): "edit-\(item.id)"
             case .deleteLogin(let item): "delete-\(item.id)"
             case .shareLogin(let item): "share-login-\(item.id)"
@@ -455,6 +457,43 @@ final class AppModel {
         let outcome = try await perform { try $0.updateLogin(itemId: id, fields: fields) }
         await reloadLocal()
         return conflictNote(outcome, doing: "your changes weren't saved")
+    }
+
+    /// A login's history, newest first, fetched fresh (editors and managers).
+    func history(of item: ItemSummary) async throws -> [HistoryEntry] {
+        #if DEBUG
+        if isDemo { return Self.demoHistory }
+        #endif
+        let id = item.id
+        return try await perform { try $0.history(itemId: id) }
+    }
+
+    /// The password of a version in the history last fetched.
+    func historyPassword(of item: ItemSummary, version: UInt64) async throws -> String {
+        #if DEBUG
+        if isDemo { return "older-password-\(version)" }
+        #endif
+        let id = item.id
+        return try await perform { try $0.historyPassword(itemId: id, version: version) }
+    }
+
+    /// Copies an earlier password the way current ones are copied.
+    func copyHistoryPassword(of item: ItemSummary, version: UInt64) async {
+        do {
+            clipboard.copy(try await historyPassword(of: item, version: version))
+            noteCopied("password from version \(version)", of: item)
+        } catch {
+            message = describe(error)
+        }
+    }
+
+    /// Brings back an earlier version as a new one. Returns a note if someone else changed
+    /// the login first, in which case nothing was saved.
+    func restore(_ item: ItemSummary, version: UInt64) async throws -> String? {
+        let id = item.id
+        let outcome = try await perform { try $0.restoreVersion(itemId: id, version: version) }
+        await reloadLocal()
+        return conflictNote(outcome, doing: "the earlier version wasn't brought back")
     }
 
     /// Deletes a login for everyone who can open it. Returns a note if someone else changed
@@ -888,6 +927,25 @@ extension AppModel {
                     role: .view, isMine: false)])
         }
     }
+
+    /// AWS root's history.
+    static let demoHistory = [
+        HistoryEntry(
+            version: 5, author: "Olivia", savedAt: 1_795_600_000, current: true, readable: true,
+            changes: ["password"]),
+        HistoryEntry(
+            version: 4, author: "Mo", savedAt: 1_795_300_000, current: false, readable: true,
+            changes: ["notes"]),
+        HistoryEntry(
+            version: 3, author: "Olivia", savedAt: 1_794_900_000, current: false, readable: true,
+            changes: []),
+        HistoryEntry(
+            version: 2, author: "Olivia", savedAt: nil, current: false, readable: true,
+            changes: ["password", "one-time code"]),
+        HistoryEntry(
+            version: 1, author: "Olivia", savedAt: nil, current: false, readable: false,
+            changes: []),
+    ]
 
     /// Shows both notices at the bottom of the window, as after a failed sync and a copy.
     func showDemoNotices() {

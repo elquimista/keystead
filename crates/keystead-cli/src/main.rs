@@ -165,6 +165,23 @@ enum Command {
         #[arg(long)]
         no_otp: bool,
     },
+    /// List a login's earlier versions and what each changed (editors and managers), or
+    /// print one version's password
+    History {
+        name: String,
+        #[arg(long)]
+        folder: Option<String>,
+        /// Print this version's password instead
+        #[arg(long, value_name = "VERSION")]
+        show: Option<u64>,
+    },
+    /// Bring back an earlier version of a login, as a new version
+    Restore {
+        name: String,
+        version: u64,
+        #[arg(long)]
+        folder: Option<String>,
+    },
     /// Print a login's current one-time code
     Otp {
         name: String,
@@ -786,6 +803,51 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::History {
+            name,
+            folder,
+            show: Some(version),
+        } => {
+            let (_, details) = commands::history_version(&home, &name, folder.as_deref(), version)?;
+            println!("{}", details.password);
+        }
+        Command::History {
+            name,
+            folder,
+            show: None,
+        } => {
+            let rows: Vec<Vec<String>> = commands::history(&home, &name, folder.as_deref())?
+                .into_iter()
+                .map(|row| {
+                    let changed = if !row.readable {
+                        "(can't open: from before you had it)".to_owned()
+                    } else if row.changes.is_empty() {
+                        "-".to_owned()
+                    } else {
+                        row.changes.join(", ")
+                    };
+                    vec![
+                        format!("{}{}", row.version, if row.current { " (now)" } else { "" }),
+                        row.saved_at.map(date).unwrap_or_else(|| "-".into()),
+                        row.author,
+                        changed,
+                    ]
+                })
+                .collect();
+            print_table(&["VERSION", "SAVED", "BY", "CHANGED"], rows);
+        }
+        Command::Restore {
+            name,
+            version,
+            folder,
+        } => match commands::restore(&home, &name, folder.as_deref(), version)? {
+            EditOutcome::Saved { version: saved } => {
+                println!("Brought back version {version} of {name} as version {saved}.");
+            }
+            EditOutcome::Conflict { version, author } => {
+                println!("Not saved: {author} saved version {version} first; try again.");
+            }
+        },
         Command::Otp { name, folder } => {
             let code = commands::one_time_code(&home, &name, folder.as_deref())?;
             println!("{}", code.code);
