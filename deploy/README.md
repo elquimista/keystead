@@ -189,6 +189,12 @@ It starts from the update: logins saved before have no earlier versions yet. The
 grows with up to 10 earlier versions per login (a few KB each). Older apps keep working
 without history, and apps from 0.7.0 work with older servers, saying the server keeps none.
 
+**Updating to 0.8.0.** Adding a device from another: someone can add a new Mac or
+computer from one that already has their account, by typing a code the new one shows,
+without the Recovery Kit. The server only passes along a public key and the secret sealed
+for it. Nothing else changes; older apps keep working, and apps from 0.8.0 say the server
+needs updating if it's older.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
