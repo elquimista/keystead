@@ -205,6 +205,12 @@ deleted before the update can't come back. The database keeps a little more for 
 Older apps keep working without Recently Deleted, and apps from 0.9.0 work with older
 servers, saying that deleted logins can't come back.
 
+**Updating to 0.10.0.** Groups can be deleted: their members lose what only the group gave
+them, and folders shared with it get new keys. Update the apps before deleting a group:
+an app before 0.10.0 can't save a login that was shared with a deleted group until a newer
+app has saved it once. Apps from 0.10.0 say the server needs updating if it's older. Also
+fixes leaving a folder you still reach through a group, which made it vanish from the app.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
