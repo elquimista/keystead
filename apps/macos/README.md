@@ -23,6 +23,12 @@ account back on a new Mac with a Recovery Kit.
   Recovering on a new Mac checks the owner's fingerprint from the kit before registering
   anything (the owner can leave it out); the old Mac can then be removed from the device
   list under People › You. Needs a 0.2.0 server.
+- **Auto-lock:** locks after 5 minutes without using Keystead, whatever else happens on the
+  Mac (Settings › Security: 1 to 60 minutes, or never), and at once when the screen locks,
+  the Mac or its display sleeps, or another user takes over the screen. Locking this way
+  also clears the clipboard if it still holds a password Keystead copied. A Debug build
+  launched with `-autoLockTest` prints the time since Keystead was last used every second
+  and locks after 5 seconds.
 - **Sign out:** People › You, Settings › Account or Vault › Sign Out, after a confirmation. The
   server forgets this Mac, and the account's files and keys here are deleted; coming back
   takes the Recovery Kit.

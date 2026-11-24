@@ -272,6 +272,15 @@ final class AppModel {
         phase = .locked
     }
 
+    /// Locks because the user seems to be away (see `AutoLock`), and clears the clipboard if
+    /// it still holds a password Keystead copied.
+    func lockBecauseAway() {
+        guard phase == .unlocked else { return }
+        clipboard.clearNow()
+        copiedNoticeTask?.cancel()
+        lock()
+    }
+
     private func finishUnlocking(_ vault: Vault) async throws {
         self.vault = vault
         identity = try vault.identity()

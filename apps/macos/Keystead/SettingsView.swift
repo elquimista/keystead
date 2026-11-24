@@ -10,6 +10,7 @@ struct SettingsView: View {
 
     let model: AppModel
     @AppStorage(DockIcon.preferenceKey) private var showInDock = true
+    @AppStorage(AutoLock.minutesKey) private var autoLockMinutes = AutoLock.defaultMinutes
     @State private var sheet: AccountSheet?
 
     var body: some View {
@@ -24,6 +25,24 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
+
+            Form {
+                Picker("Lock after not using \(appName) for", selection: $autoLockMinutes) {
+                    ForEach(AutoLock.choices, id: \.self) { minutes in
+                        Text(minutes == 0 ? "Never" : minutes == 1 ? "1 minute" : "\(minutes) minutes")
+                            .tag(minutes)
+                    }
+                }
+                Text("Counted from your last click or key press in \(appName), whatever you do "
+                    + "in other apps, so its keys don't stay in memory while you work elsewhere. "
+                    + "It also locks as soon as the screen locks or the Mac sleeps, and then "
+                    + "clears the clipboard if it still holds a password \(appName) copied.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .formStyle(.grouped)
+            .tabItem { Label("Security", systemImage: "lock") }
 
             AccountSettings(model: model, sheet: $sheet)
                 .tabItem { Label("Account", systemImage: "person.crop.circle") }

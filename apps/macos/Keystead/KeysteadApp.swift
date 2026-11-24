@@ -4,7 +4,14 @@ import SwiftUI
 @main
 struct KeysteadApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var model = KeysteadApp.launchModel()
+    @State private var model: AppModel
+    private let autoLock: AutoLock
+
+    init() {
+        let model = KeysteadApp.launchModel()
+        _model = State(initialValue: model)
+        autoLock = AutoLock(model: model)
+    }
 
     var body: some Scene {
         // The main window: setting up, browsing and adding logins, people and sharing.

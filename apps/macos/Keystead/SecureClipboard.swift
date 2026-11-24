@@ -12,6 +12,8 @@ final class SecureClipboard {
     static let clearAfter: Duration = .seconds(30)
 
     private var clearTask: Task<Void, Never>?
+    /// The clipboard's change count right after our last copy, while it may still hold it.
+    private var ours: Int?
 
     func copy(_ text: String) {
         let pasteboard = NSPasteboard.general
@@ -19,13 +21,22 @@ final class SecureClipboard {
         pasteboard.setString(text, forType: .string)
         pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
         pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
-        let ours = pasteboard.changeCount
+        ours = pasteboard.changeCount
 
         clearTask?.cancel()
         clearTask = Task {
             try? await Task.sleep(for: Self.clearAfter)
-            guard !Task.isCancelled, pasteboard.changeCount == ours else { return }
+            if !Task.isCancelled { clearNow() }
+        }
+    }
+
+    /// Clears the clipboard now if it still holds our copy; something copied since stays.
+    func clearNow() {
+        clearTask?.cancel()
+        let pasteboard = NSPasteboard.general
+        if let ours, pasteboard.changeCount == ours {
             pasteboard.clearContents()
         }
+        ours = nil
     }
 }
