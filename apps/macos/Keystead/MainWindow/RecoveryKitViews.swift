@@ -128,8 +128,8 @@ struct RecoveryKitSheet: View {
     }
 }
 
-/// The 24 words in four numbered columns, read top to bottom. Hidden, each shows as the
-/// same row of dots, so not even word lengths show.
+/// The 24 words in six rows of four, numbered across the rows so they read in order like
+/// text. Hidden, each shows as the same row of dots, so not even word lengths show.
 struct RecoveryKitWords: View {
     let words: [String]
     var hidden = false
@@ -140,7 +140,7 @@ struct RecoveryKitWords: View {
             ForEach(0..<6, id: \.self) { row in
                 GridRow {
                     ForEach(0..<4, id: \.self) { column in
-                        let index = column * 6 + row
+                        let index = row * 4 + column
                         let word = index < words.count ? words[index] : ""
                         HStack(spacing: 6) {
                             Text("\(index + 1)")
@@ -159,6 +159,70 @@ struct RecoveryKitWords: View {
         .padding(14)
         .frame(maxWidth: .infinity)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// 24 numbered boxes for entering the recovery words, laid out like the kit. Pasting several
+/// words into a box fills it and the boxes after it, and typing a space moves on to the
+/// next box. Masked unless `hidden` is false.
+struct RecoveryWordsInput: View {
+    @Binding var words: [String]
+    let hidden: Bool
+    @FocusState private var focused: Int?
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+            ForEach(0..<6, id: \.self) { row in
+                GridRow {
+                    ForEach(0..<4, id: \.self) { column in
+                        let index = row * 4 + column
+                        HStack(spacing: 6) {
+                            Text("\(index + 1)")
+                                .font(.callout.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 20, alignment: .trailing)
+                            box(index)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func box(_ index: Int) -> some View {
+        let text = Binding(get: { words[index] }, set: { enter($0, at: index) })
+        Group {
+            if hidden {
+                SecureField("", text: text)
+            } else {
+                TextField("", text: text)
+                    // Spelling correction could swap one valid word for another.
+                    .autocorrectionDisabled()
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .font(.system(.body, design: .monospaced))
+        .focused($focused, equals: index)
+        .accessibilityLabel("Word \(index + 1)")
+    }
+
+    private func enter(_ text: String, at index: Int) {
+        guard text.contains(where: \.isWhitespace) else {
+            words[index] = text
+            return
+        }
+        let parts = text.split(whereSeparator: \.isWhitespace).map(String.init)
+        words[index] = parts.first ?? ""
+        for (offset, part) in parts.enumerated().dropFirst() where index + offset < words.count {
+            words[index + offset] = part
+        }
+        // Move on, and leave the box either way: a box still being edited may keep showing
+        // everything that was pasted into it.
+        if !parts.isEmpty {
+            let next = index + parts.count
+            focused = next < words.count ? next : nil
+        }
     }
 }
 

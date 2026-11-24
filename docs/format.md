@@ -86,8 +86,10 @@ The recovery kit is the account secret written as words, so a user can bring the
 back on a new device when every device they had is gone:
 
 - **The words** are the BIP 39 English mnemonic of the 32-byte secret: 24 words, the last of
-  which also carries a checksum. Readers ignore case, spacing, line breaks, commas and
-  numbering, and report a word that isn't on the list or a checksum that doesn't match.
+  which also carries a checksum. Kits show them in six rows of four, numbered across the
+  rows. Readers take exactly the 24 words, in order, separated by spaces or line breaks;
+  capitals read as lowercase. Anything else, such as numbers or punctuation, is refused, as
+  is a word that isn't on the list or a checksum that doesn't match.
 - **Alongside the words** the kit shows the server address and the owner's fingerprint. A
   recovering device needs the fingerprint to check the owner, just as an invite carries it.
 - The kit is printed or written down and kept offline. Apps only show it after the user

@@ -183,7 +183,7 @@ fn run(cli: Cli) -> Result<()> {
             for row in 0..6 {
                 let line: Vec<String> = (0..4)
                     .map(|column| {
-                        let index = column * 6 + row;
+                        let index = row * 4 + column;
                         format!("{:>4}  {:<10}", index + 1, words[index])
                     })
                     .collect();

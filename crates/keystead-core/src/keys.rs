@@ -62,43 +62,55 @@ impl AccountSecret {
         Zeroizing::new(mnemonic.to_string())
     }
 
-    /// Reads a recovery kit's words back. Case, spacing, line breaks, commas and
-    /// numbering ("1. abandon", "12)") don't matter.
+    /// Reads a recovery kit's words back: exactly the 24 words, in order, separated by
+    /// spaces or line breaks, as BIP 39 wallets take them. Capitals read as lowercase;
+    /// anything else, such as numbers or punctuation, is refused rather than guessed at.
     pub fn from_recovery_words(text: &str) -> Result<Self, Error> {
-        let words: Vec<String> = text
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .map(|word| word.trim_end_matches(['.', ')']))
-            .filter(|word| !word.is_empty() && !word.chars().all(|c| c.is_ascii_digit()))
-            .map(str::to_lowercase)
-            .collect();
+        let words: Zeroizing<Vec<String>> =
+            Zeroizing::new(text.split_whitespace().map(str::to_lowercase).collect());
+        if let Some(index) = words
+            .iter()
+            .position(|word| !word.chars().all(|c| c.is_ascii_alphabetic()))
+        {
+            return Err(Error::RecoveryWords(format!(
+                "word {} has something other than letters; enter only the 24 words, in order, \
+                 with no numbers or punctuation",
+                index + 1
+            )));
+        }
         if words.len() != 24 {
             return Err(Error::RecoveryWords(format!(
                 "a recovery kit has 24 words, not {}",
                 words.len()
             )));
         }
+        Self::from_ordered_words(&words).map_err(recovery_error)
+    }
+
+    fn from_ordered_words(words: &[String]) -> Result<Self, bip39::Error> {
         let mnemonic = bip39::Mnemonic::parse_in_normalized(
             bip39::Language::English,
             &Zeroizing::new(words.join(" ")),
-        )
-        .map_err(|error| {
-            Error::RecoveryWords(match error {
-                bip39::Error::UnknownWord(index) => {
-                    format!("word {} isn't on the recovery kit word list", index + 1)
-                }
-                bip39::Error::InvalidChecksum => {
-                    "the words don't check out; one is probably mistyped or out of order".to_owned()
-                }
-                other => format!("those aren't recovery kit words ({other})"),
-            })
-        })?;
+        )?;
         let entropy = Zeroizing::new(mnemonic.to_entropy());
         let bytes: [u8; 32] = entropy
             .as_slice()
             .try_into()
-            .map_err(|_| Error::RecoveryWords("a recovery kit has 24 words".to_owned()))?;
+            .map_err(|_| bip39::Error::BadWordCount(words.len()))?;
         Ok(Self(bytes))
     }
+}
+
+fn recovery_error(error: bip39::Error) -> Error {
+    Error::RecoveryWords(match error {
+        bip39::Error::UnknownWord(index) => {
+            format!("word {} isn't on the recovery kit word list", index + 1)
+        }
+        bip39::Error::InvalidChecksum => {
+            "the words don't check out; one is probably mistyped or out of order".to_owned()
+        }
+        other => format!("those aren't recovery kit words ({other})"),
+    })
 }
 
 /// A user's private keys: one for opening wrapped keys, one for signing, and a symmetric
@@ -453,20 +465,38 @@ mod tests {
     }
 
     #[test]
-    fn recovery_words_are_read_leniently() {
+    fn recovery_words_may_be_spaced_and_capitalised_freely() {
         let secret = AccountSecret::generate();
         let words = secret.recovery_words();
-        // Numbered, in capitals, several to a line, with commas: as typed from paper.
+        // In capitals, four to a line, with extra spaces: as typed from paper.
         let typed: String = words
             .split(' ')
             .enumerate()
             .map(|(index, word)| {
-                let separator = if index % 4 == 3 { ",\n" } else { "  " };
-                format!("{}. {}{separator}", index + 1, word.to_uppercase())
+                let separator = if index % 4 == 3 { "\n" } else { "   " };
+                format!("{}{separator}", word.to_uppercase())
             })
             .collect();
         let back = AccountSecret::from_recovery_words(&typed).unwrap();
         assert_eq!(back.as_bytes(), secret.as_bytes());
+    }
+
+    #[test]
+    fn anything_but_the_words_in_order_is_refused() {
+        let words = AccountSecret::generate().recovery_words();
+        let numbered: String = words
+            .split(' ')
+            .enumerate()
+            .map(|(index, word)| format!("{}. {word}\n", index + 1))
+            .collect();
+        for text in [numbered, words.replace(' ', ", ")] {
+            match AccountSecret::from_recovery_words(&text) {
+                Err(Error::RecoveryWords(reason)) => {
+                    assert!(reason.contains("only the 24 words"), "{reason}")
+                }
+                other => panic!("accepted {text:?}: {:?}", other.is_ok()),
+            }
+        }
     }
 
     #[test]

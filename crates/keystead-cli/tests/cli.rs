@@ -169,12 +169,8 @@ fn a_recovery_kit_restores_an_account_on_another_machine() {
     let (words, me) = commands::recovery_kit(&old).unwrap();
     assert_eq!(words.split(' ').count(), 24);
 
-    // Typed in from paper: numbered, over several lines.
-    let typed: String = words
-        .split(' ')
-        .enumerate()
-        .map(|(index, word)| format!("{}. {word}\n", index + 1))
-        .collect();
+    // Typed in from paper, one word per line.
+    let typed = words.replace(' ', "\n");
     let new = fixture.home("alice-new");
     // The owner can leave out the owner's fingerprint: it's their own.
     let recovered = commands::recover(&new, &fixture.url, None, &typed).unwrap();
