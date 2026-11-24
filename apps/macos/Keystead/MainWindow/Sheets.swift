@@ -28,6 +28,8 @@ struct SheetContent: View {
             ManageFolderSheet(model: model, folder: folder)
         case .removeUser(let user):
             RemoveUserSheet(model: model, user: user)
+        case .addDevice:
+            AddDeviceSheet(model: model)
         case .invite:
             InviteSheet(model: model)
         case .approve(let user):
@@ -520,6 +522,88 @@ private struct HistorySheet: View {
             await load()
         } catch let failure {
             error = describe(failure)
+        }
+    }
+}
+
+/// Adds another device to this account: shows the line to paste into it, waits for it,
+/// then takes the code it shows and sends it the account, sealed so only it can open it.
+private struct AddDeviceSheet: View {
+    let model: AppModel
+    @State private var line: String?
+    @State private var newDevice: String?
+    @State private var code = ""
+    @State private var loadError: String?
+    @State private var sent = false
+
+    var body: some View {
+        SheetScaffold(
+            title: "Add a Device", actionTitle: "Send",
+            canAct: newDevice != nil && !code.trimmed.isEmpty
+        ) {
+            let name = try await model.sendAccount(toNewDevice: code)
+            model.noteAddedDevice(name)
+            sent = true
+            return true
+        } content: {
+            if let loadError {
+                Label(loadError, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let line {
+                Text("On the new device, open Keystead, choose Add this Mac, and paste this line. "
+                    + "On the command line, run it.")
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .top) {
+                    Text(line)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Copy") { model.copy(line) }
+                }
+                .padding(10)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                if let newDevice {
+                    Text("\u{201C}\(newDevice)\u{201D} is ready. Type the code it shows:")
+                    TextField("Code", text: $code, prompt: Text("1a2b-3c4d-5e6f-7a8b-9c0d"))
+                        .font(.system(.body, design: .monospaced))
+                    Text("Typing it checks that your account goes to that device and nowhere else. "
+                        + "Then Touch ID confirms sending it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Waiting for the new device, for up to ten minutes…")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(width: 520)
+        .task { await run() }
+        .onDisappear {
+            if !sent { Task { await model.cancelAddingDevice() } }
+        }
+    }
+
+    /// Starts, then asks every two seconds whether the new device has joined.
+    private func run() async {
+        do {
+            line = try await model.startAddingDevice()
+            while newDevice == nil && !Task.isCancelled {
+                newDevice = try await model.newDevice()
+                if newDevice == nil { try await Task.sleep(for: .seconds(2)) }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            loadError = describe(error)
         }
     }
 }

@@ -7,6 +7,7 @@
 mod accounts;
 mod error;
 mod groups;
+mod transfers;
 mod vault;
 
 use std::collections::HashMap;
@@ -173,6 +174,16 @@ const MIGRATIONS: &[&str] = &[
          body TEXT NOT NULL,
          PRIMARY KEY (item_id, version)
      ) WITHOUT ROWID;",
+    // 7 (0.8.0): adding a device from one the account already has (`transfers`).
+    "CREATE TABLE device_transfers (
+         id TEXT PRIMARY KEY,
+         token_hash BLOB NOT NULL UNIQUE,
+         user_id INTEGER NOT NULL REFERENCES users (id),
+         expires_at INTEGER NOT NULL,
+         device_name TEXT,
+         transfer_key TEXT,
+         wrapped_secret TEXT
+     );",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -251,6 +262,17 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/users/{user_id}/approval", post(accounts::approve))
         .route("/v1/users/{user_id}", delete(accounts::remove_user))
         .route("/v1/directory", get(accounts::directory))
+        .route("/v1/device-transfers", post(transfers::start))
+        .route("/v1/device-transfers/join", post(transfers::join))
+        .route("/v1/device-transfers/claim", post(transfers::claim))
+        .route(
+            "/v1/device-transfers/{id}",
+            get(transfers::state).delete(transfers::cancel),
+        )
+        .route(
+            "/v1/device-transfers/{id}/secret",
+            put(transfers::send_secret),
+        )
         .route("/v1/folders", post(vault::create_folder))
         .route(
             "/v1/folders/{folder_id}/members",

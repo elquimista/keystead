@@ -1105,3 +1105,68 @@ fn a_logins_history_shows_what_changed_and_brings_back_old_versions() {
     alice.delete(bank).unwrap();
     assert!(alice.history(bank).is_err());
 }
+
+#[test]
+fn a_new_device_joins_from_one_the_account_already_has() {
+    use keystead_client::{DeviceSetupLine, JoiningDevice};
+
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        alice_secret,
+        bob_secret,
+        ..
+    } = team(&fixture);
+    let (overview, details) = login("Bank", "s3cret");
+    let bank = alice.add(None, overview, details).unwrap();
+
+    // Alice's Mac starts; the line goes to her new laptop, which joins and shows a code.
+    let line = alice.start_adding_device().unwrap();
+    assert_eq!(alice.new_device().unwrap(), None);
+    let joining =
+        JoiningDevice::start(DeviceSetupLine::parse(&line.command()).unwrap(), "Laptop").unwrap();
+    assert!(joining.poll().unwrap().is_none(), "nothing sent yet");
+    // The line works once.
+    assert!(JoiningDevice::start(line.clone(), "Someone else").is_err());
+    assert_eq!(alice.new_device().unwrap().as_deref(), Some("Laptop"));
+
+    // A wrong code, or another account's secret, sends nothing.
+    let error = alice
+        .send_account_to_new_device("0000-0000-0000-0000-0000", &alice_secret)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("isn't the code"), "{error:#}");
+    assert!(
+        alice
+            .send_account_to_new_device(joining.code(), &bob_secret)
+            .is_err()
+    );
+    // Typed with spaces and in capitals, it still matches.
+    let typed = joining.code().to_uppercase().replace('-', " ");
+    assert_eq!(
+        alice
+            .send_account_to_new_device(&typed, &alice_secret)
+            .unwrap(),
+        "Laptop"
+    );
+
+    // The laptop gets the secret and registers itself as recovery does.
+    let secret = joining.poll().unwrap().expect("sent");
+    let mut laptop = recover(
+        &fixture.profile("alice-laptop"),
+        NewAccount {
+            server: &joining.line().server,
+            secret: &secret,
+            device_id: DeviceId::random(),
+            device_name: "Laptop",
+            signer: Arc::new(SoftwareDeviceKey::generate()),
+        },
+        Some(&joining.line().owner_fingerprint),
+    )
+    .unwrap();
+    assert_eq!(laptop.whoami().user_id, alice.whoami().user_id);
+    laptop.sync().unwrap();
+    assert_eq!(laptop.open_item(bank).unwrap().1.password, "s3cret");
+    assert_eq!(alice.devices().unwrap().len(), 2);
+    // It's done: the transfer is gone.
+    assert!(joining.poll().is_err());
+}

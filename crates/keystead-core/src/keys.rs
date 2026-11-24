@@ -35,6 +35,7 @@ const ITEM_KEY_INFO: &[u8] = b"keystead/item-key/v1";
 const GROUP_SECRET_INFO: &[u8] = b"keystead/group-secret/v1";
 const GROUP_ENCRYPTION_INFO: &[u8] = b"keystead/group/encryption/v1";
 const GROUP_CHAIN_INFO: &[u8] = b"keystead/group/chain/v1";
+const DEVICE_TRANSFER_INFO: &[u8] = b"keystead/device-transfer/v1";
 
 /// The 32 random bytes every account key comes from. Devices store it wrapped by their
 /// hardware key; it never reaches the server unwrapped.
@@ -403,12 +404,94 @@ impl AccountPublicKeys {
             .chain_update(self.encryption.0)
             .chain_update(self.signing.0)
             .finalize();
-        digest[..10]
-            .chunks(2)
-            .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))
-            .collect::<Vec<_>>()
-            .join("-")
+        hex_groups(&digest)
     }
+}
+
+/// The first 80 bits of a digest as five groups of four hex digits: "1a2b-3c4d-…".
+fn hex_groups(digest: &[u8]) -> String {
+    digest[..10]
+        .chunks(2)
+        .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// A one-time key a new device makes to receive its account's secret from a device the
+/// account already has. It never leaves the new device, and is dropped once used.
+pub struct TransferKey {
+    private: KemPrivateKey,
+    public: Key32,
+}
+
+impl TransferKey {
+    pub fn generate() -> Self {
+        let mut seed = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(&mut *seed);
+        let (private, public) = Kem::derive_keypair(&*seed);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&public.to_bytes());
+        Self {
+            private,
+            public: Key32(key),
+        }
+    }
+
+    pub fn public(&self) -> Key32 {
+        self.public
+    }
+
+    /// Opens what [`AccountSecret::seal_for_new_device`] sealed for this key in transfer
+    /// `transfer` (its token).
+    pub fn open_account_secret(
+        &self,
+        wrapped: &WrappedKey,
+        transfer: &str,
+    ) -> Result<AccountSecret, Error> {
+        hpke_unwrap(
+            &self.private,
+            wrapped,
+            DEVICE_TRANSFER_INFO,
+            &transfer_aad(transfer, &self.public),
+        )
+        .map(AccountSecret)
+    }
+}
+
+impl AccountSecret {
+    /// Seals this secret for a new device's [`TransferKey`], with HPKE, bound to transfer
+    /// `transfer` (its token). Check [`transfer_code`] with the person first: the server
+    /// passes the key along, and could pass its own.
+    pub fn seal_for_new_device(
+        &self,
+        recipient: &Key32,
+        transfer: &str,
+    ) -> Result<WrappedKey, Error> {
+        hpke_wrap(
+            recipient,
+            &self.0,
+            DEVICE_TRANSFER_INFO,
+            &transfer_aad(transfer, recipient),
+        )
+    }
+}
+
+/// The code both devices show while adding a device: 80 bits of the transfer and the new
+/// device's transfer key, so a key the server swapped in shows a different code, and one
+/// can't be found to match. Formatted like fingerprints.
+pub fn transfer_code(transfer: &str, key: &Key32) -> String {
+    let digest = Sha256::digest(transcript(
+        "keystead/device-transfer-code/v1",
+        &[transfer.as_bytes(), &key.0],
+    ));
+    hex_groups(&digest)
+}
+
+fn transfer_aad(transfer: &str, key: &Key32) -> Vec<u8> {
+    transcript(
+        "keystead/device-transfer/v1",
+        &[transfer.as_bytes(), &key.0],
+    )
 }
 
 /// The symmetric key of one folder. It seals the folder's info and the keys of the items
@@ -773,6 +856,32 @@ mod tests {
             keys.public()
                 .verify(b"hullo", signature.as_slice())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn an_account_secret_reaches_a_new_device_only_for_its_transfer() {
+        let secret = AccountSecret::generate();
+        let new_device = TransferKey::generate();
+        let wrapped = secret
+            .seal_for_new_device(&new_device.public(), "token-1")
+            .unwrap();
+        let opened = new_device.open_account_secret(&wrapped, "token-1").unwrap();
+        assert_eq!(opened.0, secret.0);
+        // Another transfer, or another key, can't open it.
+        assert!(new_device.open_account_secret(&wrapped, "token-2").is_err());
+        assert!(
+            TransferKey::generate()
+                .open_account_secret(&wrapped, "token-1")
+                .is_err()
+        );
+        // The code depends on the key and the transfer.
+        let code = transfer_code("token-1", &new_device.public());
+        assert_eq!(code.len(), 24);
+        assert_ne!(code, transfer_code("token-2", &new_device.public()));
+        assert_ne!(
+            code,
+            transfer_code("token-1", &TransferKey::generate().public())
         );
     }
 

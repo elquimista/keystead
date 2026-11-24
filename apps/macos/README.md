@@ -53,6 +53,11 @@ account back on a new Mac with a Recovery Kit.
   Recovering on a new Mac checks the owner's fingerprint from the kit before registering
   anything (the owner can leave it out); the old Mac can then be removed from the device
   list under People › You. Needs a 0.2.0 server.
+- **Adding a device:** Add a Device… (People › You, under Your devices) shows a line to
+  paste into the new Mac's welcome screen (Add this Mac). The new Mac shows a code; typing
+  it here and confirming with Touch ID sends the account across, sealed so only that Mac
+  can open it, and it adds itself. Needs a 0.8.0 server; without another device, the
+  Recovery Kit still works.
 - **Auto-lock:** locks after 5 minutes without using Keystead, whatever else happens on the
   Mac (Settings › Security: 1 to 60 minutes, or never), and at once when the screen locks,
   the Mac or its display sleeps, or another user takes over the screen. Locking this way

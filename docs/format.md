@@ -153,6 +153,31 @@ existing device:
    the kit's fingerprint (or the derived keys), and the account's own entry must carry the
    keys it derived.
 
+**Adding a device from another** (0.8.0 and later) lets a device the account already has
+hand the account secret to a new one, without the recovery kit:
+
+1. The existing device starts a transfer (`POST /v1/device-transfers`) and shows a setup
+   line: `keystead add-device <server> <token> --owner <owner's fingerprint>`. The person
+   copies it to the new device. It holds nothing secret.
+2. The new device makes a one-time X25519 **transfer key** and joins with the token, its
+   name and the key's public half (`POST …/join`, no session; once per transfer). It shows
+   the **transfer code**: the first 80 bits of
+   `SHA-256(transcript("keystead/device-transfer-code/v1", token, transfer key))`, in five
+   groups of four hex digits like a fingerprint.
+3. The existing device fetches the key (`GET …/{id}`) and computes the code itself. The
+   person types the new device's code into it; only if they match does it seal the account
+   secret for the key with HPKE (as for wrapped keys, info `keystead/device-transfer/v1`,
+   associated data `transcript("keystead/device-transfer/v1", token, transfer key)`) and
+   send it (`PUT …/{id}/secret`). A server that swapped in a key of its own would show a
+   different code, and can't find a key whose code matches.
+4. The new device asks for the sealed secret (`POST …/claim`, no session) until it's there,
+   opens it, and then registers itself exactly as recovery does, with the line's owner
+   fingerprint, so a secret the server made up wouldn't match the owner-signed directory.
+
+Transfers expire after ten minutes, an account has at most three open at once, and a
+claimed or cancelled one is gone. The server only ever sees the public key and the sealed
+secret.
+
 ## Items
 
 An item version has two encrypted parts:
@@ -358,6 +383,12 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/users/{id}/approval` | `ApprovalRequest` | 204 | Owner |
 | `GET /v1/directory` | | `Directory` | Members |
 | `DELETE /v1/users/{id}` | | 204 | Owner, for anyone but themselves |
+| `POST /v1/device-transfers` | | `DeviceTransfer` | Any signed-in device |
+| `POST /v1/device-transfers/join` | `JoinDeviceTransferRequest` | 204 | The new device, with the token |
+| `GET /v1/device-transfers/{id}` | | `DeviceTransferState` | The account that started it |
+| `PUT /v1/device-transfers/{id}/secret` | `SendAccountSecretRequest` | 204 | The account that started it |
+| `POST /v1/device-transfers/claim` | `ClaimDeviceTransferRequest` | `ClaimedAccountSecret` | The new device, with the token |
+| `DELETE /v1/device-transfers/{id}` | | 204 | The account that started it |
 | `POST /v1/folders` | `CreateFolderRequest` | 201 | Members; they manage it |
 | `POST /v1/folders/{id}/members` | `AddMemberRequest` | 204 | Folder managers |
 | `GET /v1/folders/{id}/members` | | `Members` | Folder members |
@@ -524,8 +555,8 @@ with them or their groups directly, the highest of the ways in), and every page
 
 ## Not in this format yet
 
-- Adding a second device by approving it from an existing one, and recovery that the team
-  owner approves. (A recovery kit can already add a device.)
+- Recovery that the team owner approves. (A recovery kit, or another of the account's
+  devices, can already add a device.)
 - Signed membership changes. Roles and memberships are enforced by the server; a
   server that lied could let someone save who shouldn't, though every version stays
   signed by its author. A group's managers and key are signed; who is in it isn't.

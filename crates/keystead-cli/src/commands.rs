@@ -3,13 +3,14 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 pub use keystead_client::{
     DeviceRow, EditOutcome, GroupRow, GroupShareRow, HistoryRow, InviteInfo, ItemRow, MemberRow,
     SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
 };
-use keystead_client::{NewAccount, Vault};
+use keystead_client::{DeviceSetupLine, JoiningDevice, NewAccount, Vault};
 pub use keystead_core::api::Role;
 use keystead_core::ids::{DeviceId, UserId};
 use keystead_core::items::{Details, Overview};
@@ -70,6 +71,92 @@ pub fn recover(
     }
     Ok(vault.whoami())
 }
+
+/// Adds another device to this account from this machine: shows the setup line, waits for
+/// the new device to join, asks for the code it shows (three tries), and sends it the
+/// account secret, sealed for it. Returns its name.
+pub fn add_device(
+    home: &Path,
+    show_line: impl Fn(&str),
+    ask_code: impl Fn(&str) -> Result<String>,
+) -> Result<String> {
+    let secret = DeviceFile::load(home)?.secret()?;
+    let mut vault = open(home)?;
+    let line = vault.start_adding_device()?;
+    show_line(&line.command());
+    let deadline = Instant::now() + TRANSFER_WAIT;
+    let name = loop {
+        if let Some(name) = vault.new_device()? {
+            break name;
+        }
+        if Instant::now() > deadline {
+            vault.cancel_adding_device();
+            bail!("no device joined in ten minutes; start again");
+        }
+        std::thread::sleep(POLL_EVERY);
+    };
+    let mut tries = 0;
+    loop {
+        let code = ask_code(&name)?;
+        match vault.send_account_to_new_device(&code, &secret) {
+            Ok(name) => return Ok(name),
+            Err(error) if tries < 2 => {
+                tries += 1;
+                eprintln!("{error:#}");
+            }
+            Err(error) => {
+                vault.cancel_adding_device();
+                return Err(error);
+            }
+        }
+    }
+}
+
+/// Adds this machine to an account from a device that already has it: joins with the setup
+/// line, shows the code to type there, waits for the account secret, then registers this
+/// machine as recovery does, checking the owner's fingerprint from the line.
+pub fn add_this_device(
+    home: &Path,
+    line: &str,
+    name: &str,
+    show_code: impl Fn(&str),
+) -> Result<Whoami> {
+    refuse_existing(home)?;
+    let joining = JoiningDevice::start(DeviceSetupLine::parse(line)?, name)?;
+    show_code(joining.code());
+    let deadline = Instant::now() + TRANSFER_WAIT;
+    let secret = loop {
+        if let Some(secret) = joining.poll()? {
+            break secret;
+        }
+        if Instant::now() > deadline {
+            bail!("the other device sent nothing in ten minutes; start again there");
+        }
+        std::thread::sleep(POLL_EVERY);
+    };
+    let key = Arc::new(SoftwareDeviceKey::generate());
+    let account = NewAccount {
+        server: &joining.line().server,
+        secret: &secret,
+        device_id: DeviceId::random(),
+        device_name: name,
+        signer: key.clone(),
+    };
+    let mut vault = keystead_client::recover(
+        &profile_path(home),
+        account,
+        Some(&joining.line().owner_fingerprint),
+    )?;
+    DeviceFile::new(&key, &secret).save(home)?;
+    if let Err(error) = vault.sync() {
+        eprintln!("warning: added, but couldn't sync yet ({error:#}); run `keystead sync`");
+    }
+    Ok(vault.whoami())
+}
+
+/// How long either side of adding a device waits for the other, and how often it asks.
+const TRANSFER_WAIT: Duration = Duration::from_secs(10 * 60);
+const POLL_EVERY: Duration = Duration::from_secs(2);
 
 /// The account's recovery kit: its secret as 24 words, plus who and where it's for.
 pub fn recovery_kit(home: &Path) -> Result<(String, Whoami)> {

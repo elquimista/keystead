@@ -42,6 +42,10 @@ enum DebugSnapshots {
                 ("5b-kit-closed", { model.sheet = nil }),
                 ("5c-sign-out", { model.sheet = .signOut }),
                 ("5d-closed", { model.sheet = nil }),
+                ("5e-add-device", { model.sheet = .addDevice }),
+                ("5f-closed", { model.sheet = nil }),
+                ("5g-adding-this-mac", { model.showDemoJoining() }),
+                ("5h-back", { model.showDemoJoining(false) }),
                 ("6-login", {
                     model.section = .allLogins
                     model.selectedItemID = model.items.first?.id

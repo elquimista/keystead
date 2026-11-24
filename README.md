@@ -161,6 +161,15 @@ keystead unshare Bank --group Platform
 keystead group leave Platform
 ```
 
+To use the account on another machine too, add it from one that has it (needs a 0.8.0
+server). The new machine shows a code; typing it on the old one sends the account across,
+sealed so only the new machine can open it:
+
+```sh
+keystead devices add                 # Alice: prints a line for the new machine, then asks for its code
+keystead add-device http://127.0.0.1:8080 <token> --owner <owner's fingerprint>  # on the new machine
+```
+
 Each account has a recovery kit: its secret as 24 words, to bring it back on a new device.
 
 ```sh

@@ -9,11 +9,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{
     AcceptInviteRequest, AddFolderGroupRequest, AddGroupMemberRequest, AddMemberRequest,
-    ApprovalRequest, Conflict, CreateFolderRequest, CreateGroupRequest, DeviceList, Directory,
-    Enrolled, Exposures, GroupFolderKey, GroupMemberKey, GroupRekeyRequest, GroupShare, Groups,
-    Health, Invite, InviteRequest, ItemHistory, KeyLink, Member, MemberKey, Members,
-    PutItemRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest,
-    Role, RoleRequest, SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
+    ApprovalRequest, ClaimDeviceTransferRequest, ClaimedAccountSecret, Conflict,
+    CreateFolderRequest, CreateGroupRequest, DeviceList, DeviceTransfer, DeviceTransferState,
+    Directory, Enrolled, Exposures, GroupFolderKey, GroupMemberKey, GroupRekeyRequest, GroupShare,
+    Groups, Health, Invite, InviteRequest, ItemHistory, JoinDeviceTransferRequest, KeyLink, Member,
+    MemberKey, Members, PutItemRequest, RecoverRequest, RecoveryChallenge,
+    RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest, SendAccountSecretRequest,
+    SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring};
@@ -24,7 +26,7 @@ use keystead_core::items::{
 };
 use keystead_core::keys::{
     AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, GroupKeys, GroupSecret, ItemKey,
-    recovery_message,
+    TransferKey, recovery_message, transfer_code,
 };
 use keystead_core::otp::{self, OneTimeCode};
 use rand::Rng;
@@ -46,6 +48,9 @@ const NEEDS_0_6: &str = "the server is older than Keystead 0.6.0 and can't store
 /// History came with 0.7.0; an older server keeps only each login's latest version.
 const NEEDS_0_7: &str = "the server is older than Keystead 0.7.0 and keeps no history; update \
                          it to 0.7.0 or later";
+/// Adding a device from another came with 0.8.0.
+const NEEDS_0_8: &str = "the server is older than Keystead 0.8.0 and can't add a device from \
+                         another; update it, or use your Recovery Kit on the new device";
 /// What a server answers for sign-out if it's from before sign-out existed.
 const NO_SIGN_OUT: &str = "the server is too old to forget a device that signs out; update it";
 const PAGE_SIZE: i64 = 500;
@@ -109,6 +114,115 @@ impl InviteInfo {
             }
             _ => bail!("an invite has a server address starting with http and a token"),
         }
+    }
+}
+
+/// What a new device needs to join its account from a device the account already has:
+/// `keystead add-device <server> <token> --owner <fingerprint>`, as one line to copy over.
+/// It holds nothing secret: the code check and the owner's fingerprint protect the rest.
+#[derive(Clone, Debug)]
+pub struct DeviceSetupLine {
+    pub server: String,
+    pub token: String,
+    pub owner_fingerprint: String,
+}
+
+impl DeviceSetupLine {
+    pub fn command(&self) -> String {
+        format!(
+            "keystead add-device {} {} --owner {}",
+            self.server, self.token, self.owner_fingerprint
+        )
+    }
+
+    /// Reads a setup line back, with or without the leading `keystead add-device`.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut words: Vec<&str> = text.split_whitespace().collect();
+        if words.first() == Some(&"keystead") {
+            words.remove(0);
+        }
+        if words.first() == Some(&"add-device") {
+            words.remove(0);
+        }
+        let owner = words
+            .iter()
+            .position(|&word| word == "--owner")
+            .filter(|&index| index + 1 < words.len())
+            .context("a setup line ends with --owner and the owner's fingerprint")?;
+        let owner_fingerprint = words[owner + 1].to_owned();
+        words.drain(owner..=owner + 1);
+        match words.as_slice() {
+            [server, token] if server.starts_with("http://") || server.starts_with("https://") => {
+                Ok(Self {
+                    server: (*server).to_owned(),
+                    token: (*token).to_owned(),
+                    owner_fingerprint,
+                })
+            }
+            _ => bail!("a setup line has a server address starting with http and a token"),
+        }
+    }
+}
+
+/// A new device waiting to join its account: it has sent its one-time key, shows a code
+/// for the person to type on their other device, and asks for the account secret until
+/// it arrives. Then [`recover`] finishes, with the line's owner fingerprint.
+pub struct JoiningDevice {
+    line: DeviceSetupLine,
+    key: TransferKey,
+    code: String,
+}
+
+impl JoiningDevice {
+    pub fn start(line: DeviceSetupLine, device_name: &str) -> Result<Self> {
+        let key = TransferKey::generate();
+        let request = JoinDeviceTransferRequest {
+            token: line.token.clone(),
+            device_name: device_name.to_owned(),
+            transfer_key: key.public(),
+        };
+        match Client::new(&line.server).post::<_, ()>("/v1/device-transfers/join", &request) {
+            Ok(()) => {}
+            Err(Failure::Status { code: 404, .. }) => bail!(
+                "this setup line has expired or was already used (or the server is older than \
+                 0.8.0); start again on your other device"
+            ),
+            Err(error) => return Err(error.into()),
+        }
+        let code = transfer_code(&line.token, &key.public());
+        Ok(Self { line, key, code })
+    }
+
+    /// The code to type on the other device.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn line(&self) -> &DeviceSetupLine {
+        &self.line
+    }
+
+    /// Asks once whether the other device has sent the account secret yet.
+    pub fn poll(&self) -> Result<Option<AccountSecret>> {
+        let request = ClaimDeviceTransferRequest {
+            token: self.line.token.clone(),
+        };
+        let claimed: ClaimedAccountSecret =
+            match Client::new(&self.line.server).post("/v1/device-transfers/claim", &request) {
+                Ok(claimed) => claimed,
+                Err(Failure::Status { code: 404, .. }) => bail!(
+                    "adding this device expired, or was stopped on your other device; start again"
+                ),
+                Err(error) => return Err(error.into()),
+            };
+        claimed
+            .wrapped_secret
+            .map(|wrapped| {
+                self.key
+                    .open_account_secret(&wrapped, &self.line.token)
+                    .context("what arrived wasn't sealed for this device; start again")
+            })
+            .transpose()
     }
 }
 
@@ -494,6 +608,8 @@ pub struct Vault {
     groups: GroupKeyring,
     /// Login histories fetched this session, by login, newest first; kept encrypted.
     history: HashMap<ItemId, Vec<EncryptedItem>>,
+    /// A device being added from this one: the transfer's id and token.
+    adding_device: Option<(String, String)>,
 }
 
 impl Vault {
@@ -515,6 +631,7 @@ impl Vault {
             session_valid_until: None,
             server_takes_items: false,
             history: HashMap::new(),
+            adding_device: None,
         })
     }
 
@@ -537,6 +654,7 @@ impl Vault {
             session_valid_until: None,
             server_takes_items: false,
             history: HashMap::new(),
+            adding_device: None,
             groups: GroupKeyring::default(),
         };
         vault.save()?;
@@ -1582,6 +1700,97 @@ impl Vault {
             .split('.')
             .map(|part| part.parse().unwrap_or(0));
         Ok((parts.next().unwrap_or(0), parts.next().unwrap_or(0)))
+    }
+
+    /// Starts adding a device to this account: returns the line to copy to it. The new
+    /// device then shows a code, which goes to [`send_account_to_new_device`](Self::send_account_to_new_device).
+    /// It expires after ten minutes.
+    pub fn start_adding_device(&mut self) -> Result<DeviceSetupLine> {
+        self.cancel_adding_device();
+        let transfer: DeviceTransfer =
+            match self.call(|client| client.post_empty("/v1/device-transfers"))? {
+                Ok(transfer) => transfer,
+                Err(Failure::Status { code: 404, .. }) => bail!(NEEDS_0_8),
+                Err(error) => return Err(error.into()),
+            };
+        self.adding_device = Some((transfer.id, transfer.token.clone()));
+        Ok(DeviceSetupLine {
+            server: self.profile.server.clone(),
+            token: transfer.token,
+            owner_fingerprint: self.profile.owner.fingerprint(),
+        })
+    }
+
+    /// The new device's name, once it has joined with the setup line.
+    pub fn new_device(&mut self) -> Result<Option<String>> {
+        let state = self.transfer_state()?;
+        Ok(state.transfer_key.and(state.device_name))
+    }
+
+    /// Sends this account's secret to the new device, sealed for its one-time key, if
+    /// `code` is the one it shows. Returns its name. The new device then finishes on its
+    /// own.
+    pub fn send_account_to_new_device(
+        &mut self,
+        code: &str,
+        secret: &AccountSecret,
+    ) -> Result<String> {
+        let (id, token) = self
+            .adding_device
+            .clone()
+            .context("start adding a device first")?;
+        let state = self.transfer_state()?;
+        let key = state
+            .transfer_key
+            .context("the new device hasn't joined yet: paste the setup line into it first")?;
+        let tidy = |code: &str| {
+            code.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+                .to_ascii_lowercase()
+        };
+        if tidy(code) != tidy(&transfer_code(&token, &key)) {
+            bail!(
+                "that isn't the code: check it against your new device. If you typed exactly \
+                 what it shows, stop: something between the two devices isn't passing things \
+                 on honestly"
+            );
+        }
+        if AccountKeys::derive(secret).public() != self.keys.public() {
+            bail!("that secret isn't this account's");
+        }
+        let request = SendAccountSecretRequest {
+            wrapped_secret: secret.seal_for_new_device(&key, &token)?,
+        };
+        let path = format!("/v1/device-transfers/{id}/secret");
+        let () = self.call(|client| client.put(&path, &request))??;
+        self.adding_device = None;
+        Ok(state.device_name.unwrap_or_else(|| "the new device".into()))
+    }
+
+    /// Stops waiting for a new device; the setup line stops working.
+    pub fn cancel_adding_device(&mut self) {
+        if let Some((id, _)) = self.adding_device.take() {
+            let path = format!("/v1/device-transfers/{id}");
+            // Best effort: it expires by itself anyway.
+            let _ = self.call(|client| client.delete::<()>(&path));
+        }
+    }
+
+    fn transfer_state(&mut self) -> Result<DeviceTransferState> {
+        let (id, _) = self
+            .adding_device
+            .clone()
+            .context("start adding a device first")?;
+        let path = format!("/v1/device-transfers/{id}");
+        match self.call(|client| client.get(&path, &[]))? {
+            Ok(state) => Ok(state),
+            Err(Failure::Status { code: 404, .. }) => {
+                self.adding_device = None;
+                bail!("adding a device expired after ten minutes; start again")
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Takes a login off the list of passwords to change for one person: someone who can

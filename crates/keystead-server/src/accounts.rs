@@ -626,6 +626,6 @@ pub(crate) fn check_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn hash(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }

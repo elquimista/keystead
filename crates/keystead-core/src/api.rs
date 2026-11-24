@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::directory::DirectoryEntry;
-use crate::encoding::Bytes;
+use crate::encoding::{Bytes, Key32};
 use crate::groups::GroupEntry;
 use crate::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use crate::items::{EncryptedItem, Sealed};
@@ -325,6 +325,56 @@ pub struct Exposure {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Exposures {
     pub exposures: Vec<Exposure>,
+}
+
+/// `POST /v1/device-transfers` (any signed-in device): starts adding a device to the
+/// caller's account. The token goes to the new device in a setup line; the transfer
+/// expires after `expires_in_seconds`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeviceTransfer {
+    pub id: String,
+    pub token: String,
+    pub expires_in_seconds: u64,
+}
+
+/// `POST /v1/device-transfers/join` (the new device, without a session): its name, and the
+/// one-time key the account secret is to be sealed for. Once per transfer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JoinDeviceTransferRequest {
+    pub token: String,
+    pub device_name: String,
+    pub transfer_key: Key32,
+}
+
+/// `GET /v1/device-transfers/{id}` (the device that started it): whether the new device
+/// has joined yet, and with what.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DeviceTransferState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_key: Option<Key32>,
+}
+
+/// `PUT /v1/device-transfers/{id}/secret` (the device that started it): the account
+/// secret, sealed for the new device's transfer key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendAccountSecretRequest {
+    pub wrapped_secret: WrappedKey,
+}
+
+/// `POST /v1/device-transfers/claim` (the new device, without a session).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClaimDeviceTransferRequest {
+    pub token: String,
+}
+
+/// The answer to a claim: the sealed secret once it's there, after which the transfer is
+/// gone; until then, nothing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ClaimedAccountSecret {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapped_secret: Option<WrappedKey>,
 }
 
 /// One version of an item as the server keeps it, with when it was saved.

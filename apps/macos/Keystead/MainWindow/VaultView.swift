@@ -651,6 +651,8 @@ private struct PersonDetail: View {
                     ForEach(model.devices, id: \.deviceId) { device in
                         DeviceRow(model: model, device: device)
                     }
+                    Button("Add a Device…") { model.sheet = .addDevice }
+                        .help("Use your account on another Mac or computer too")
                 }
             } else if !user.approved {
                 Section {

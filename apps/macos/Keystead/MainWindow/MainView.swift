@@ -29,12 +29,13 @@ struct MainView: View {
 /// First launch: join a team with an invite, or set up a new one as its owner.
 struct WelcomeView: View {
     private enum Choice: Hashable {
-        case join, setUp, recover
+        case join, setUp, addThisMac, recover
     }
 
     let model: AppModel
     @State private var choice = WelcomeView.initialChoice
     @State private var invite = ""
+    @State private var setupLine = ""
     @State private var ownerFingerprint = ""
     @State private var recoveryWords = Array(repeating: "", count: 24)
     /// The recovery words are masked while typed, unless the user chooses to see them.
@@ -55,24 +56,31 @@ struct WelcomeView: View {
                     Text("Your team's passwords, shared safely.")
                         .foregroundStyle(.secondary)
                 }
-                Picker("", selection: $choice) {
-                    Text("Join a team").tag(Choice.join)
-                    Text("Set up a new team").tag(Choice.setUp)
-                    Text("Recover an account").tag(Choice.recover)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 480)
-
-                Group {
-                    switch choice {
-                    case .join: joinForm
-                    case .setUp: setUpForm
-                    case .recover: recoverForm
+                if let code = model.joiningCode {
+                    waitingForOtherDevice(code: code)
+                        .frame(width: 480)
+                } else {
+                    Picker("", selection: $choice) {
+                        Text("Join a team").tag(Choice.join)
+                        Text("Set up a new team").tag(Choice.setUp)
+                        Text("Add this Mac").tag(Choice.addThisMac)
+                        Text("Recover an account").tag(Choice.recover)
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 560)
+
+                    Group {
+                        switch choice {
+                        case .join: joinForm
+                        case .setUp: setUpForm
+                        case .addThisMac: addThisMacForm
+                        case .recover: recoverForm
+                        }
+                    }
+                    // Recovering takes 24 word boxes; give them room.
+                    .frame(width: choice == .recover ? 560 : 480)
                 }
-                // Recovering takes 24 word boxes; give them room.
-                .frame(width: choice == .recover ? 560 : 480)
 
                 if let message = model.message {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
@@ -111,6 +119,58 @@ struct WelcomeView: View {
                 .disabled(invite.trimmed.isEmpty)
             }
         }
+    }
+
+    /// Adds this Mac to an account another device already has: paste the line it shows.
+    private var addThisMacForm: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Already use Keystead on another Mac or computer? There, choose Add a Device "
+                + "(under People, on your own page), then paste the line it shows here.")
+                .fixedSize(horizontal: false, vertical: true)
+            TextField(
+                "", text: $setupLine, prompt: Text("keystead add-device https://… --owner …"),
+                axis: .vertical
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(.body, design: .monospaced))
+            .lineLimit(3...5)
+            HStack {
+                Text("No other device? Recover with your Recovery Kit instead.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Continue") { model.startAddingThisMac(line: setupLine) }
+                    .keyboardShortcut(.defaultAction)
+                    .controlSize(.large)
+                    .disabled(setupLine.trimmed.isEmpty)
+            }
+        }
+    }
+
+    /// The code to type on the other device, while this Mac waits for its account.
+    private func waitingForOtherDevice(code: String) -> some View {
+        VStack(spacing: 14) {
+            Text("On your other device, type this code:")
+            Text(code)
+                .font(.system(.title, design: .monospaced).weight(.semibold))
+                .textSelection(.enabled)
+            Text("It checks that your account goes to this Mac and nowhere else. Once you've "
+                + "typed it there, this Mac adds itself.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Waiting for your other device…")
+                    .foregroundStyle(.secondary)
+            }
+            Button("Cancel") { model.cancelAddingThisMac() }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var setUpForm: some View {
@@ -231,6 +291,7 @@ struct WelcomeView: View {
         if let index = arguments.firstIndex(of: "-welcome"), index + 1 < arguments.count {
             switch arguments[index + 1] {
             case "setup": return .setUp
+            case "add": return .addThisMac
             case "recover": return .recover
             default: break
             }

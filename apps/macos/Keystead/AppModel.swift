@@ -46,6 +46,8 @@ final class AppModel {
         case manageFolder(String)
         /// The owner removes someone from the team.
         case removeUser(User)
+        /// Adding another device to this account from this Mac.
+        case addDevice
         case invite
         case approve(User)
         /// After joining: the fingerprint to read to the owner.
@@ -69,6 +71,7 @@ final class AppModel {
             case .shareWithGroup(let group): "share-with-group-\(group.id)"
             case .manageFolder(let folder): "manage-\(folder)"
             case .removeUser(let user): "remove-user-\(user.userId)"
+            case .addDevice: "add-device"
             case .invite: "invite"
             case .approve(let user): "approve-\(user.userId)"
             case .fingerprint: "fingerprint"
@@ -225,6 +228,67 @@ final class AppModel {
             // Show the account's devices, so the lost Mac can be removed.
             section = .people
             selectedUserID = identity.userId
+        }
+    }
+
+    /// While this Mac joins its account from another device: the code to type there.
+    private(set) var joiningCode: String?
+    private var joinTask: Task<Void, Never>?
+
+    /// Adds this Mac to an account another device already has, with the setup line that
+    /// device shows: shows the code to type there, waits for the account (ten minutes at
+    /// most), then enrolls the way recovery does, checking the owner's fingerprint.
+    func startAddingThisMac(line: String) {
+        joinTask?.cancel()
+        joinTask = Task { await addThisMac(line: line) }
+    }
+
+    func cancelAddingThisMac() {
+        joinTask?.cancel()
+        joinTask = nil
+        joiningCode = nil
+    }
+
+    private func addThisMac(line: String) async {
+        message = nil
+        let deviceName = Self.thisMacName
+        let join: DeviceJoin
+        do {
+            join = try await Task.detached { try DeviceJoin.start(line: line, deviceName: deviceName) }.value
+        } catch {
+            message = describe(error)
+            return
+        }
+        joiningCode = join.code()
+        let deadline = Date().addingTimeInterval(10 * 60)
+        var received: Data?
+        while received == nil {
+            if Task.isCancelled { return }
+            do {
+                received = try await Task.detached { try join.poll() }.value
+            } catch {
+                joiningCode = nil
+                message = describe(error)
+                return
+            }
+            if received == nil {
+                if Date() > deadline {
+                    joiningCode = nil
+                    message = "Nothing arrived in ten minutes. Start again on your other device."
+                    return
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        joiningCode = nil
+        guard let received, !Task.isCancelled else { return }
+        let server = join.server()
+        let ownerFingerprint = join.ownerFingerprint()
+        await enroll(working: "Adding this Mac…", secret: SymmetricKey(data: received)) {
+            profilePath, secret, deviceId, deviceName, signer in
+            try Vault.recover(
+                profilePath: profilePath, server: server, ownerFingerprint: ownerFingerprint,
+                accountSecret: secret, deviceId: deviceId, deviceName: deviceName, signer: signer)
         }
     }
 
@@ -734,6 +798,49 @@ final class AppModel {
         return RecoveryKit(words: try recoveryWords(accountSecret: secret), identity: identity)
     }
 
+    /// Starts adding another device to this account; returns the setup line to copy to it.
+    func startAddingDevice() async throws -> String {
+        #if DEBUG
+        if isDemo {
+            return "keystead add-device https://keys.example.com Qh5bMqdKvaJzJWde-ibpjJIar5ey9rAXIAhPOK1F4NA "
+                + "--owner ab12-cd34-ef56-7890-abcd"
+        }
+        #endif
+        return try await perform { try $0.startAddingDevice() }
+    }
+
+    /// The new device's name, once it has joined with the setup line.
+    func newDevice() async throws -> String? {
+        #if DEBUG
+        if isDemo { return "Olivia's MacBook Air" }
+        #endif
+        return try await perform { try $0.newDevice() }
+    }
+
+    /// Sends this account to the new device, sealed for it, if `code` is the one it shows.
+    /// Takes Touch ID, as it unwraps the account secret. Returns the device's name.
+    func sendAccount(toNewDevice code: String) async throws -> String {
+        let device = try store.load()
+        let context = try await DeviceAuthentication.authenticate(reason: "send your account to your new device")
+        let agreementKey = try SecureEnclaveDeviceKey.restore(from: device.agreementKey, context: context)
+        let secret = try AccountSecretWrap.unwrap(device.accountSecret, with: agreementKey.privateKey)
+            .withUnsafeBytes { Data($0) }
+        return try await perform { try $0.sendAccountToNewDevice(code: code, accountSecret: secret) }
+    }
+
+    func cancelAddingDevice() async {
+        _ = try? await perform { try $0.cancelAddingDevice() }
+    }
+
+    /// After sending the account to a new device: it registers itself within seconds, so
+    /// the device list is fetched again shortly.
+    func noteAddedDevice(_ name: String) {
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            await reloadDevices()
+        }
+    }
+
     /// Copies the kit's 24 words, and nothing else, the way passwords are copied: to this Mac
     /// only, kept out of clipboard history, and cleared after 30 seconds.
     func copyRecoveryWords(of kit: RecoveryKit) {
@@ -948,6 +1055,13 @@ extension AppModel {
     ]
 
     /// Shows both notices at the bottom of the window, as after a failed sync and a copy.
+    /// The welcome screen as while this Mac waits for its account from another device, or
+    /// back to the vault.
+    func showDemoJoining(_ joining: Bool = true) {
+        phase = joining ? .welcome : .unlocked
+        joiningCode = joining ? "e0df-9242-f81b-7272-aa2f" : nil
+    }
+
     func showDemoNotices() {
         message = "Couldn't sync (couldn't reach the server). Showing the copy on this Mac."
         copiedName = "AWS root"

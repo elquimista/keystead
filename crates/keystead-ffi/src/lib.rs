@@ -539,6 +539,34 @@ impl Vault {
         Ok(self.vault()?.remove_device(device_id_from(&device_id)?)?)
     }
 
+    /// Starts adding another device to this account; returns the setup line to copy to it.
+    /// It expires after ten minutes.
+    pub fn start_adding_device(&self) -> Result<String, CoreError> {
+        Ok(self.vault()?.start_adding_device()?.command())
+    }
+
+    /// The new device's name, once it has joined with the setup line.
+    pub fn new_device(&self) -> Result<Option<String>, CoreError> {
+        Ok(self.vault()?.new_device()?)
+    }
+
+    /// Sends this account's secret to the new device, sealed for it, if `code` is the one
+    /// it shows. Returns its name.
+    pub fn send_account_to_new_device(
+        &self,
+        code: String,
+        account_secret: Vec<u8>,
+    ) -> Result<String, CoreError> {
+        let secret = account_secret_from(account_secret)?;
+        Ok(self.vault()?.send_account_to_new_device(&code, &secret)?)
+    }
+
+    /// Stops adding a device; the setup line stops working.
+    pub fn cancel_adding_device(&self) -> Result<(), CoreError> {
+        self.vault()?.cancel_adding_device();
+        Ok(())
+    }
+
     /// Fetches changes from the server and saves them.
     pub fn sync(&self) -> Result<SyncResult, CoreError> {
         Ok(self.vault()?.sync()?.into())
@@ -1060,6 +1088,49 @@ pub fn account_secret_from_recovery_words(words: String) -> Result<Vec<u8>, Core
             }
         })?;
     Ok(secret.as_bytes().to_vec())
+}
+
+/// This Mac joining its account from a device the account already has: it has sent its
+/// one-time key with the setup line, shows the code to type there, and waits for the
+/// account secret. Then `Vault::recover`, with the line's server and owner fingerprint,
+/// finishes.
+#[derive(uniffi::Object)]
+pub struct DeviceJoin {
+    inner: keystead_client::JoiningDevice,
+}
+
+#[uniffi::export]
+impl DeviceJoin {
+    /// Joins with a setup line pasted from the other device.
+    #[uniffi::constructor]
+    pub fn start(line: String, device_name: String) -> Result<Arc<Self>, CoreError> {
+        let line = keystead_client::DeviceSetupLine::parse(&line).map_err(|error| {
+            CoreError::InvalidInput {
+                message: format!("{error:#}"),
+            }
+        })?;
+        Ok(Arc::new(Self {
+            inner: keystead_client::JoiningDevice::start(line, &device_name)?,
+        }))
+    }
+
+    /// The code to type on the other device.
+    pub fn code(&self) -> String {
+        self.inner.code().to_owned()
+    }
+
+    pub fn server(&self) -> String {
+        self.inner.line().server.clone()
+    }
+
+    pub fn owner_fingerprint(&self) -> String {
+        self.inner.line().owner_fingerprint.clone()
+    }
+
+    /// Asks once for the account secret; empty until the other device sends it.
+    pub fn poll(&self) -> Result<Option<Vec<u8>>, CoreError> {
+        Ok(self.inner.poll()?.map(|secret| secret.as_bytes().to_vec()))
+    }
 }
 
 /// Reads an invite pasted from a message.

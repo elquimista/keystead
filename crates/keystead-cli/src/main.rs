@@ -44,6 +44,18 @@ enum Command {
     Whoami,
     /// Show your recovery kit: 24 words that bring your account back on a new device
     RecoveryKit,
+    /// Add this machine to your account from a device that already has it: run
+    /// `keystead devices add` there (or Add a Device in the app) and use the line it shows
+    AddDevice {
+        server: String,
+        token: String,
+        /// The owner's fingerprint, from the line
+        #[arg(long)]
+        owner: String,
+        /// How this machine shows in your list of devices
+        #[arg(long, default_value = "Command line")]
+        name: String,
+    },
     /// Recover your account on this machine with the words from your recovery kit
     Recover {
         server: String,
@@ -224,6 +236,9 @@ enum ToChangeCommand {
 
 #[derive(Subcommand)]
 enum DevicesCommand {
+    /// Add another device to your account: shows a line for it, then asks for the code it
+    /// shows, and sends it your account, sealed so only it can open it
+    Add,
     /// Remove one of your other devices, such as a lost one; it can't sign in any more
     Remove { device_id: String },
 }
@@ -384,6 +399,22 @@ fn run(cli: Cli) -> Result<()> {
                 me.server, me.owner_fingerprint
             );
         }
+        Command::AddDevice {
+            server,
+            token,
+            owner,
+            name,
+        } => {
+            let line = format!("{server} {token} --owner {owner}");
+            let me = commands::add_this_device(&home, &line, &name, |code| {
+                println!("On your other device, type this code: {code}");
+                println!("Waiting for it, for up to ten minutes…");
+            })?;
+            println!(
+                "Added this machine to {}'s account (user {}) on {}.",
+                me.name, me.user_id, me.server
+            );
+        }
         Command::Recover { server, owner } => {
             let words = if std::io::stdin().is_terminal() {
                 rpassword::prompt_password("The 24 words from your recovery kit (hidden): ")?
@@ -446,6 +477,26 @@ fn run(cli: Cli) -> Result<()> {
                 })
                 .collect();
             print_table(&["ID", "NAME", "ADDED"], rows);
+        }
+        Command::Devices {
+            action: Some(DevicesCommand::Add),
+        } => {
+            let name = commands::add_device(
+                &home,
+                |line| {
+                    println!("On the new device, run this (or paste it into the app):\n");
+                    println!("  {line}\n");
+                    println!("Waiting for it, for up to ten minutes…");
+                },
+                |name| {
+                    print!("Type the code {name} shows: ");
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                    let mut code = String::new();
+                    std::io::stdin().lock().read_line(&mut code)?;
+                    Ok(code)
+                },
+            )?;
+            println!("Sent. {name} now finishes adding itself.");
         }
         Command::Devices {
             action: Some(DevicesCommand::Remove { device_id }),
