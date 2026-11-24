@@ -7,12 +7,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{
     AcceptInviteRequest, AddMemberRequest, ApprovalRequest, Conflict, CreateFolderRequest,
-    Directory, Enrolled, Invite, InviteRequest, PutItemRequest, SetupRequest, SyncEntry, SyncPage,
+    DeviceList, Directory, Enrolled, Invite, InviteRequest, PutItemRequest, RecoverRequest,
+    RecoveryChallenge, RecoveryChallengeRequest, SetupRequest, SyncEntry, SyncPage,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::ids::{DeviceId, FolderId, ItemId, UserId};
 use keystead_core::items::{Details, EncryptedItem, FolderInfo, ItemVersion, Overview};
-use keystead_core::keys::{AccountKeys, AccountSecret, FolderKey};
+use keystead_core::keys::{AccountKeys, AccountSecret, FolderKey, recovery_message};
 use rand::Rng;
 use rand::rngs::OsRng;
 
@@ -21,6 +22,9 @@ use crate::http::{Client, Failure};
 use crate::profile::{FolderRecord, Profile};
 
 const OWNER: UserId = UserId(1);
+/// What an older server answers for something it doesn't have yet: 404 on the whole route.
+const NEEDS_0_2: &str = "the server is older than Keystead 0.2.0 and can't do this yet; \
+                         update it to 0.2.0 or later";
 const PAGE_SIZE: i64 = 500;
 /// Sign in again this long before the server's session would expire.
 const SESSION_MARGIN: Duration = Duration::from_secs(60);
@@ -32,6 +36,8 @@ pub struct Whoami {
     pub fingerprint: String,
     pub server: String,
     pub is_owner: bool,
+    /// The owner's fingerprint, as this device pinned it. A recovery kit carries it.
+    pub owner_fingerprint: String,
 }
 
 /// An invite: everything a new user needs to join, including the owner's fingerprint so
@@ -92,6 +98,18 @@ pub struct UserRow {
     pub fingerprint: String,
 }
 
+/// One of this account's devices.
+#[derive(Debug)]
+pub struct DeviceRow {
+    pub id: DeviceId,
+    /// Empty for devices registered before devices had names.
+    pub name: String,
+    /// Seconds since the Unix epoch, when known.
+    pub added_at: Option<i64>,
+    /// The device this vault runs on.
+    pub current: bool,
+}
+
 #[derive(Debug)]
 pub struct ItemRow {
     pub id: ItemId,
@@ -125,6 +143,8 @@ pub struct NewAccount<'a> {
     pub server: &'a str,
     pub secret: &'a AccountSecret,
     pub device_id: DeviceId,
+    /// How the device shows in the account's device list, like "Ana's MacBook Pro".
+    pub device_name: &'a str,
     pub signer: Arc<dyn DeviceSigner>,
 }
 
@@ -146,6 +166,7 @@ pub fn setup(path: &Path, account: NewAccount<'_>, setup_code: &str, name: &str)
             keys: keys.public(),
             device_id: account.device_id,
             device_key: account.signer.public_key(),
+            device_name: account.device_name.to_owned(),
             approval: entry.approval.clone().expect("just approved"),
         },
     )?;
@@ -177,24 +198,14 @@ pub fn join(
             keys: keys.public(),
             device_id: account.device_id,
             device_key: account.signer.public_key(),
+            device_name: account.device_name.to_owned(),
         },
     )?;
     client.sign_in(account.device_id, account.signer.as_ref())?;
     let directory: Directory = client.get("/v1/directory", &[])?;
 
-    let owner = directory
-        .entries
-        .iter()
-        .find(|entry| entry.user_id == OWNER)
-        .context("the server has no owner")?;
-    let expected = normalize(owner_fingerprint);
-    if owner.keys.fingerprint() != expected || owner.verify(&owner.keys).is_err() {
-        bail!(
-            "the owner's fingerprint on this server is {}, not {expected}. Don't trust this \
-             server; ask the owner for a new invite.",
-            owner.keys.fingerprint()
-        );
-    }
+    let owner = owner_entry(&directory)?;
+    check_owner(owner, owner_fingerprint, "ask the owner for a new invite")?;
     let name = directory
         .entries
         .iter()
@@ -211,6 +222,91 @@ pub fn join(
     );
     profile.directory = directory.entries;
     Vault::create(path, profile, keys, account.signer)
+}
+
+/// Recovers an account onto a new device with its secret, from a recovery kit. The account
+/// key signs for the new device; then, as when joining, the owner's keys are pinned only
+/// if their fingerprint matches the one on the kit. Nothing is saved unless everything
+/// checks out. Call `sync` afterwards to fetch the account's folders and logins.
+pub fn recover(path: &Path, account: NewAccount<'_>, owner_fingerprint: &str) -> Result<Vault> {
+    const ADVICE: &str = "check the owner's fingerprint on your recovery kit";
+    let keys = AccountKeys::derive(account.secret);
+    let mut client = Client::new(account.server);
+    let challenge: RecoveryChallenge = match client.post(
+        "/v1/recover/challenge",
+        &RecoveryChallengeRequest {
+            keys: keys.public(),
+        },
+    ) {
+        Ok(challenge) => challenge,
+        Err(Failure::Status { code: 404, .. }) => bail!(NEEDS_0_2),
+        Err(error) => return Err(error.into()),
+    };
+    // Before registering anything, so a mistyped fingerprint leaves no trace.
+    check_owner(&challenge.owner, owner_fingerprint, ADVICE)?;
+    let device_key = account.signer.public_key();
+    let signature = keys.sign(&recovery_message(
+        challenge.challenge.as_slice(),
+        account.device_id,
+        &device_key,
+    ));
+    let enrolled: Enrolled = client.post(
+        "/v1/recover",
+        &RecoverRequest {
+            challenge: challenge.challenge,
+            device_id: account.device_id,
+            device_key,
+            device_name: account.device_name.to_owned(),
+            signature,
+        },
+    )?;
+    client.sign_in(account.device_id, account.signer.as_ref())?;
+    let directory: Directory = client.get("/v1/directory", &[])?;
+
+    let owner = owner_entry(&directory)?;
+    check_owner(owner, owner_fingerprint, ADVICE)?;
+    let me = directory
+        .entries
+        .iter()
+        .find(|entry| entry.user_id == enrolled.user_id)
+        .context("the server didn't list the recovered account")?;
+    if me.keys != keys.public() {
+        bail!("the server lists different keys for this account. Don't trust this server.");
+    }
+    let mut profile = Profile::new(
+        account.server,
+        &me.name,
+        enrolled.user_id,
+        account.device_id,
+        owner.keys.clone(),
+    );
+    profile.directory = directory.entries;
+    Vault::create(path, profile, keys, account.signer)
+}
+
+fn owner_entry(directory: &Directory) -> Result<&DirectoryEntry> {
+    directory
+        .entries
+        .iter()
+        .find(|entry| entry.user_id == OWNER)
+        .context("the server has no owner")
+}
+
+/// Checks the owner's keys match `fingerprint` and their self-approval verifies.
+/// `advice` says what to do if not.
+fn check_owner(owner: &DirectoryEntry, fingerprint: &str, advice: &str) -> Result<()> {
+    if owner.user_id != OWNER {
+        bail!("the server sent someone else as the owner. Don't trust this server.");
+    }
+    let expected = normalize(fingerprint);
+    if owner.keys.fingerprint() != expected || owner.verify(&owner.keys).is_err() {
+        bail!(
+            "the owner's fingerprint on this server is {}, not {expected}. Don't trust this \
+             server; {advice}.",
+            owner.keys.fingerprint()
+        );
+    }
+    Ok(())
 }
 
 /// A random 24-character password.
@@ -281,6 +377,7 @@ impl Vault {
             fingerprint: self.keys.public().fingerprint(),
             server: self.profile.server.clone(),
             is_owner: self.profile.user_id == OWNER,
+            owner_fingerprint: self.profile.owner.fingerprint(),
         }
     }
 
@@ -365,6 +462,33 @@ impl Vault {
         let path = format!("/v1/users/{user}/approval");
         let () = self.call(|client| client.post(&path, &request))??;
         Ok(entry.name)
+    }
+
+    /// This account's devices, from the server.
+    pub fn devices(&mut self) -> Result<Vec<DeviceRow>> {
+        let list: DeviceList = match self.call(|client| client.get("/v1/devices", &[]))? {
+            Ok(list) => list,
+            Err(Failure::Status { code: 404, .. }) => bail!(NEEDS_0_2),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(list
+            .devices
+            .into_iter()
+            .map(|device| DeviceRow {
+                id: device.device_id,
+                name: device.name,
+                added_at: device.added_at,
+                current: device.current,
+            })
+            .collect())
+    }
+
+    /// Removes another of this account's devices, such as a lost one: it can't sign in
+    /// any more. The device it runs on can't remove itself.
+    pub fn remove_device(&mut self, device: DeviceId) -> Result<()> {
+        let path = format!("/v1/devices/{device}");
+        let () = self.call(|client| client.delete(&path))??;
+        Ok(())
     }
 
     pub fn create_folder(&mut self, name: &str) -> Result<FolderId> {

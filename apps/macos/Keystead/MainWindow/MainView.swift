@@ -29,12 +29,14 @@ struct MainView: View {
 /// First launch: join a team with an invite, or set up a new one as its owner.
 struct WelcomeView: View {
     private enum Choice: Hashable {
-        case join, setUp
+        case join, setUp, recover
     }
 
     let model: AppModel
-    @State private var choice = Choice.join
+    @State private var choice = WelcomeView.initialChoice
     @State private var invite = ""
+    @State private var ownerFingerprint = ""
+    @State private var words = ""
     @State private var server = ""
     @State private var setupCode = ""
     @State private var name = ""
@@ -54,15 +56,17 @@ struct WelcomeView: View {
                 Picker("", selection: $choice) {
                     Text("Join a team").tag(Choice.join)
                     Text("Set up a new team").tag(Choice.setUp)
+                    Text("Recover an account").tag(Choice.recover)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 340)
+                .frame(width: 480)
 
                 Group {
                     switch choice {
                     case .join: joinForm
                     case .setUp: setUpForm
+                    case .recover: recoverForm
                     }
                 }
                 .frame(width: 480)
@@ -154,6 +158,65 @@ struct WelcomeView: View {
                 .disabled(!hasScheme || setupCode.trimmed.isEmpty || name.trimmed.isEmpty)
             }
         }
+    }
+
+    private var recoverForm: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Bring your account back on this Mac with your Recovery Kit, for example after "
+                + "your old Mac was lost or replaced.")
+                .fixedSize(horizontal: false, vertical: true)
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 12) {
+                GridRow {
+                    Text("Server address")
+                        .gridColumnAlignment(.trailing)
+                    TextField("", text: $server, prompt: Text("https://keys.example.com"))
+                        .textFieldStyle(.roundedBorder)
+                }
+                GridRow {
+                    Text("Owner's fingerprint")
+                    TextField("", text: $ownerFingerprint, prompt: Text("From your Recovery Kit"))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+                GridRow(alignment: .top) {
+                    Text("The 24 words")
+                    TextField(
+                        "", text: $words, prompt: Text("In order, as on your Recovery Kit"),
+                        axis: .vertical
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(2...8)
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Recover") {
+                    Task {
+                        await model.recover(
+                            server: server, ownerFingerprint: ownerFingerprint, words: words)
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .controlSize(.large)
+                .disabled(!hasScheme || ownerFingerprint.trimmed.isEmpty || words.trimmed.isEmpty)
+            }
+        }
+    }
+
+    /// Join, unless a Debug build was launched with `-welcome setup` or `-welcome recover`.
+    private static var initialChoice: Choice {
+        #if DEBUG
+        let arguments = CommandLine.arguments
+        if let index = arguments.firstIndex(of: "-welcome"), index + 1 < arguments.count {
+            switch arguments[index + 1] {
+            case "setup": return .setUp
+            case "recover": return .recover
+            default: break
+            }
+        }
+        #endif
+        return .join
     }
 
     private var hasScheme: Bool {

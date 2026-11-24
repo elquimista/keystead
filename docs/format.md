@@ -34,6 +34,7 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
 | Account signing key | Ed25519, derived from the secret | Derived in memory at unlock |
 | Folder key | 32 random bytes per folder | Wrapped for each member's account encryption key |
 | Device key | Signs the device in to the server | Secure Enclave, TPM, or (CLI) a local file |
+| Recovery kit | The account secret as 24 words | On paper, with the user |
 
 **Deriving account keys.** HKDF-SHA256 with no salt, input = the account secret:
 
@@ -71,6 +72,19 @@ folder id's 16 bytes, so a wrapped key can't be moved to another folder.
 data. It stays on that Mac, next to the Secure Enclave key's handle; the handle only works
 in that Mac's Secure Enclave, after Touch ID or the Mac password.
 
+### Recovery kit
+
+The recovery kit is the account secret written as words, so a user can bring their account
+back on a new device when every device they had is gone:
+
+- **The words** are the BIP 39 English mnemonic of the 32-byte secret: 24 words, the last of
+  which also carries a checksum. Readers ignore case, spacing, line breaks, commas and
+  numbering, and report a word that isn't on the list or a checksum that doesn't match.
+- **Alongside the words** the kit shows the server address and the owner's fingerprint. A
+  recovering device needs the fingerprint to check the owner, just as an invite carries it.
+- The kit is printed or written down and kept offline. Apps only show it after the user
+  unlocks with their device key, and never store it.
+
 ### Device keys and sign-in
 
 A device registers a public key with one of these schemes:
@@ -83,6 +97,25 @@ A device registers a public key with one of these schemes:
 To sign in, the device asks for a random challenge and signs
 `transcript("keystead/sign-in/v1", device id, challenge)`. The server answers with a
 short-lived bearer token.
+
+An account can have several devices. Each has an optional name, like "Ana's MacBook Pro",
+and the time it was added. A signed-in device can list the account's devices and remove the
+others (not itself); a removed device's sessions end at once.
+
+**Recovering an account on a new device** uses the account signing key instead of an
+existing device:
+
+1. The device derives the account keys from the kit's secret and sends their public half
+   to `POST /v1/recover/challenge`. The server answers with a random challenge and the
+   owner's directory entry.
+2. The device checks the owner's fingerprint against the kit and the owner's
+   self-approval, before registering anything.
+3. It signs `transcript("keystead/recover/v1", challenge, device id, device key scheme,
+   device key)` with the account signing key, and sends that with its new device key to
+   `POST /v1/recover`. The server checks the signature against the account's registered
+   signing key, so only the account secret can add a device this way.
+4. The device signs in as usual and checks the directory: the owner's keys must still match
+   the kit's fingerprint, and the account's own entry must carry the keys it derived.
 
 ## Items
 
@@ -141,7 +174,7 @@ verifies against them.
 
 ## API
 
-All requests except setup, sign-in and accepting an invite need
+All requests except setup, sign-in, accepting an invite and recovery need
 `Authorization: Bearer <token>`. Errors return `{"error": "…"}` with the usual status
 codes (400, 401, 403, 404, 409).
 
@@ -152,6 +185,10 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/sign-in` | `SignInRequest` | `Session` | Any device |
 | `POST /v1/invites` | `InviteRequest` | `Invite` | Owner |
 | `POST /v1/invites/accept` | `AcceptInviteRequest` | `Enrolled` | Invitee, with the token |
+| `POST /v1/recover/challenge` | `RecoveryChallengeRequest` | `RecoveryChallenge` | A device with the account secret |
+| `POST /v1/recover` | `RecoverRequest` | `Enrolled` | A device with the account secret |
+| `GET /v1/devices` | | `DeviceList` | Members |
+| `DELETE /v1/devices/{id}` | | 204 | The device's own account, from another device |
 | `POST /v1/users/{id}/approval` | `ApprovalRequest` | 204 | Owner |
 | `GET /v1/directory` | | `Directory` | Members |
 | `POST /v1/folders` | `CreateFolderRequest` | 201 | Members |
@@ -171,7 +208,8 @@ and items, and `left` entries telling the device to drop a folder. The prototype
 
 ## Not in version 1 yet
 
-- Adding a second device to an account, and recovery (recovery kit, recovery by admins).
+- Adding a second device by approving it from an existing one, and recovery by admins.
+  (A recovery kit can already add a device.)
 - Group keys.
 - Read-only and manage roles (every folder member can edit).
 - Paginating a large folder that arrives with a join.

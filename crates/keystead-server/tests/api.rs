@@ -8,14 +8,16 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use keystead_core::api::{
     AcceptInviteRequest, AddMemberRequest, ApprovalRequest, Challenge, ChallengeRequest, Conflict,
-    CreateFolderRequest, Directory, Invite, InviteRequest, PutItemRequest, Session, SetupRequest,
+    CreateFolderRequest, DeviceList, Directory, Enrolled, Invite, InviteRequest, PutItemRequest,
+    RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, Session, SetupRequest,
     SignInRequest, SyncEntry, SyncPage,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::ids::{DeviceId, FolderId, ItemId, UserId};
 use keystead_core::items::{Details, EncryptedItem, FolderInfo, ItemVersion, Overview};
 use keystead_core::keys::{
-    AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, SoftwareDeviceKey, sign_in_message,
+    AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, SoftwareDeviceKey, recovery_message,
+    sign_in_message,
 };
 use keystead_server::{AppState, router};
 use serde::Serialize;
@@ -112,9 +114,14 @@ struct Person {
 
 impl Person {
     fn new(name: &str) -> Self {
+        Self::with_secret(name, &AccountSecret::generate())
+    }
+
+    /// The same account as another `Person` with this secret, on a new device.
+    fn with_secret(name: &str, secret: &AccountSecret) -> Self {
         Self {
             name: name.into(),
-            keys: AccountKeys::derive(&AccountSecret::generate()),
+            keys: AccountKeys::derive(secret),
             device: SoftwareDeviceKey::generate(),
             device_id: DeviceId::random(),
             user_id: UserId(0),
@@ -204,7 +211,10 @@ impl Person {
 }
 
 async fn set_up_owner(server: &Server) -> Person {
-    let mut alice = Person::new("Alice");
+    set_up(server, Person::new("Alice")).await
+}
+
+async fn set_up(server: &Server, mut alice: Person) -> Person {
     alice.user_id = UserId(1);
     let mut entry = alice.entry();
     entry.approve(&alice.keys);
@@ -214,6 +224,7 @@ async fn set_up_owner(server: &Server) -> Person {
         keys: alice.keys.public(),
         device_id: alice.device_id,
         device_key: alice.device.public(),
+        device_name: "Alice's Mac".into(),
         approval: entry.approval.unwrap(),
     };
     let (status, body) = server
@@ -246,6 +257,7 @@ async fn invite(server: &Server, owner: &Person, name: &str) -> Person {
                 keys: person.keys.public(),
                 device_id: person.device_id,
                 device_key: person.device.public(),
+                device_name: format!("{name}'s Mac"),
             }),
         )
         .await;
@@ -479,6 +491,7 @@ async fn access_rules_are_enforced() {
         keys: mallory.keys.public(),
         device_id: mallory.device_id,
         device_key: mallory.device.public(),
+        device_name: String::new(),
         approval: entry.approval.unwrap(),
     };
     let (status, _) = server
@@ -656,4 +669,224 @@ async fn the_feed_pages_in_order() {
     assert_eq!(seen.len(), 30);
     assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
     assert_eq!(pages, 3);
+}
+
+/// Asks for a recovery challenge for `keys`, as a new device would.
+async fn recovery_challenge(server: &Server, keys: AccountPublicKeys) -> (StatusCode, Value) {
+    server
+        .call(
+            Method::POST,
+            "/v1/recover/challenge",
+            None,
+            json(&RecoveryChallengeRequest { keys }),
+        )
+        .await
+}
+
+/// Recovers `person`'s account onto their (new) device, signing with `signer`'s keys.
+async fn recover(server: &Server, person: &Person, signer: &AccountKeys) -> (StatusCode, Value) {
+    let (status, body) = recovery_challenge(server, person.keys.public()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let challenge: RecoveryChallenge = decode(body);
+    assert_eq!(challenge.owner.user_id, UserId(1));
+    let device_key = person.device.public();
+    let signature = signer.sign(&recovery_message(
+        challenge.challenge.as_slice(),
+        person.device_id,
+        &device_key,
+    ));
+    server
+        .call(
+            Method::POST,
+            "/v1/recover",
+            None,
+            json(&RecoverRequest {
+                challenge: challenge.challenge,
+                device_id: person.device_id,
+                device_key,
+                device_name: "Alice's new Mac".into(),
+                signature,
+            }),
+        )
+        .await
+}
+
+async fn devices(server: &Server, person: &Person) -> (StatusCode, Value) {
+    server
+        .call(Method::GET, "/v1/devices", person.token(), None)
+        .await
+}
+
+#[tokio::test]
+async fn recovery_adds_a_device_and_the_lost_one_can_be_removed() {
+    let server = Server::new().await;
+    let secret = AccountSecret::generate();
+    let old_mac = set_up(&server, Person::with_secret("Alice", &secret)).await;
+    let mut bob = invite(&server, &old_mac, "Bob").await;
+
+    // Keys nobody on the server has: no challenge.
+    let (status, _) = recovery_challenge(&server, Person::new("Eve").keys.public()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Someone without Alice's secret can't sign for her account, even with a challenge.
+    let mut new_mac = Person::with_secret("Alice", &secret);
+    let (status, _) = recover(&server, &new_mac, &bob.keys).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // With the secret from her recovery kit, she can.
+    let (status, body) = recover(&server, &new_mac, &new_mac.keys).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(decode::<Enrolled>(body).user_id, UserId(1));
+    new_mac.sign_in(&server).await;
+    assert_eq!(new_mac.user_id, UserId(1));
+
+    let (status, body) = devices(&server, &new_mac).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list: DeviceList = decode(body);
+    assert_eq!(list.devices.len(), 2);
+    let current = list.devices.iter().find(|device| device.current).unwrap();
+    assert_eq!(current.device_id, new_mac.device_id);
+    assert_eq!(current.name, "Alice's new Mac");
+    assert!(current.added_at.is_some());
+    assert!(
+        list.devices
+            .iter()
+            .any(|device| device.name == "Alice's Mac")
+    );
+
+    // She can't remove the device she's using, or someone else's.
+    let remove = |device: DeviceId| format!("/v1/devices/{device}");
+    let (status, _) = server
+        .call(
+            Method::DELETE,
+            &remove(new_mac.device_id),
+            new_mac.token(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = server
+        .call(
+            Method::DELETE,
+            &remove(bob.device_id),
+            new_mac.token(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Removing the lost Mac ends its session and stops it signing in again.
+    let (status, _) = server
+        .call(
+            Method::DELETE,
+            &remove(old_mac.device_id),
+            new_mac.token(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = devices(&server, &old_mac).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = server
+        .call(
+            Method::POST,
+            "/v1/sign-in/challenge",
+            None,
+            json(&ChallengeRequest {
+                device_id: old_mac.device_id,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Bob's own session is untouched, and he sees only his own device.
+    bob.sign_in(&server).await;
+    let (status, body) = devices(&server, &bob).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(decode::<DeviceList>(body).devices.len(), 1);
+}
+
+#[tokio::test]
+async fn a_recovery_challenge_works_once() {
+    let server = Server::new().await;
+    let secret = AccountSecret::generate();
+    set_up(&server, Person::with_secret("Alice", &secret)).await;
+    let new_mac = Person::with_secret("Alice", &secret);
+    let (status, body) = recovery_challenge(&server, new_mac.keys.public()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let challenge: RecoveryChallenge = decode(body);
+    assert_eq!(challenge.owner.keys, new_mac.keys.public());
+    let device_key = new_mac.device.public();
+    let request = RecoverRequest {
+        signature: new_mac.keys.sign(&recovery_message(
+            challenge.challenge.as_slice(),
+            new_mac.device_id,
+            &device_key,
+        )),
+        challenge: challenge.challenge,
+        device_id: new_mac.device_id,
+        device_key,
+        device_name: String::new(),
+    };
+    let (status, _) = server
+        .call(Method::POST, "/v1/recover", None, json(&request))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = server
+        .call(Method::POST, "/v1/recover", None, json(&request))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// A database from Keystead 0.1.0 opens with its data intact and gains the new columns.
+#[tokio::test]
+async fn a_database_from_0_1_0_is_upgraded() {
+    let path = std::env::temp_dir().join(format!(
+        "keystead-server-migrate-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+        sqlx::raw_sql(include_str!("../src/schema.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, name, encryption_key, signing_key, is_owner)
+             VALUES (1, 'Alice', zeroblob(32), zeroblob(32), 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO devices (id, user_id, public_key) VALUES ('d1', 1, '{}')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+    for _ in 0..2 {
+        // Opening twice runs each migration once.
+        let state = AppState::open(&path).await.unwrap();
+        assert_eq!(state.pending_setup_code().await.unwrap(), None);
+    }
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    let row: (String, String, Option<i64>) =
+        sqlx::query_as("SELECT id, name, added_at FROM devices")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, ("d1".to_owned(), String::new(), None));
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(version, 1);
+    pool.close().await;
+    let _ = std::fs::remove_file(&path);
 }

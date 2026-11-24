@@ -375,6 +375,22 @@ private struct PersonDetail: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Section("Recovery Kit") {
+                    Text("If this Mac is lost, broken or wiped, your Recovery Kit brings your "
+                        + "account back on a new one.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Show Recovery Kit…") { model.sheet = .recoveryKit(afterSetup: false) }
+                }
+                Section("Your devices") {
+                    if let problem = model.devicesProblem {
+                        Text("Couldn't load your devices: \(problem).")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(model.devices, id: \.deviceId) { device in
+                        DeviceRow(model: model, device: device)
+                    }
+                }
             } else if !user.approved {
                 Section {
                     if model.isOwner {
@@ -399,6 +415,58 @@ private struct PersonDetail: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// One of the account's devices, with a way to remove the others.
+private struct DeviceRow: View {
+    let model: AppModel
+    let device: AccountDevice
+    @State private var confirming = false
+    @State private var error: String?
+
+    private var title: String { device.name.isEmpty ? "Unnamed device" : device.name }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "laptopcomputer")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                if let added = device.addedAt {
+                    Text("Added " + Date(timeIntervalSince1970: TimeInterval(added))
+                        .formatted(date: .abbreviated, time: .omitted))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let error {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            Spacer()
+            if device.current {
+                Text("This Mac")
+                    .foregroundStyle(.secondary)
+            } else {
+                Button("Remove…") { confirming = true }
+            }
+        }
+        .confirmationDialog("Remove \u{201C}\(title)\u{201D}?", isPresented: $confirming) {
+            Button("Remove", role: .destructive) {
+                Task {
+                    do {
+                        try await model.removeDevice(device)
+                    } catch let failure {
+                        error = describe(failure)
+                    }
+                }
+            }
+        } message: {
+            Text("It won't be able to sign in any more. Do this for a lost or retired device. "
+                + "To use it again, recover your account on it with your Recovery Kit.")
+        }
     }
 }
 

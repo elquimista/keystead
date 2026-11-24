@@ -88,6 +88,15 @@ keystead ls
 keystead show "AWS root"
 ```
 
+Each account has a recovery kit: its secret as 24 words, to bring it back on a new device.
+
+```sh
+keystead recovery-kit                # Alice: show the words, server and fingerprints
+keystead recover http://127.0.0.1:8080 --owner <owner's fingerprint>  # on a new device
+keystead devices                     # list this account's devices
+keystead devices remove <device id>  # lock out a lost one
+```
+
 The CLI keeps the shared `profile.json` (the same format the Mac app uses) and its keys in
 `device.json`. For now those keys are stored unencrypted in `$KEYSTEAD_HOME/device.json` (readable only
 by you). Use it for trying things out, not for real secrets yet.

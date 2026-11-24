@@ -9,6 +9,7 @@ rust-version = "1.85"
 publish = false
 
 [workspace.dependencies]
+bip39 = { version = "2", features = ["zeroize"] }
 keystead-core = { path = "crates/keystead-core" }
 keystead-server = { path = "crates/keystead-server" }
 anyhow = "1"

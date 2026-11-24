@@ -11,8 +11,8 @@ pub mod profile;
 mod vault;
 
 pub use vault::{
-    EditOutcome, InviteInfo, ItemRow, NewAccount, SyncSummary, UserRow, Vault, Whoami,
-    generate_password, join, setup,
+    DeviceRow, EditOutcome, InviteInfo, ItemRow, NewAccount, SyncSummary, UserRow, Vault, Whoami,
+    generate_password, join, recover, setup,
 };
 
 use keystead_core::encoding::Bytes;

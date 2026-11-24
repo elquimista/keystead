@@ -91,6 +91,10 @@ impl Client {
         read(self.request("POST", path).send_json(body))
     }
 
+    pub fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
+        read(self.request("DELETE", path).call())
+    }
+
     pub fn put<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,

@@ -1,10 +1,11 @@
 #if DEBUG
 import AppKit
+import SwiftUI
 
 /// Debug builds only: with `-snapshot`, steps the main window through its sections and
-/// selections, saves a picture of each and how its split view's columns are laid out, then
-/// quits. Pair it with `-demo`. Everything goes to the app's temporary folder, inside its sandbox
-/// container; the path is printed.
+/// selections, saves a picture of each (and of any sheet) and how its split view's columns
+/// are laid out, then quits. Pair it with `-demo`. Everything goes to the app's temporary
+/// folder, inside its sandbox container; the path is printed.
 ///
 ///   Keystead.app/Contents/MacOS/Keystead -demo -snapshot
 enum DebugSnapshots {
@@ -22,11 +23,18 @@ enum DebugSnapshots {
             ("1-all-logins", { model.section = .allLogins }),
             ("2-people", { model.section = .people }),
         ]
-        if model.users.count > 1 {
+        if model.users.count <= 1 {
+            steps += [
+                ("2a-kit-after-setup", { model.sheet = .recoveryKit(afterSetup: true) }),
+                ("2b-kit-closed", { model.sheet = nil }),
+            ]
+        } else {
             steps += [
                 ("3-person-waiting", { model.selectedUserID = 3 }),
                 ("4-person-approved", { model.selectedUserID = 2 }),
                 ("5-person-you", { model.selectedUserID = 1 }),
+                ("5a-recovery-kit", { model.sheet = .recoveryKit(afterSetup: false) }),
+                ("5b-kit-closed", { model.sheet = nil }),
                 ("6-login", {
                     model.section = .allLogins
                     model.selectedItemID = model.items.first?.id
@@ -47,6 +55,19 @@ enum DebugSnapshots {
             report += "\(name): window \(Int(window.frame.width))x\(Int(window.frame.height))\n"
             report += columns(in: window)
             save(window, to: directory.appending(path: "\(name).png"))
+            if let sheet = window.attachedSheet {
+                save(sheet, to: directory.appending(path: "\(name)-sheet.png"))
+            }
+        }
+        if model.users.count > 1, let kit = try? await model.recoveryKit() {
+            // The printed page, as the print panel would get it.
+            let renderer = ImageRenderer(content: RecoveryKitPage(kit: kit, printed: .now))
+            renderer.scale = 1.5
+            if let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+                let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+            {
+                try? png.write(to: directory.appending(path: "9-printed-kit.png"))
+            }
         }
         try? report.write(to: directory.appending(path: "report.txt"), atomically: true, encoding: .utf8)
         print("Snapshots in \(directory.path)")

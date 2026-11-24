@@ -84,6 +84,20 @@ pub struct Identity {
     pub fingerprint: String,
     pub server: String,
     pub is_owner: bool,
+    /// The owner's fingerprint, as this device pinned it. Recovery kits carry it.
+    pub owner_fingerprint: String,
+}
+
+/// One of the account's devices.
+#[derive(uniffi::Record)]
+pub struct AccountDevice {
+    pub device_id: String,
+    /// Empty for devices registered before devices had names.
+    pub name: String,
+    /// Seconds since the Unix epoch, when known.
+    pub added_at: Option<i64>,
+    /// The device this app runs on.
+    pub current: bool,
 }
 
 /// An invite to join a server. `command` is the line to send to the new user.
@@ -157,6 +171,8 @@ pub struct Vault {
 impl Vault {
     /// Claims a new server with the setup code it printed on first start. The caller
     /// becomes the owner.
+    // Swift calls this with every argument labeled, so a long list reads fine there.
+    #[allow(clippy::too_many_arguments)]
     #[uniffi::constructor]
     pub fn setup(
         profile_path: String,
@@ -165,6 +181,7 @@ impl Vault {
         name: String,
         account_secret: Vec<u8>,
         device_id: String,
+        device_name: String,
         signer: Arc<dyn DeviceSigner>,
     ) -> Result<Arc<Self>, CoreError> {
         let secret = account_secret_from(account_secret)?;
@@ -174,6 +191,7 @@ impl Vault {
                 server: &server,
                 secret: &secret,
                 device_id: device_id_from(&device_id)?,
+                device_name: &device_name,
                 signer: Arc::new(SignerAdapter(signer)),
             },
             &setup_code,
@@ -186,6 +204,8 @@ impl Vault {
 
     /// Joins a server with an invite, checking the owner's fingerprint that came with it.
     /// Saves the profile at `profile_path` only if everything checks out.
+    // Swift calls this with every argument labeled, so a long list reads fine there.
+    #[allow(clippy::too_many_arguments)]
     #[uniffi::constructor]
     pub fn join(
         profile_path: String,
@@ -194,6 +214,7 @@ impl Vault {
         owner_fingerprint: String,
         account_secret: Vec<u8>,
         device_id: String,
+        device_name: String,
         signer: Arc<dyn DeviceSigner>,
     ) -> Result<Arc<Self>, CoreError> {
         let secret = account_secret_from(account_secret)?;
@@ -203,9 +224,40 @@ impl Vault {
                 server: &server,
                 secret: &secret,
                 device_id: device_id_from(&device_id)?,
+                device_name: &device_name,
                 signer: Arc::new(SignerAdapter(signer)),
             },
             &token,
+            &owner_fingerprint,
+        )?;
+        Ok(Arc::new(Self {
+            inner: Mutex::new(vault),
+        }))
+    }
+
+    /// Recovers an account onto this device with its secret, from a recovery kit's words
+    /// (see `account_secret_from_recovery_words`). Checks the owner's fingerprint from the
+    /// kit before registering anything. Sync afterwards to fetch folders and logins.
+    #[uniffi::constructor]
+    pub fn recover(
+        profile_path: String,
+        server: String,
+        owner_fingerprint: String,
+        account_secret: Vec<u8>,
+        device_id: String,
+        device_name: String,
+        signer: Arc<dyn DeviceSigner>,
+    ) -> Result<Arc<Self>, CoreError> {
+        let secret = account_secret_from(account_secret)?;
+        let vault = keystead_client::recover(
+            Path::new(&profile_path),
+            NewAccount {
+                server: &server,
+                secret: &secret,
+                device_id: device_id_from(&device_id)?,
+                device_name: &device_name,
+                signer: Arc::new(SignerAdapter(signer)),
+            },
             &owner_fingerprint,
         )?;
         Ok(Arc::new(Self {
@@ -239,7 +291,28 @@ impl Vault {
             fingerprint: whoami.fingerprint,
             server: whoami.server,
             is_owner: whoami.is_owner,
+            owner_fingerprint: whoami.owner_fingerprint,
         })
+    }
+
+    /// The account's devices, from the server.
+    pub fn devices(&self) -> Result<Vec<AccountDevice>, CoreError> {
+        Ok(self
+            .vault()?
+            .devices()?
+            .into_iter()
+            .map(|device| AccountDevice {
+                device_id: device.id.to_string(),
+                name: device.name,
+                added_at: device.added_at,
+                current: device.current,
+            })
+            .collect())
+    }
+
+    /// Removes another of the account's devices, such as a lost Mac.
+    pub fn remove_device(&self, device_id: String) -> Result<(), CoreError> {
+        Ok(self.vault()?.remove_device(device_id_from(&device_id)?)?)
     }
 
     /// Fetches changes from the server and saves them.
@@ -377,6 +450,28 @@ pub fn new_device_id() -> String {
 #[uniffi::export]
 pub fn generate_password() -> String {
     keystead_client::generate_password()
+}
+
+/// The account secret as the 24 words of a recovery kit. The words are as secret as the
+/// account itself: show them only for the user to write down or print.
+#[uniffi::export]
+pub fn recovery_words(account_secret: Vec<u8>) -> Result<String, CoreError> {
+    Ok(account_secret_from(account_secret)?
+        .recovery_words()
+        .to_string())
+}
+
+/// Reads the 24 words of a recovery kit back into the account secret. Spacing, case and
+/// numbering don't matter; a mistyped word is reported.
+#[uniffi::export]
+pub fn account_secret_from_recovery_words(words: String) -> Result<Vec<u8>, CoreError> {
+    let secret =
+        keystead_core::keys::AccountSecret::from_recovery_words(&words).map_err(|error| {
+            CoreError::InvalidInput {
+                message: error.to_string(),
+            }
+        })?;
+    Ok(secret.as_bytes().to_vec())
 }
 
 /// Reads an invite pasted from a message.

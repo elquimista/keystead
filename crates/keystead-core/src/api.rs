@@ -19,6 +19,9 @@ pub struct SetupRequest {
     pub keys: AccountPublicKeys,
     pub device_id: DeviceId,
     pub device_key: DevicePublicKey,
+    /// A name to tell the device apart, like "Ana's MacBook Pro". Optional.
+    #[serde(default)]
+    pub device_name: String,
     /// The owner's own directory entry signature (the entry gets user id 1).
     pub approval: Bytes,
 }
@@ -75,6 +78,55 @@ pub struct AcceptInviteRequest {
     pub keys: AccountPublicKeys,
     pub device_id: DeviceId,
     pub device_key: DevicePublicKey,
+    #[serde(default)]
+    pub device_name: String,
+}
+
+/// `POST /v1/recover/challenge`: a new device asks to recover the account with these
+/// public keys.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryChallengeRequest {
+    pub keys: AccountPublicKeys,
+}
+
+/// The answer to `RecoveryChallengeRequest`: a challenge to sign, and the owner's directory
+/// entry, so the device can check the owner's fingerprint from the recovery kit before it
+/// registers anything.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryChallenge {
+    pub challenge: Bytes,
+    pub owner: DirectoryEntry,
+}
+
+/// `POST /v1/recover`: registers a new device for an existing account. The account's
+/// signing key signs `recovery_message(challenge, device_id, device_key)`, which only
+/// someone with the account secret (from a recovery kit) can do. Answered with `Enrolled`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoverRequest {
+    pub challenge: Bytes,
+    pub device_id: DeviceId,
+    pub device_key: DevicePublicKey,
+    #[serde(default)]
+    pub device_name: String,
+    pub signature: Bytes,
+}
+
+/// One of the signed-in user's devices.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub device_id: DeviceId,
+    /// Empty for devices registered before devices had names.
+    pub name: String,
+    /// Seconds since the Unix epoch; absent for devices registered before this was kept.
+    pub added_at: Option<i64>,
+    /// The device making this request.
+    pub current: bool,
+}
+
+/// `GET /v1/devices`: the signed-in user's devices.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeviceList {
+    pub devices: Vec<DeviceInfo>,
 }
 
 /// `POST /v1/users/{user_id}/approval` (owner only): the owner's signature over the

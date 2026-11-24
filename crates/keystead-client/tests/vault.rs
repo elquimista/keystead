@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use keystead_client::{DeviceSigner, EditOutcome, NewAccount, Vault, join, setup};
+use keystead_client::{DeviceSigner, EditOutcome, NewAccount, Vault, join, recover, setup};
 use keystead_core::encoding::Bytes;
 use keystead_core::ids::DeviceId;
 use keystead_core::items::{Details, Overview};
@@ -96,6 +96,7 @@ fn a_secure_enclave_style_device_joins_and_syncs() {
             server: &fixture.url,
             secret: &alice_secret,
             device_id: DeviceId::random(),
+            device_name: "Test device",
             signer: Arc::new(SoftwareDeviceKey::generate()),
         },
         &fixture.setup_code,
@@ -114,6 +115,7 @@ fn a_secure_enclave_style_device_joins_and_syncs() {
             server: &invite.server,
             secret: &bob_secret,
             device_id: DeviceId::random(),
+            device_name: "Test device",
             signer: bob_signer.clone(),
         },
         &invite.token,
@@ -170,6 +172,7 @@ fn opening_with_the_wrong_secret_cannot_read_items() {
             server: &fixture.url,
             secret: &secret,
             device_id: DeviceId::random(),
+            device_name: "Test device",
             signer: signer.clone(),
         },
         &fixture.setup_code,
@@ -186,6 +189,106 @@ fn opening_with_the_wrong_secret_cannot_read_items() {
     )
     .unwrap();
     assert!(impostor.folders().is_err());
+}
+
+#[test]
+fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
+    let fixture = Fixture::start();
+    let enclave = || -> Arc<dyn DeviceSigner> {
+        Arc::new(P256Signer(p256::ecdsa::SigningKey::random(
+            &mut rand_core_rng(),
+        )))
+    };
+
+    // Alice owns the server from her Mac and shares a folder with Bob.
+    let alice_secret = AccountSecret::generate();
+    let old_mac = enclave();
+    let mut alice = setup(
+        &fixture.profile("alice-old"),
+        NewAccount {
+            server: &fixture.url,
+            secret: &alice_secret,
+            device_id: DeviceId::random(),
+            device_name: "Alice's old Mac",
+            signer: old_mac.clone(),
+        },
+        &fixture.setup_code,
+        "Alice",
+    )
+    .unwrap();
+    let owner_fingerprint = alice.whoami().owner_fingerprint;
+    assert_eq!(owner_fingerprint, alice.whoami().fingerprint);
+    alice.create_folder("Production").unwrap();
+    alice
+        .add(
+            "Production",
+            Overview {
+                name: "AWS root".into(),
+                ..Overview::default()
+            },
+            Details {
+                password: "s3cret".into(),
+                notes: String::new(),
+            },
+        )
+        .unwrap();
+    drop(alice);
+
+    // Her Mac is gone; she has the words from her recovery kit.
+    let words = alice_secret.recovery_words();
+    let secret = AccountSecret::from_recovery_words(&words).unwrap();
+    let new_device = |name| NewAccount {
+        server: &fixture.url,
+        secret: &secret,
+        device_id: DeviceId::random(),
+        device_name: name,
+        signer: enclave(),
+    };
+
+    // A kit with the wrong owner fingerprint is refused, and nothing is saved.
+    let error = recover(
+        &fixture.profile("alice-wrong"),
+        new_device("Alice's new Mac"),
+        "0000-0000-0000-0000-0000",
+    )
+    .err()
+    .unwrap();
+    assert!(format!("{error:#}").contains("Don't trust this server"));
+    assert!(!fixture.profile("alice-wrong").exists());
+
+    let mut alice = recover(
+        &fixture.profile("alice-new"),
+        new_device("Alice's new Mac"),
+        &owner_fingerprint,
+    )
+    .unwrap();
+    let me = alice.whoami();
+    assert!(me.is_owner);
+    assert_eq!(me.fingerprint, owner_fingerprint);
+    alice.sync().unwrap();
+    assert_eq!(alice.folders().unwrap(), ["Production"]);
+    let rows = alice.list().unwrap();
+    assert_eq!(rows[0].name, "AWS root");
+    assert_eq!(alice.open_item(rows[0].id).unwrap().1.password, "s3cret");
+
+    // Both Macs are listed; removing the old one locks it out.
+    let devices = alice.devices().unwrap();
+    assert_eq!(devices.len(), 2);
+    let current = devices.iter().find(|device| device.current).unwrap();
+    assert_eq!(current.name, "Alice's new Mac");
+    let old = devices.iter().find(|device| !device.current).unwrap();
+    assert_eq!(old.name, "Alice's old Mac");
+    assert!(
+        alice.remove_device(current.id).is_err(),
+        "can't remove itself"
+    );
+    alice.remove_device(old.id).unwrap();
+    assert_eq!(alice.devices().unwrap().len(), 1);
+    let mut stolen = Vault::open(&fixture.profile("alice-old"), &alice_secret, old_mac).unwrap();
+    assert!(stolen.sync().is_err());
+
+    // She's still the owner: she can invite.
+    alice.invite("Bob").unwrap();
 }
 
 fn rand_core_rng() -> impl p256::elliptic_curve::rand_core::CryptoRngCore {

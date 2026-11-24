@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::encoding::Key32;
@@ -30,6 +30,15 @@ pub use error::ApiError;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
+/// Changes to the schema since `schema.sql` (version 0.1.0), in order. A database records
+/// how many it has run in SQLite's `user_version`, so each runs once, on new and existing
+/// servers alike. Only ever append.
+const MIGRATIONS: &[&str] = &[
+    // 1 (0.2.0): device names, and when each device was added.
+    "ALTER TABLE devices ADD COLUMN name TEXT NOT NULL DEFAULT '';
+     ALTER TABLE devices ADD COLUMN added_at INTEGER;",
+];
+
 /// Shared by every request. Writes go through one connection so change numbers commit in
 /// order (see `prototypes/change-feed`); reads use a pool.
 #[derive(Clone)]
@@ -38,6 +47,7 @@ pub struct AppState {
     readers: SqlitePool,
     sessions: Arc<Mutex<HashMap<[u8; 32], accounts::SessionInfo>>>,
     challenges: Arc<Mutex<HashMap<Vec<u8>, accounts::PendingChallenge>>>,
+    recoveries: Arc<Mutex<HashMap<Vec<u8>, accounts::PendingRecovery>>>,
 }
 
 impl AppState {
@@ -56,6 +66,7 @@ impl AppState {
             .connect_with(options.clone())
             .await?;
         sqlx::raw_sql(SCHEMA).execute(&writer).await?;
+        migrate(&writer).await?;
         let readers = SqlitePoolOptions::new()
             .max_connections(8)
             .connect_with(options)
@@ -76,6 +87,7 @@ impl AppState {
             readers,
             sessions: Arc::default(),
             challenges: Arc::default(),
+            recoveries: Arc::default(),
         })
     }
 
@@ -95,6 +107,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sign-in", post(accounts::sign_in))
         .route("/v1/invites", post(accounts::create_invite))
         .route("/v1/invites/accept", post(accounts::accept_invite))
+        .route("/v1/recover/challenge", post(accounts::recovery_challenge))
+        .route("/v1/recover", post(accounts::recover))
+        .route("/v1/devices", get(accounts::devices))
+        .route("/v1/devices/{device_id}", delete(accounts::remove_device))
         .route("/v1/users/{user_id}/approval", post(accounts::approve))
         .route("/v1/directory", get(accounts::directory))
         .route("/v1/folders", post(vault::create_folder))
@@ -120,6 +136,22 @@ fn new_setup_code() -> String {
         })
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// Runs the migrations this database hasn't had yet, each in its own transaction.
+async fn migrate(writer: &SqlitePool) -> Result<(), sqlx::Error> {
+    let applied: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(writer)
+        .await?;
+    let applied = usize::try_from(applied).unwrap_or(0);
+    for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
+        let mut tx = writer.begin().await?;
+        sqlx::raw_sql(migration).execute(&mut *tx).await?;
+        let version = format!("PRAGMA user_version = {}", index + 1);
+        sqlx::raw_sql(&version).execute(&mut *tx).await?;
+        tx.commit().await?;
+    }
+    Ok(())
 }
 
 async fn next_seq(conn: &mut SqliteConnection) -> Result<i64, sqlx::Error> {

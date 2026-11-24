@@ -15,10 +15,13 @@ just as the server can. Passwords and folder contents are encrypted on the Mac b
 leave it, so neither sees them. Both see people's names and public keys, the encrypted
 items, session tokens, and who syncs when.
 
-**Keystead is early software.** There's no account recovery and no way to add a second
-device to an account yet (see [the format spec](../docs/format.md)). If the owner's Mac is
-lost or wiped, nobody can invite or approve people on that server any more. Keep another
-copy of your passwords until those exist.
+**Save your Recovery Kit right after setup.** The owner's account exists only on their Mac.
+If that Mac is lost or wiped, the Recovery Kit is the only way to get it back; without it,
+nobody can invite or approve people on that server any more. Keystead asks for it after
+setup, and it's always under People › You. Recovering needs server 0.2.0 or later.
+
+**Keystead is early software**, and hasn't had a security audit yet. Keep another copy of
+your passwords for now.
 
 ## What you need
 

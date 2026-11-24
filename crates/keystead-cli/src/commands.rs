@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 pub use keystead_client::{
-    EditOutcome, InviteInfo, ItemRow, SyncSummary, UserRow, Whoami, generate_password,
+    DeviceRow, EditOutcome, InviteInfo, ItemRow, SyncSummary, UserRow, Whoami, generate_password,
 };
 use keystead_client::{NewAccount, Vault};
 use keystead_core::ids::{DeviceId, UserId};
@@ -43,6 +43,39 @@ pub fn join(home: &Path, server: &str, token: &str, owner_fingerprint: &str) -> 
     )?;
     DeviceFile::new(&key, &secret).save(home)?;
     Ok(vault.whoami())
+}
+
+/// Recovers an account onto this machine with the words from its recovery kit, then
+/// fetches its folders and logins.
+pub fn recover(home: &Path, server: &str, owner_fingerprint: &str, words: &str) -> Result<Whoami> {
+    refuse_existing(home)?;
+    let secret = AccountSecret::from_recovery_words(words)?;
+    let key = Arc::new(SoftwareDeviceKey::generate());
+    let mut vault = keystead_client::recover(
+        &profile_path(home),
+        new_account(server, &secret, &key),
+        owner_fingerprint,
+    )?;
+    DeviceFile::new(&key, &secret).save(home)?;
+    if let Err(error) = vault.sync() {
+        eprintln!("warning: recovered, but couldn't sync yet ({error:#}); run `keystead sync`");
+    }
+    Ok(vault.whoami())
+}
+
+/// The account's recovery kit: its secret as 24 words, plus who and where it's for.
+pub fn recovery_kit(home: &Path) -> Result<(String, Whoami)> {
+    let device = DeviceFile::load(home)?;
+    let whoami = open(home)?.whoami();
+    Ok((device.secret()?.recovery_words().to_string(), whoami))
+}
+
+pub fn devices(home: &Path) -> Result<Vec<DeviceRow>> {
+    open(home)?.devices()
+}
+
+pub fn remove_device(home: &Path, device: DeviceId) -> Result<()> {
+    open(home)?.remove_device(device)
 }
 
 pub fn invite(home: &Path, name: &str) -> Result<InviteInfo> {
@@ -135,6 +168,7 @@ fn new_account<'a>(
         server,
         secret,
         device_id: DeviceId::random(),
+        device_name: "Command line",
         signer: key.clone(),
     }
 }

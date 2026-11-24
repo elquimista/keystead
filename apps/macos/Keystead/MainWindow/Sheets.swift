@@ -20,6 +20,8 @@ struct SheetContent: View {
             ApproveSheet(model: model, user: user)
         case .fingerprint:
             FingerprintSheet(model: model)
+        case .recoveryKit(let afterSetup):
+            RecoveryKitSheet(model: model, afterSetup: afterSetup)
         }
     }
 }

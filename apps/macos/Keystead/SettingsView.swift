@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     let model: AppModel
     @AppStorage(DockIcon.preferenceKey) private var showInDock = true
+    @State private var showingKit = false
 
     var body: some View {
         TabView {
@@ -18,10 +19,13 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
 
-            AccountSettings(model: model)
+            AccountSettings(model: model, showingKit: $showingKit)
                 .tabItem { Label("Account", systemImage: "person.crop.circle") }
         }
-        .frame(width: 480, height: 260)
+        .frame(width: 480, height: 320)
+        .sheet(isPresented: $showingKit) {
+            RecoveryKitSheet(model: model, afterSetup: false)
+        }
         .onChange(of: showInDock) {
             DockIcon.applyPreference()
             // Changing the Dock setting deactivates the app; keep this window in front.
@@ -33,6 +37,7 @@ struct SettingsView: View {
 
 private struct AccountSettings: View {
     let model: AppModel
+    @Binding var showingKit: Bool
 
     var body: some View {
         Form {
@@ -44,6 +49,9 @@ private struct AccountSettings: View {
                     Text(identity.fingerprint)
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
+                }
+                LabeledContent("Recovery Kit") {
+                    Button("Show Recovery Kit…") { showingKit = true }
                 }
             } else {
                 Text(model.phase == .welcome

@@ -142,3 +142,37 @@ fn joining_checks_the_owner_fingerprint() {
     assert!(!fixture.home("bob").join("profile.json").exists());
     assert!(!fixture.home("bob").join("device.json").exists());
 }
+
+#[test]
+fn a_recovery_kit_restores_an_account_on_another_machine() {
+    let fixture = Fixture::start();
+    let old = fixture.home("alice-old");
+    commands::setup(&old, &fixture.url, &fixture.setup_code, "Alice").unwrap();
+    commands::create_folder(&old, "Production").unwrap();
+    let (overview, details) = login("AWS root", "s3cret");
+    commands::add(&old, "Production", overview, details).unwrap();
+
+    let (words, me) = commands::recovery_kit(&old).unwrap();
+    assert_eq!(words.split(' ').count(), 24);
+
+    // Typed in from paper: numbered, over several lines.
+    let typed: String = words
+        .split(' ')
+        .enumerate()
+        .map(|(index, word)| format!("{}. {word}\n", index + 1))
+        .collect();
+    let new = fixture.home("alice-new");
+    let recovered = commands::recover(&new, &fixture.url, &me.owner_fingerprint, &typed).unwrap();
+    assert_eq!(recovered.fingerprint, me.fingerprint);
+    assert!(recovered.is_owner);
+    assert_eq!(show_password(&new, "AWS root"), "s3cret");
+
+    let devices = commands::devices(&new).unwrap();
+    assert_eq!(devices.len(), 2);
+    let old_device = devices.iter().find(|device| !device.current).unwrap();
+    commands::remove_device(&new, old_device.id).unwrap();
+    assert!(
+        commands::sync(&old).is_err(),
+        "the removed device is locked out"
+    );
+}

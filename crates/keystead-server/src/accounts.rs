@@ -1,4 +1,4 @@
-//! Setup, sign-in, invites, owner approval and the directory.
+//! Setup, sign-in, invites, owner approval, the directory, recovery and devices.
 
 use std::time::{Duration, Instant};
 
@@ -10,13 +10,14 @@ use axum::http::request::Parts;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use keystead_core::api::{
-    AcceptInviteRequest, ApprovalRequest, Challenge, ChallengeRequest, Directory, Enrolled, Invite,
-    InviteRequest, Session, SetupRequest, SignInRequest,
+    AcceptInviteRequest, ApprovalRequest, Challenge, ChallengeRequest, DeviceInfo, DeviceList,
+    Directory, Enrolled, Invite, InviteRequest, RecoverRequest, RecoveryChallenge,
+    RecoveryChallengeRequest, Session, SetupRequest, SignInRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::encoding::Bytes;
 use keystead_core::ids::{DeviceId, UserId};
-use keystead_core::keys::{DevicePublicKey, sign_in_message};
+use keystead_core::keys::{DevicePublicKey, recovery_message, sign_in_message};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
@@ -30,6 +31,7 @@ const MAX_NAME_LENGTH: usize = 100;
 
 pub(crate) struct SessionInfo {
     user_id: UserId,
+    device_id: DeviceId,
     expires: Instant,
 }
 
@@ -38,9 +40,16 @@ pub(crate) struct PendingChallenge {
     expires: Instant,
 }
 
-/// The signed-in user behind a request, from its bearer token.
+/// A recovery challenge, for the account it was asked for.
+pub(crate) struct PendingRecovery {
+    user_id: UserId,
+    expires: Instant,
+}
+
+/// The signed-in user and device behind a request, from its bearer token.
 pub(crate) struct Auth {
     pub user_id: UserId,
+    pub device_id: DeviceId,
 }
 
 impl FromRequestParts<AppState> for Auth {
@@ -60,6 +69,7 @@ impl FromRequestParts<AppState> for Auth {
         match sessions.get(&hash(&bytes)) {
             Some(session) if session.expires > Instant::now() => Ok(Self {
                 user_id: session.user_id,
+                device_id: session.device_id,
             }),
             _ => Err(ApiError::Unauthorized),
         }
@@ -106,7 +116,14 @@ pub(crate) async fn setup(
     .bind(request.approval.as_slice())
     .execute(&mut *tx)
     .await?;
-    add_device(&mut tx, request.device_id, owner, &request.device_key).await?;
+    add_device(
+        &mut tx,
+        request.device_id,
+        owner,
+        &request.device_key,
+        &request.device_name,
+    )
+    .await?;
     sqlx::query("DELETE FROM settings WHERE name = 'setup_code'")
         .execute(&mut *tx)
         .await?;
@@ -173,6 +190,7 @@ pub(crate) async fn sign_in(
         hash(&token),
         SessionInfo {
             user_id,
+            device_id: request.device_id,
             expires: now + SESSION_LIFETIME,
         },
     );
@@ -238,6 +256,7 @@ pub(crate) async fn accept_invite(
         request.device_id,
         UserId(user_id),
         &request.device_key,
+        &request.device_name,
     )
     .await?;
     tx.commit().await?;
@@ -269,6 +288,143 @@ pub(crate) async fn approve(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/recover/challenge`: a challenge for a new device to sign with the account
+/// key of the account it wants to recover, plus the owner's entry for it to check first.
+/// Each challenge works once.
+pub(crate) async fn recovery_challenge(
+    State(state): State<AppState>,
+    Json(request): Json<RecoveryChallengeRequest>,
+) -> Result<Json<RecoveryChallenge>, ApiError> {
+    let user_id: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM users WHERE encryption_key = ? AND signing_key = ?")
+            .bind(&request.keys.encryption.0[..])
+            .bind(&request.keys.signing.0[..])
+            .fetch_optional(&state.readers)
+            .await?;
+    let user_id = user_id.ok_or_else(|| {
+        ApiError::Forbidden("this server has no account for that recovery kit".into())
+    })?;
+    let mut conn = state.readers.acquire().await?;
+    let owner = user_entry(&mut conn, UserId(1))
+        .await?
+        .ok_or_else(|| ApiError::Internal("the server has no owner".into()))?;
+    let mut challenge = vec![0u8; 32];
+    OsRng.fill_bytes(&mut challenge);
+    let mut recoveries = state.recoveries.lock().expect("recovery lock poisoned");
+    let now = Instant::now();
+    recoveries.retain(|_, pending| pending.expires > now);
+    recoveries.insert(
+        challenge.clone(),
+        PendingRecovery {
+            user_id: UserId(user_id),
+            expires: now + CHALLENGE_LIFETIME,
+        },
+    );
+    Ok(Json(RecoveryChallenge {
+        challenge: Bytes(challenge),
+        owner,
+    }))
+}
+
+/// `POST /v1/recover`: registers a new device for an account whose key signed the
+/// challenge, the device id and the device's key. Only the account secret, from a
+/// recovery kit, makes that signature.
+pub(crate) async fn recover(
+    State(state): State<AppState>,
+    Json(request): Json<RecoverRequest>,
+) -> Result<Json<Enrolled>, ApiError> {
+    let pending = state
+        .recoveries
+        .lock()
+        .expect("recovery lock poisoned")
+        .remove(request.challenge.as_slice());
+    let user = match pending {
+        Some(pending) if pending.expires > Instant::now() => pending.user_id,
+        _ => return Err(ApiError::Unauthorized),
+    };
+    let mut tx = state.writer.begin().await?;
+    let entry = user_entry(&mut tx, user)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    let message = recovery_message(
+        request.challenge.as_slice(),
+        request.device_id,
+        &request.device_key,
+    );
+    entry
+        .keys
+        .verify(&message, request.signature.as_slice())
+        .map_err(|_| ApiError::Unauthorized)?;
+    add_device(
+        &mut tx,
+        request.device_id,
+        user,
+        &request.device_key,
+        &request.device_name,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(Enrolled { user_id: user }))
+}
+
+/// `GET /v1/devices`: the signed-in user's devices, oldest first.
+pub(crate) async fn devices(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<DeviceList>, ApiError> {
+    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT id, name, added_at FROM devices WHERE user_id = ?
+         ORDER BY COALESCE(added_at, 0), id",
+    )
+    .bind(auth.user_id.0)
+    .fetch_all(&state.readers)
+    .await?;
+    let devices = rows
+        .into_iter()
+        .map(|(id, name, added_at)| {
+            let device_id: DeviceId = id
+                .parse()
+                .map_err(|_| ApiError::Internal("stored device id isn't a UUID".into()))?;
+            Ok(DeviceInfo {
+                current: device_id == auth.device_id,
+                device_id,
+                name,
+                added_at,
+            })
+        })
+        .collect::<Result<_, ApiError>>()?;
+    Ok(Json(DeviceList { devices }))
+}
+
+/// `DELETE /v1/devices/{device_id}`: removes one of the user's other devices and ends its
+/// sessions, for a lost or retired device.
+pub(crate) async fn remove_device(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(device_id): Path<DeviceId>,
+) -> Result<StatusCode, ApiError> {
+    if device_id == auth.device_id {
+        return Err(ApiError::Conflict(
+            "this is the device you're using; remove it from another one".into(),
+        ));
+    }
+    let removed = sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
+        .bind(device_id.to_string())
+        .bind(auth.user_id.0)
+        .execute(&state.writer)
+        .await?
+        .rows_affected();
+    if removed == 0 {
+        return Err(ApiError::NotFound);
+    }
+    state
+        .sessions
+        .lock()
+        .expect("session lock poisoned")
+        .retain(|_, session| session.device_id != device_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -307,7 +463,13 @@ async fn add_device(
     device_id: DeviceId,
     user: UserId,
     key: &DevicePublicKey,
+    name: &str,
 ) -> Result<(), ApiError> {
+    if name.chars().count() > MAX_NAME_LENGTH {
+        return Err(ApiError::BadRequest(format!(
+            "device name must be at most {MAX_NAME_LENGTH} characters"
+        )));
+    }
     let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM devices WHERE id = ?)")
         .bind(device_id.to_string())
         .fetch_one(&mut *conn)
@@ -315,12 +477,16 @@ async fn add_device(
     if taken {
         return Err(ApiError::Conflict("device id already registered".into()));
     }
-    sqlx::query("INSERT INTO devices (id, user_id, public_key) VALUES (?, ?, ?)")
-        .bind(device_id.to_string())
-        .bind(user.0)
-        .bind(serde_json::to_string(key)?)
-        .execute(conn)
-        .await?;
+    sqlx::query(
+        "INSERT INTO devices (id, user_id, public_key, name, added_at)
+         VALUES (?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))",
+    )
+    .bind(device_id.to_string())
+    .bind(user.0)
+    .bind(serde_json::to_string(key)?)
+    .bind(name.trim())
+    .execute(conn)
+    .await?;
     Ok(())
 }
 

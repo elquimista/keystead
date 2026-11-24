@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use keystead_ffi::{CoreError, DeviceSigner, PasswordChange, Vault, new_device_id, parse_invite};
+use keystead_ffi::{
+    CoreError, DeviceSigner, PasswordChange, Vault, account_secret_from_recovery_words,
+    new_device_id, parse_invite, recovery_words,
+};
 use keystead_server::AppState;
 use p256::ecdsa::signature::Signer as _;
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
@@ -106,6 +109,7 @@ fn an_owner_sets_up_invites_approves_and_shares() {
         "Olivia".into(),
         account_secret(),
         new_device_id(),
+        "Test Mac".into(),
         signer(),
     )
     .unwrap();
@@ -123,6 +127,7 @@ fn an_owner_sets_up_invites_approves_and_shares() {
         pasted.owner_fingerprint,
         member_secret.clone(),
         new_device_id(),
+        "Test Mac".into(),
         member_signer.clone(),
     )
     .unwrap();
@@ -185,4 +190,65 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     assert!(matches!(change, PasswordChange::Saved { version: 2 }));
     owner.sync().unwrap();
     assert_eq!(owner.password(items[0].id.clone()).unwrap(), "rotated");
+}
+
+#[test]
+fn an_owner_recovers_on_a_new_mac_from_the_kit() {
+    let server = Server::start();
+    let secret = account_secret();
+    let owner = Vault::setup(
+        server.profile("old-mac"),
+        server.url.clone(),
+        server.setup_code.clone(),
+        "Olivia".into(),
+        secret.clone(),
+        new_device_id(),
+        "Olivia's old Mac".into(),
+        signer(),
+    )
+    .unwrap();
+    owner.create_folder("Production".into()).unwrap();
+    owner
+        .add_login(
+            "Production".into(),
+            "AWS root".into(),
+            String::new(),
+            String::new(),
+            "s3cret".into(),
+        )
+        .unwrap();
+    let identity = owner.identity().unwrap();
+    assert_eq!(identity.owner_fingerprint, identity.fingerprint);
+
+    // The kit the app prints, typed back in on a new Mac.
+    let words = recovery_words(secret).unwrap();
+    assert_eq!(words.split(' ').count(), 24);
+    assert!(matches!(
+        account_secret_from_recovery_words("not a recovery kit".into()),
+        Err(CoreError::InvalidInput { .. })
+    ));
+    let recovered_secret = account_secret_from_recovery_words(words.to_uppercase()).unwrap();
+    let new_mac = Vault::recover(
+        server.profile("new-mac"),
+        server.url.clone(),
+        identity.owner_fingerprint.clone(),
+        recovered_secret,
+        new_device_id(),
+        "Olivia's new Mac".into(),
+        signer(),
+    )
+    .unwrap();
+    new_mac.sync().unwrap();
+    let me = new_mac.identity().unwrap();
+    assert!(me.is_owner);
+    assert_eq!(me.fingerprint, identity.fingerprint);
+    let items = new_mac.items().unwrap();
+    assert_eq!(new_mac.password(items[0].id.clone()).unwrap(), "s3cret");
+
+    let devices = new_mac.devices().unwrap();
+    assert_eq!(devices.len(), 2);
+    let old = devices.iter().find(|device| !device.current).unwrap();
+    assert_eq!(old.name, "Olivia's old Mac");
+    new_mac.remove_device(old.device_id.clone()).unwrap();
+    assert!(owner.sync().is_err(), "the old Mac is locked out");
 }

@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import LocalAuthentication
 import Observation
+import SystemConfiguration
 
 /// The app's state and actions, shared by the main window and the menu bar panel. The Rust
 /// `Vault` does the real work; every call into it runs off the main thread because it may
@@ -35,6 +36,8 @@ final class AppModel {
         case approve(User)
         /// After joining: the fingerprint to read to the owner.
         case fingerprint
+        /// The recovery kit; right after setup it first explains why it matters.
+        case recoveryKit(afterSetup: Bool)
 
         var id: String {
             switch self {
@@ -45,6 +48,7 @@ final class AppModel {
             case .invite: "invite"
             case .approve(let user): "approve-\(user.userId)"
             case .fingerprint: "fingerprint"
+            case .recoveryKit: "recovery-kit"
             }
         }
     }
@@ -54,6 +58,10 @@ final class AppModel {
     private(set) var items: [ItemSummary] = []
     private(set) var folders: [String] = []
     private(set) var users: [User] = []
+    /// This account's devices, this Mac included.
+    private(set) var devices: [AccountDevice] = []
+    /// Why the device list couldn't be loaded, such as a server older than 0.2.0.
+    private(set) var devicesProblem: String?
     /// A short note: why the last action failed, or what sync skipped.
     private(set) var message: String?
     /// The login whose password is on the clipboard, until it's cleared.
@@ -70,6 +78,10 @@ final class AppModel {
     private let store = DeviceStore()
     private let clipboard = SecureClipboard()
     private var copiedNoticeTask: Task<Void, Never>?
+    #if DEBUG
+    /// Demo mode: made-up data, no vault and no Touch ID.
+    private(set) var isDemo = false
+    #endif
 
     init() {
         phase = store.isEnrolled ? .locked : .welcome
@@ -95,10 +107,15 @@ final class AppModel {
     func setUp(server: String, setupCode: String, name: String) async {
         let server = server.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        await enroll(working: "Setting up your team…") { profilePath, secret, deviceId, signer in
+        let done = await enroll(working: "Setting up your team…") {
+            profilePath, secret, deviceId, deviceName, signer in
             try Vault.setup(
                 profilePath: profilePath, server: server, setupCode: setupCode, name: name,
-                accountSecret: secret, deviceId: deviceId, signer: signer)
+                accountSecret: secret, deviceId: deviceId, deviceName: deviceName, signer: signer)
+        }
+        if done {
+            // The owner's account exists only on this Mac until there's a kit.
+            sheet = .recoveryKit(afterSetup: true)
         }
     }
 
@@ -113,24 +130,53 @@ final class AppModel {
                 + "\"keystead join\"."
             return
         }
-        let joined = await enroll(working: "Joining…") { profilePath, secret, deviceId, signer in
+        let joined = await enroll(working: "Joining…") {
+            profilePath, secret, deviceId, deviceName, signer in
             try Vault.join(
                 profilePath: profilePath, server: invite.server, token: invite.token,
                 ownerFingerprint: invite.ownerFingerprint, accountSecret: secret,
-                deviceId: deviceId, signer: signer)
+                deviceId: deviceId, deviceName: deviceName, signer: signer)
         }
         if joined {
             sheet = .fingerprint
         }
     }
 
-    /// Creates both Secure Enclave keys and a new account secret, then runs `create` to set
-    /// up or join. One Touch ID approval covers the whole thing.
+    /// Brings an account back on this Mac with the 24 words from its recovery kit. The
+    /// owner's fingerprint from the kit is checked before anything is registered.
+    func recover(server: String, ownerFingerprint: String, words: String) async {
+        let server = server.trimmingCharacters(in: .whitespacesAndNewlines)
+        let secret: SymmetricKey
+        do {
+            secret = SymmetricKey(data: try accountSecretFromRecoveryWords(words: words))
+        } catch {
+            // For example "word 7 isn't on the recovery kit word list".
+            message = "Check the words: \(describe(error))."
+            return
+        }
+        let recovered = await enroll(working: "Recovering your account…", secret: secret) {
+            profilePath, secret, deviceId, deviceName, signer in
+            try Vault.recover(
+                profilePath: profilePath, server: server, ownerFingerprint: ownerFingerprint,
+                accountSecret: secret, deviceId: deviceId, deviceName: deviceName, signer: signer)
+        }
+        if recovered, let identity {
+            // Show the account's devices, so the lost Mac can be removed.
+            section = .people
+            selectedUserID = identity.userId
+        }
+    }
+
+    /// Creates both Secure Enclave keys, wraps the account secret (a new one, unless
+    /// recovering) to them, then runs `create` to set up, join or recover. One Touch ID
+    /// approval covers the whole thing.
     @discardableResult
     private func enroll(
         working: String,
+        secret: SymmetricKey = SymmetricKey(size: .bits256),
         create: @escaping @Sendable (
-            _ profilePath: String, _ secret: Data, _ deviceId: String, _ signer: SecureEnclaveSigner
+            _ profilePath: String, _ secret: Data, _ deviceId: String, _ deviceName: String,
+            _ signer: SecureEnclaveSigner
         ) throws -> Vault
     ) async -> Bool {
         message = nil
@@ -138,7 +184,6 @@ final class AppModel {
         do {
             let agreementKey = try SecureEnclaveDeviceKey.create()
             let signingKey = try SecureEnclaveSigningKey.create()
-            let secret = SymmetricKey(size: .bits256)
             let device = DeviceStore.Device(
                 deviceId: newDeviceId(),
                 agreementKey: agreementKey.dataRepresentation,
@@ -153,8 +198,9 @@ final class AppModel {
             let secretBytes = secret.withUnsafeBytes { Data($0) }
             let profilePath = store.profileURL.path
             let deviceId = device.deviceId
+            let deviceName = Self.thisMacName
             let vault = try await Task.detached {
-                try create(profilePath, secretBytes, deviceId, signer)
+                try create(profilePath, secretBytes, deviceId, deviceName, signer)
             }.value
             try await finishUnlocking(vault)
             return true
@@ -197,6 +243,8 @@ final class AppModel {
         items = []
         folders = []
         users = []
+        devices = []
+        devicesProblem = nil
         search = ""
         sheet = nil
         section = .allLogins
@@ -228,6 +276,19 @@ final class AppModel {
             message = "Couldn't sync (\(describe(error))). Showing the copy on this Mac."
         }
         await reloadLocal()
+        await reloadDevices()
+    }
+
+    /// Loads the device list on its own, so an older server that has no device list
+    /// doesn't make syncing look broken.
+    private func reloadDevices() async {
+        do {
+            devices = try await perform { try $0.devices() }
+            devicesProblem = nil
+        } catch {
+            devices = []
+            devicesProblem = describe(error)
+        }
     }
 
     func password(of item: ItemSummary) async throws -> String {
@@ -305,6 +366,39 @@ final class AppModel {
         users = try await perform { try $0.users() }
     }
 
+    // MARK: - Recovery kit and devices
+
+    /// The recovery kit: the account secret as 24 words, after Touch ID. Nothing keeps it;
+    /// it's only shown, and printed if the user asks.
+    func recoveryKit() async throws -> RecoveryKit {
+        guard let identity else { throw AppError("Unlock Keystead first.") }
+        let secret: Data
+        #if DEBUG
+        if isDemo {
+            return RecoveryKit(
+                words: try recoveryWords(accountSecret: Data(count: 32)), identity: identity)
+        }
+        #endif
+        let device = try store.load()
+        let context = try await DeviceAuthentication.authenticate(reason: "show your recovery kit")
+        let agreementKey = try SecureEnclaveDeviceKey.restore(from: device.agreementKey, context: context)
+        secret = try AccountSecretWrap.unwrap(device.accountSecret, with: agreementKey.privateKey)
+            .withUnsafeBytes { Data($0) }
+        return RecoveryKit(words: try recoveryWords(accountSecret: secret), identity: identity)
+    }
+
+    /// Removes another of this account's devices, such as a lost Mac.
+    func removeDevice(_ device: AccountDevice) async throws {
+        let id = device.deviceId
+        try await perform { try $0.removeDevice(deviceId: id) }
+        await reloadDevices()
+    }
+
+    /// How this Mac shows in the device list: its name from Sharing settings.
+    static var thisMacName: String {
+        (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "Mac"
+    }
+
     // MARK: -
 
     private func reloadLocal() async {
@@ -331,11 +425,21 @@ extension AppModel {
     /// vault fail with "Keystead is locked."
     static func demo(alone: Bool) -> AppModel {
         let model = AppModel()
+        model.isDemo = true
         model.phase = .unlocked
         model.identity = Identity(
             name: "Olivia", userId: 1, fingerprint: "ab12-cd34-ef56-7890-abcd",
-            server: "https://keys.example.com", isOwner: true)
+            server: "https://keys.example.com", isOwner: true,
+            ownerFingerprint: "ab12-cd34-ef56-7890-abcd")
         model.users = [User(userId: 1, name: "Olivia", approved: true, isOwner: true)]
+        model.devices = [
+            AccountDevice(
+                deviceId: "00000000-0000-4000-8000-0000000000d1", name: "Olivia's MacBook Air",
+                addedAt: 1_760_000_000, current: false),
+            AccountDevice(
+                deviceId: "00000000-0000-4000-8000-0000000000d2", name: "Olivia's MacBook Pro",
+                addedAt: 1_795_000_000, current: true),
+        ]
         if !alone {
             model.users += [
                 User(userId: 2, name: "Mo", approved: true, isOwner: false),
@@ -361,6 +465,23 @@ extension AppModel {
     }
 }
 #endif
+
+/// A recovery kit's contents: the secret's 24 words and what's needed to use them.
+struct RecoveryKit {
+    let words: [String]
+    let name: String
+    let server: String
+    let fingerprint: String
+    let ownerFingerprint: String
+
+    init(words: String, identity: Identity) {
+        self.words = words.split(separator: " ").map(String.init)
+        name = identity.name
+        server = identity.server
+        fingerprint = identity.fingerprint
+        ownerFingerprint = identity.ownerFingerprint
+    }
+}
 
 extension ItemSummary: Identifiable {}
 

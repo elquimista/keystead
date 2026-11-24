@@ -27,6 +27,8 @@ pub enum Error {
     UnsupportedScheme(keys::WrapScheme),
     /// Plaintext inside a ciphertext wasn't valid.
     Encoding(serde_json::Error),
+    /// Recovery kit words that don't make up an account secret, and why.
+    RecoveryWords(String),
 }
 
 impl fmt::Display for Error {
@@ -37,6 +39,7 @@ impl fmt::Display for Error {
             Self::BadSignature => write!(f, "signature did not verify"),
             Self::UnsupportedScheme(scheme) => write!(f, "unsupported scheme {scheme:?}"),
             Self::Encoding(error) => write!(f, "invalid plaintext: {error}"),
+            Self::RecoveryWords(reason) => f.write_str(reason),
         }
     }
 }

@@ -51,6 +51,52 @@ impl AccountSecret {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// The secret as a recovery kit's 24 words: the BIP 39 English encoding of its 32
+    /// bytes, where the last word also carries a checksum.
+    pub fn recovery_words(&self) -> Zeroizing<String> {
+        let mnemonic =
+            bip39::Mnemonic::from_entropy(&self.0).expect("32 bytes is valid BIP 39 entropy");
+        Zeroizing::new(mnemonic.to_string())
+    }
+
+    /// Reads a recovery kit's words back. Case, spacing, line breaks, commas and
+    /// numbering ("1. abandon", "12)") don't matter.
+    pub fn from_recovery_words(text: &str) -> Result<Self, Error> {
+        let words: Vec<String> = text
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .map(|word| word.trim_end_matches(['.', ')']))
+            .filter(|word| !word.is_empty() && !word.chars().all(|c| c.is_ascii_digit()))
+            .map(str::to_lowercase)
+            .collect();
+        if words.len() != 24 {
+            return Err(Error::RecoveryWords(format!(
+                "a recovery kit has 24 words, not {}",
+                words.len()
+            )));
+        }
+        let mnemonic = bip39::Mnemonic::parse_in_normalized(
+            bip39::Language::English,
+            &Zeroizing::new(words.join(" ")),
+        )
+        .map_err(|error| {
+            Error::RecoveryWords(match error {
+                bip39::Error::UnknownWord(index) => {
+                    format!("word {} isn't on the recovery kit word list", index + 1)
+                }
+                bip39::Error::InvalidChecksum => {
+                    "the words don't check out; one is probably mistyped or out of order".to_owned()
+                }
+                other => format!("those aren't recovery kit words ({other})"),
+            })
+        })?;
+        let entropy = Zeroizing::new(mnemonic.to_entropy());
+        let bytes: [u8; 32] = entropy
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::RecoveryWords("a recovery kit has 24 words".to_owned()))?;
+        Ok(Self(bytes))
+    }
 }
 
 /// A user's private keys: one for opening folder keys, one for signing.
@@ -267,6 +313,29 @@ pub fn sign_in_message(device_id: DeviceId, challenge: &[u8]) -> Vec<u8> {
     transcript("keystead/sign-in/v1", &[device_id.as_bytes(), challenge])
 }
 
+/// The bytes a new device's account signature covers when the account is recovered on
+/// it: the server's random challenge, bound to the device's id and public key, so the
+/// signature can't enroll any other device.
+pub fn recovery_message(
+    challenge: &[u8],
+    device_id: DeviceId,
+    device_key: &DevicePublicKey,
+) -> Vec<u8> {
+    let scheme: &[u8] = match device_key.scheme {
+        DeviceKeyScheme::Ed25519 => b"ed25519",
+        DeviceKeyScheme::EcdsaP256Sha256 => b"ecdsa-p256-sha256",
+    };
+    transcript(
+        "keystead/recover/v1",
+        &[
+            challenge,
+            device_id.as_bytes(),
+            scheme,
+            device_key.key.as_slice(),
+        ],
+    )
+}
+
 /// A device key kept in software, for the CLI. The apps keep theirs in the Secure
 /// Enclave or TPM instead.
 pub struct SoftwareDeviceKey(SigningKey);
@@ -299,6 +368,61 @@ impl SoftwareDeviceKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_words_follow_bip_39() {
+        // The standard BIP 39 test vector for 32 zero bytes.
+        let words = AccountSecret::from_bytes([0; 32]).recovery_words();
+        assert_eq!(*words, format!("{}art", "abandon ".repeat(23)));
+
+        let secret = AccountSecret::generate();
+        let back = AccountSecret::from_recovery_words(&secret.recovery_words()).unwrap();
+        assert_eq!(back.as_bytes(), secret.as_bytes());
+    }
+
+    #[test]
+    fn recovery_words_are_read_leniently() {
+        let secret = AccountSecret::generate();
+        let words = secret.recovery_words();
+        // Numbered, in capitals, several to a line, with commas: as typed from paper.
+        let typed: String = words
+            .split(' ')
+            .enumerate()
+            .map(|(index, word)| {
+                let separator = if index % 4 == 3 { ",\n" } else { "  " };
+                format!("{}. {}{separator}", index + 1, word.to_uppercase())
+            })
+            .collect();
+        let back = AccountSecret::from_recovery_words(&typed).unwrap();
+        assert_eq!(back.as_bytes(), secret.as_bytes());
+    }
+
+    #[test]
+    fn mistyped_recovery_words_are_refused_with_a_reason() {
+        let reason = |text: &str| match AccountSecret::from_recovery_words(text) {
+            Err(Error::RecoveryWords(reason)) => reason,
+            other => panic!("expected a refusal, got {:?}", other.is_ok()),
+        };
+        let words = AccountSecret::from_bytes([0; 32]).recovery_words();
+        assert!(reason("abandon abandon").contains("24 words, not 2"));
+        assert!(reason(&words.replacen("abandon", "abandn", 1)).contains("word 1 "));
+        // Every word valid, but the last one's checksum doesn't match.
+        assert!(reason(&words.replace("art", "abandon")).contains("mistyped"));
+    }
+
+    #[test]
+    fn a_recovery_signature_covers_the_new_device() {
+        let device = DeviceId::random();
+        let key = SoftwareDeviceKey::generate().public();
+        let other_key = SoftwareDeviceKey::generate().public();
+        let message = recovery_message(b"challenge", device, &key);
+        assert_ne!(message, recovery_message(b"challenge", device, &other_key));
+        assert_ne!(
+            message,
+            recovery_message(b"challenge", DeviceId::random(), &key)
+        );
+        assert_ne!(message, recovery_message(b"other", device, &key));
+    }
 
     #[test]
     fn the_same_secret_gives_the_same_keys() {
