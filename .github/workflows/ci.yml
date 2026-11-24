@@ -1,11 +1,11 @@
 name: CI
 
+# Not on pushes to main: CI runs on pull requests, on every release (the release workflow
+# runs all of it on the tagged commit before publishing), and by hand from the Actions tab.
 on:
-  push:
-    branches: [main]
   pull_request:
-  # The release workflow runs all of CI on the tagged commit before publishing.
   workflow_call:
+  workflow_dispatch:
 
 jobs:
   rust:
