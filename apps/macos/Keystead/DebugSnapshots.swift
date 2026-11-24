@@ -101,6 +101,10 @@ enum DebugSnapshots {
                     model.sheet = .shareLogin(model.items[2])
                 }),
                 ("6e8-closed", { model.sheet = nil }),
+                ("6e10-recently-deleted", {
+                    model.section = .recentlyDeleted
+                    model.selectedDeletedID = model.recentlyDeleted.first?.id
+                }),
                 ("6e9-to-change", {
                     model.section = .toChange
                     model.selectedItemID = model.items[0].id

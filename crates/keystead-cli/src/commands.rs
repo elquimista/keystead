@@ -7,12 +7,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 pub use keystead_client::{
-    DeviceRow, EditOutcome, GroupRow, GroupShareRow, HistoryRow, InviteInfo, ItemRow, MemberRow,
-    SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
+    DeletedRow, DeviceRow, EditOutcome, GroupRow, GroupShareRow, HistoryRow, InviteInfo, ItemRow,
+    MemberRow, SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
 };
 use keystead_client::{DeviceSetupLine, JoiningDevice, NewAccount, Vault};
 pub use keystead_core::api::Role;
-use keystead_core::ids::{DeviceId, UserId};
+use keystead_core::ids::{DeviceId, ItemId, UserId};
 use keystead_core::items::{Details, Overview};
 use keystead_core::keys::{AccountSecret, SoftwareDeviceKey};
 use keystead_core::otp::OneTimeCode;
@@ -439,6 +439,44 @@ pub fn update(
         details.otp = otp;
     }
     vault.update(item_id, &overview, &details)
+}
+
+/// Logins deleted in the last 30 days that this account can bring back, newest first.
+pub fn deleted(home: &Path) -> Result<Vec<DeletedRow>> {
+    open(home)?.deleted()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "the server is older than Keystead 0.9.0 and keeps nothing of deleted logins"
+        )
+    })
+}
+
+/// Brings back a recently deleted login.
+pub fn undelete(home: &Path, name: &str, folder: Option<&str>) -> Result<EditOutcome> {
+    let mut vault = open(home)?;
+    let item_id = find_deleted(&mut vault, name, folder)?;
+    vault.undelete(item_id)
+}
+
+/// Deletes a deleted login for good.
+pub fn purge(home: &Path, name: &str, folder: Option<&str>) -> Result<()> {
+    let mut vault = open(home)?;
+    let item_id = find_deleted(&mut vault, name, folder)?;
+    vault.purge(item_id)
+}
+
+fn find_deleted(vault: &mut Vault, name: &str, folder: Option<&str>) -> Result<ItemId> {
+    let rows = vault.deleted()?.unwrap_or_default();
+    let matches: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.name == name && folder.is_none_or(|folder| row.folder.as_deref() == Some(folder))
+        })
+        .collect();
+    match matches.as_slice() {
+        [row] => Ok(row.item_id),
+        [] => bail!("no login named {name:?} was deleted in the last 30 days"),
+        _ => bail!("several deleted logins are named {name:?}; add --folder"),
+    }
 }
 
 /// A login's history, newest first.

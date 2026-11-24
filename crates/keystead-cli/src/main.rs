@@ -209,6 +209,23 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// List logins deleted in the last 30 days that you can bring back
+    Deleted,
+    /// Bring back a login deleted in the last 30 days
+    Undelete {
+        name: String,
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Delete a deleted login for good now, instead of after 30 days
+    Purge {
+        name: String,
+        #[arg(long)]
+        folder: Option<String>,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
     /// List passwords to change: logins you can change that someone could open before
     /// losing access
     ToChange {
@@ -921,12 +938,60 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             match commands::remove(&home, &name, folder.as_deref())? {
-                EditOutcome::Saved { .. } => println!("Deleted {name}."),
+                EditOutcome::Saved { .. } => {
+                    println!(
+                        "Deleted {name}. `keystead undelete {name}` brings it back for 30 days."
+                    );
+                }
                 EditOutcome::Conflict { version, author } => {
                     println!("Not deleted: {author} saved version {version} first.");
                     println!("Your copy now has their version; check it, then run rm again.");
                 }
             }
+        }
+        Command::Deleted => {
+            let rows: Vec<Vec<String>> = commands::deleted(&home)?
+                .into_iter()
+                .map(|row| {
+                    vec![
+                        row.folder.unwrap_or_else(|| "-".into()),
+                        row.name,
+                        date(row.deleted_at),
+                        row.deleted_by,
+                        date(row.kept_until),
+                    ]
+                })
+                .collect();
+            if rows.is_empty() {
+                println!("Nothing deleted in the last 30 days.");
+            } else {
+                print_table(&["FOLDER", "NAME", "DELETED", "BY", "UNTIL"], rows);
+            }
+        }
+        Command::Undelete { name, folder } => {
+            match commands::undelete(&home, &name, folder.as_deref())? {
+                EditOutcome::Saved { .. } => println!("Brought back {name}."),
+                EditOutcome::Conflict { author, .. } => {
+                    println!("Not brought back: {author} changed it first.");
+                }
+            }
+        }
+        Command::Purge { name, folder, yes } => {
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!("add --yes to delete for good without being asked");
+                }
+                print!("Delete {name} for good? It can't be brought back. [y/N] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("Kept.");
+                    return Ok(());
+                }
+            }
+            commands::purge(&home, &name, folder.as_deref())?;
+            println!("Deleted {name} for good.");
         }
         Command::ToChange { action: None } => {
             let rows = commands::to_change(&home)?;

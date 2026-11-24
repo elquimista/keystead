@@ -289,6 +289,20 @@ pub struct LoginFields {
     pub one_time_code: String,
 }
 
+/// A login deleted in the last 30 days, which can still be brought back.
+#[derive(uniffi::Record)]
+pub struct DeletedLogin {
+    pub item_id: String,
+    pub name: String,
+    pub username: String,
+    /// Its folder, if it's in one of yours.
+    pub folder: Option<String>,
+    pub deleted_by: String,
+    /// When it was deleted, and until when it can be brought back, in seconds since 1970.
+    pub deleted_at: i64,
+    pub kept_until: i64,
+}
+
 /// One version of a login in its history.
 #[derive(uniffi::Record)]
 pub struct HistoryEntry {
@@ -691,6 +705,34 @@ impl Vault {
             .vault()?
             .restore(item_id_from(&item_id)?, version)?
             .into())
+    }
+
+    /// Logins deleted in the last 30 days that you can bring back, newest first, fetched
+    /// fresh; empty (`None`) if the server is older than 0.9.0 and keeps none.
+    pub fn deleted_logins(&self) -> Result<Option<Vec<DeletedLogin>>, CoreError> {
+        Ok(self.vault()?.deleted()?.map(|rows| {
+            rows.into_iter()
+                .map(|row| DeletedLogin {
+                    item_id: row.item_id.to_string(),
+                    name: row.name,
+                    username: row.username,
+                    folder: row.folder,
+                    deleted_by: row.deleted_by,
+                    deleted_at: row.deleted_at,
+                    kept_until: row.kept_until,
+                })
+                .collect()
+        }))
+    }
+
+    /// Brings back a login from the list last fetched, for everyone who had it.
+    pub fn undelete_login(&self, item_id: String) -> Result<SaveOutcome, CoreError> {
+        Ok(self.vault()?.undelete(item_id_from(&item_id)?)?.into())
+    }
+
+    /// Deletes a deleted login for good now, instead of after 30 days.
+    pub fn purge_login(&self, item_id: String) -> Result<(), CoreError> {
+        Ok(self.vault()?.purge(item_id_from(&item_id)?)?)
     }
 
     /// Deletes a login for everyone who can open it.

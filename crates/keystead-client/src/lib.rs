@@ -11,9 +11,9 @@ pub mod profile;
 mod vault;
 
 pub use vault::{
-    DeviceRow, DeviceSetupLine, EditOutcome, GroupMemberRow, GroupRow, GroupShareRow, HistoryRow,
-    InviteInfo, ItemRow, JoiningDevice, MemberRow, NewAccount, SyncSummary, ToChangeRow, UserRow,
-    Vault, Whoami, generate_password, join, recover, setup,
+    DeletedRow, DeviceRow, DeviceSetupLine, EditOutcome, GroupMemberRow, GroupRow, GroupShareRow,
+    HistoryRow, InviteInfo, ItemRow, JoiningDevice, MemberRow, NewAccount, SyncSummary,
+    ToChangeRow, UserRow, Vault, Whoami, generate_password, join, recover, setup,
 };
 
 use keystead_core::encoding::Bytes;

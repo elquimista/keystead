@@ -377,6 +377,23 @@ pub struct ClaimedAccountSecret {
     pub wrapped_secret: Option<WrappedKey>,
 }
 
+/// A deleted item that can still be brought back: its signed deletion marker, and the last
+/// version before it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeletedItem {
+    /// When it was deleted, in seconds since 1970 (UTC). Set by the server.
+    pub deleted_at: i64,
+    pub deleted: EncryptedItem,
+    pub last: EncryptedItem,
+}
+
+/// `GET /v1/deleted`: the items deleted in the last 30 days that the caller can change
+/// (edit or manage), newest first. Servers before 0.9.0 answer 404.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DeletedItems {
+    pub items: Vec<DeletedItem>,
+}
+
 /// One version of an item as the server keeps it, with when it was saved.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedVersion {

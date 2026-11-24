@@ -407,6 +407,8 @@ codes (400, 401, 403, 404, 409).
 | `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Editors and managers of the item (see Roles) |
 | `GET /v1/items/{id}/people` | | `Members` | Anyone who can open the item |
 | `GET /v1/items/{id}/history` | | `ItemHistory` | Editors and managers of the item |
+| `GET /v1/deleted` | | `DeletedItems` | Members; only items they can change |
+| `DELETE /v1/deleted/{id}` | | 204 | Editors and managers of the deleted item |
 | `PUT /v1/items/{id}/people/{user}` | `RoleRequest` | 204 | Managers of the item |
 | `PUT /v1/items/{id}/groups/{group}` | `RoleRequest` | 204 | Managers of the item |
 | `DELETE /v1/items/{id}/exposures/{user}` | | 204 | Editors and managers of the item |
@@ -429,7 +431,8 @@ or dropping a group also takes a manager; a group new to the item gets its copy 
 group's current generation, and no copy may name a generation the group hasn't reached.
 `PutItemRequest.roles` gives the roles of people new to `people`, and `group_roles` those
 of groups new to `groups`, and `password_changed` (left out when false) that its password
-differs from the previous version's (see Passwords to change). If another version was
+differs from the previous version's (see Passwords to change). A live version may follow a
+deletion marker, which brings the item back (see Recently deleted). If another version was
 saved first, it answers 409 with that version.
 
 ### Roles
@@ -501,7 +504,7 @@ in it longest. Clients drop removed people's copies from items as they save them
 **History** (0.7.0 and later). When a version replaces another, the server keeps the one
 replaced, as stored, with when it was saved (`saved_at`, seconds since 1970, set by the
 server and not signed; absent for versions saved before 0.7.0). It keeps the last 10
-earlier versions of each item, and deleting an item deletes them. `GET …/history` returns
+earlier versions of each item. `GET …/history` returns
 the current version and the kept ones, newest first, to the item's editors and managers;
 viewers get only the current version, through sync. Clients verify each version's
 signature like any other and leave out ones that fail, so a server can't slip in a version
@@ -509,6 +512,17 @@ nobody saved. A version opens with the keys of its time: a folder's members open
 through the folder's key chain, but someone an item was shared with directly opens only
 versions that had a copy for them. Bringing a version back saves its overview and details
 as a new version, and doesn't count as a new password (see below), since it isn't one.
+
+**Recently deleted** (0.9.0 and later). Deleting an item saves its deletion marker as
+usual, and the server keeps its earlier versions (and passwords to change) for 30 days
+after it, then forgets them; the marker stays, for everyone's devices. `GET /v1/deleted`
+lists the items deleted in that time that the caller can change, each with its signed
+marker, its last version before it, and when it was deleted. Clients verify both and
+decrypt the last version to show it. Saving a live version on top of a deletion marker
+brings the item back (to everyone with a key copy, as for any version); clients save the
+last version's overview and details, which doesn't count as a new password.
+`DELETE /v1/deleted/{id}` forgets a deleted item's history at once. Items deleted on
+servers before 0.9.0 lost their history when deleted, so they can't come back.
 
 **Passwords to change** (0.5.0 and later). New keys protect what's saved afterwards, but
 passwords someone already saw can't be taken back. So whenever someone loses access to an

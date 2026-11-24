@@ -18,9 +18,10 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use keystead_core::api::{
-    AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, Exposure, Exposures, FolderRole,
-    GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members, PutItemRequest, RekeyRequest,
-    Role, RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage, ViaGroup,
+    AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, DeletedItem, DeletedItems,
+    Exposure, Exposures, FolderRole, GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members,
+    PutItemRequest, RekeyRequest, Role, RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage,
+    ViaGroup,
 };
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
@@ -509,7 +510,8 @@ pub(crate) async fn put_item(
                     "an item can't go back to an older format".into(),
                 ));
             }
-            if current.deleted || current.version != base {
+            // A live version on top of a deletion brings the item back (`deleted`).
+            if current.version != base || (current.deleted && item.deleted) {
                 return Err(ApiError::ItemConflict(Box::new(current.clone())));
             }
             (role, base + 1)
@@ -566,13 +568,10 @@ pub(crate) async fn put_item(
     }
 
     // The version being replaced joins the item's history, which keeps the last
-    // `HISTORY_KEPT`; deleting an item deletes its history.
-    if item.deleted {
-        sqlx::query("DELETE FROM item_history WHERE item_id = ?")
-            .bind(item_id.to_string())
-            .execute(&mut *tx)
-            .await?;
-    } else if let Some(current) = current.as_ref().filter(|current| !current.deleted) {
+    // `HISTORY_KEPT`. A deleted item's history stays `DELETED_KEPT_DAYS`, so it can be
+    // brought back.
+    purge_deleted(&mut tx).await?;
+    if let Some(current) = current.as_ref().filter(|current| !current.deleted) {
         sqlx::query(
             "INSERT INTO item_history (item_id, version, saved_at, body)
              SELECT id, version, saved_at, body FROM items WHERE id = ?",
@@ -670,8 +669,9 @@ pub(crate) async fn put_item(
             .await?;
     }
 
-    // Nobody who lost access earlier knows a new password, and a deleted item has none.
-    if request.password_changed || item.deleted {
+    // Nobody who lost access earlier knows a new password. (A deleted item keeps its
+    // exposures, for if it's brought back; the listing leaves it out meanwhile.)
+    if request.password_changed {
         sqlx::query("DELETE FROM exposures WHERE item_id = ?")
             .bind(item_id.to_string())
             .execute(&mut *tx)
@@ -695,6 +695,85 @@ pub(crate) async fn put_item(
 /// and every group it's shared with) and their roles, for anyone who can open it.
 /// How many earlier versions of each item the server keeps.
 const HISTORY_KEPT: i64 = 10;
+/// How long a deleted item can be brought back.
+const DELETED_KEPT_DAYS: i64 = 30;
+
+/// Forgets the history (and passwords to change) of items deleted more than
+/// `DELETED_KEPT_DAYS` ago; their deletion markers stay, for everyone's devices.
+pub(crate) async fn purge_deleted(conn: &mut SqliteConnection) -> Result<(), ApiError> {
+    let expired = format!(
+        "SELECT id FROM items WHERE COALESCE(json_extract(body, '$.deleted'), 0)
+         AND saved_at < CAST(strftime('%s', 'now') AS INTEGER) - {}",
+        DELETED_KEPT_DAYS * 86_400
+    );
+    for table in ["item_history", "exposures"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE item_id IN ({expired})"))
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// `GET /v1/deleted`: items deleted in the last `DELETED_KEPT_DAYS` that the caller can
+/// change, each with its deletion marker and its last version before it, newest first.
+pub(crate) async fn deleted_items(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<DeletedItems>, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    purge_deleted(&mut tx).await?;
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT i.saved_at, i.body, h.body FROM items i
+         JOIN item_history h ON h.item_id = i.id
+         WHERE COALESCE(json_extract(i.body, '$.deleted'), 0) AND i.saved_at IS NOT NULL
+           AND h.version = (SELECT MAX(version) FROM item_history WHERE item_id = i.id)
+         ORDER BY i.saved_at DESC",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut items = Vec::new();
+    for (deleted_at, deleted, last) in rows {
+        let deleted: EncryptedItem = serde_json::from_str(&deleted)?;
+        if item_role(&mut tx, auth.user_id, &deleted).await? >= Some(Role::Edit) {
+            items.push(DeletedItem {
+                deleted_at,
+                deleted,
+                last: serde_json::from_str(&last)?,
+            });
+        }
+    }
+    tx.commit().await?;
+    Ok(Json(DeletedItems { items }))
+}
+
+/// `DELETE /v1/deleted/{item_id}`: forgets a deleted item's history now, so it can't be
+/// brought back (editors and managers).
+pub(crate) async fn purge_item(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(item_id): Path<ItemId>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    let item = stored_item(&mut tx, item_id).await?;
+    if !item.deleted {
+        return Err(ApiError::BadRequest(
+            "only a deleted login can be deleted for good".into(),
+        ));
+    }
+    require(
+        item_role(&mut tx, auth.user_id, &item).await?,
+        Role::Edit,
+        "delete this for good",
+    )?;
+    for table in ["item_history", "exposures"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE item_id = ?"))
+            .bind(item_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
 /// `GET /v1/items/{item_id}/history`: the item's current version and the earlier ones the
 /// server keeps, newest first, for anyone who can change it (edit or manage). Viewers can

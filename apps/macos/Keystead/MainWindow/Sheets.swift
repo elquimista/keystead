@@ -621,26 +621,29 @@ private struct DeleteLoginSheet: View {
         item.sharedWith + item.sharedWithGroups.map { "everyone in \($0)" }
     }
 
-    /// Who loses the login, and that it's for good, in a sentence.
+    /// Who loses the login, and whether it can come back, in a sentence or two.
     private var consequence: String {
         let people = ListFormatter.localizedString(byJoining: sharedWith)
+        let whoLoses: String
         if let folder = item.folder {
-            let who = sharedWith.isEmpty
+            whoLoses = sharedWith.isEmpty
                 ? "everyone in \u{201C}\(folder)\u{201D}"
                 : "everyone in \u{201C}\(folder)\u{201D} and for \(people)"
-            return "It's deleted for \(who), and can't be brought back."
-        }
-        if item.sharedWithMe {
+        } else if item.sharedWithMe {
             let others = ([item.owner].compactMap { $0 } + sharedWith)
-            let who = others.isEmpty
+            whoLoses = (others.isEmpty
                 ? "everyone it's shared with"
-                : ListFormatter.localizedString(byJoining: others)
-            return "It's deleted for \(who) as well as for you, and can't be brought back."
+                : ListFormatter.localizedString(byJoining: others)) + " as well as for you"
+        } else if sharedWith.isEmpty {
+            return model.keepsDeleted
+                ? "Only you have this login. Recently Deleted can bring it back for 30 days."
+                : "Only you have this login. Once deleted, it can't be brought back."
+        } else {
+            whoLoses = "you and for \(people)"
         }
-        if sharedWith.isEmpty {
-            return "Only you have this login. Once deleted, it can't be brought back."
-        }
-        return "It's deleted for you and for \(people), and can't be brought back."
+        return model.keepsDeleted
+            ? "It's deleted for \(whoLoses). Recently Deleted can bring it back for 30 days."
+            : "It's deleted for \(whoLoses), and can't be brought back."
     }
 
     var body: some View {

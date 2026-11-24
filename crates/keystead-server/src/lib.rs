@@ -318,6 +318,8 @@ pub fn router(state: AppState) -> Router {
             delete(vault::dismiss_exposure),
         )
         .route("/v1/exposures", get(vault::exposures))
+        .route("/v1/deleted", get(vault::deleted_items))
+        .route("/v1/deleted/{item_id}", delete(vault::purge_item))
         .route("/v1/sync", get(vault::sync))
         .with_state(state)
 }

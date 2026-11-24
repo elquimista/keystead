@@ -15,6 +15,8 @@ struct VaultView: View {
                 PeopleList(model: model, selection: $model.selectedUserID)
             case .groups:
                 GroupList(model: model, selection: $model.selectedGroupID)
+            case .recentlyDeleted:
+                DeletedList(model: model, selection: $model.selectedDeletedID)
             case let section:
                 LoginList(model: model, section: section, search: $search, selection: $model.selectedItemID)
             }
@@ -24,6 +26,14 @@ struct VaultView: View {
                     PersonDetail(model: model, user: user)
                 } else {
                     Text("Select a person")
+                        .foregroundStyle(.secondary)
+                }
+            } else if model.section == .recentlyDeleted {
+                if let login = model.recentlyDeleted.first(where: { $0.id == model.selectedDeletedID }) {
+                    DeletedDetail(model: model, login: login)
+                        .id(login.id)
+                } else {
+                    Text(model.recentlyDeleted.isEmpty ? "" : "Select a login")
                         .foregroundStyle(.secondary)
                 }
             } else if model.section == .groups {
@@ -72,6 +82,11 @@ struct VaultView: View {
                 model.section = .allLogins
             }
         }
+        .onChange(of: model.recentlyDeleted.isEmpty) {
+            if model.recentlyDeleted.isEmpty && model.section == .recentlyDeleted {
+                model.section = .allLogins
+            }
+        }
         .onChange(of: model.toChange.isEmpty) {
             // The last one was changed or dismissed; the login stays selected.
             if model.toChange.isEmpty && model.section == .toChange {
@@ -98,6 +113,11 @@ private struct Sidebar: View {
                     .badge(model.toChangeCount)
                     .tag(AppModel.Section.toChange)
                     .help("Passwords that people who lost access may still know")
+            }
+            if !model.recentlyDeleted.isEmpty {
+                Label("Recently Deleted", systemImage: "trash")
+                    .tag(AppModel.Section.recentlyDeleted)
+                    .help("Logins deleted in the last 30 days, which can be brought back")
             }
             Section("Folders") {
                 ForEach(model.folders, id: \.self) { folder in
@@ -170,7 +190,7 @@ private struct LoginList: View {
         case .folder(let folder): folder
         case .sharedWithMe: "Shared with Me"
         case .toChange: "To Change"
-        case .allLogins, .people, .groups: "All Logins"
+        case .allLogins, .people, .groups, .recentlyDeleted: "All Logins"
         }
     }
 
@@ -557,6 +577,92 @@ private struct OneTimeCodeRow: View {
     private func grouped(_ code: String) -> String {
         let middle = code.index(code.startIndex, offsetBy: code.count / 2)
         return "\(code[..<middle]) \(code[middle...])"
+    }
+}
+
+// MARK: - Recently deleted
+
+private struct DeletedList: View {
+    let model: AppModel
+    @Binding var selection: DeletedLogin.ID?
+
+    var body: some View {
+        List(model.recentlyDeleted, selection: $selection) { login in
+            VStack(alignment: .leading, spacing: 2) {
+                Text(login.name)
+                Text(["Deleted by \(login.deletedBy) \(day(login.deletedAt))", login.folder ?? ""]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 2)
+        }
+        .navigationTitle("Recently Deleted")
+    }
+}
+
+/// A deleted login: what it was, who deleted it, and bringing it back or deleting it for
+/// good.
+private struct DeletedDetail: View {
+    let model: AppModel
+    let login: DeletedLogin
+    @State private var confirmingPurge = false
+    @State private var busy = false
+    @State private var note: String?
+
+    var body: some View {
+        Form {
+            Section {
+                if !login.username.isEmpty {
+                    LabeledContent("Username", value: login.username)
+                }
+                LabeledContent("Folder", value: login.folder ?? "None")
+                LabeledContent("Deleted", value: "By \(login.deletedBy) \(day(login.deletedAt))")
+                LabeledContent("Kept until", value: String(day(login.keptUntil).dropFirst(3)))
+            } header: {
+                Text(login.name)
+                    .font(.title2.weight(.semibold))
+                    .padding(.bottom, 4)
+            }
+            Section {
+                Text("Bringing it back gives it to everyone who had it before it was deleted, as "
+                    + "it was then. After the date above it's gone for good.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Bring Back") { run { note = try await model.undelete(login) } }
+                    Spacer()
+                    Button("Delete Now…", role: .destructive) { confirmingPurge = true }
+                }
+                .disabled(busy)
+                if let note {
+                    Text(note)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .confirmationDialog(
+            "Delete \u{201C}\(login.name)\u{201D} for good?", isPresented: $confirmingPurge
+        ) {
+            Button("Delete for Good", role: .destructive) { run { try await model.purge(login) } }
+        } message: {
+            Text("It can't be brought back afterwards, by you or anyone it was shared with.")
+        }
+    }
+
+    private func run(_ action: @escaping () async throws -> Void) {
+        busy = true
+        Task {
+            do {
+                try await action()
+            } catch {
+                note = describe(error)
+            }
+            busy = false
+        }
     }
 }
 

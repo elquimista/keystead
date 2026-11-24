@@ -1170,3 +1170,49 @@ fn a_new_device_joins_from_one_the_account_already_has() {
     // It's done: the transfer is gone.
     assert!(joining.poll().is_err());
 }
+
+#[test]
+fn a_deleted_login_can_be_brought_back_for_30_days() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+
+    // Bank, shared with Bob to edit, gets a new password, then Alice deletes it.
+    let (overview, details) = login("Bank", "first");
+    let bank = alice.add(None, overview, details).unwrap();
+    alice.share_item(bank, bob_id, Role::Edit).unwrap();
+    alice.edit(bank, "second").unwrap();
+    alice.delete(bank).unwrap();
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap().is_empty());
+
+    // Both can see it in Recently Deleted, with who deleted it and until when it's kept.
+    let rows = alice.deleted().unwrap().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].name.as_str(), rows[0].deleted_by.as_str()),
+        ("Bank", "Alice")
+    );
+    assert_eq!(rows[0].kept_until - rows[0].deleted_at, 30 * 86_400);
+    let rows = bob.deleted().unwrap().unwrap();
+    assert_eq!(rows[0].item_id, bank);
+
+    // Bob brings it back, as it last was; Alice gets it again.
+    bob.undelete(bank).unwrap();
+    assert_eq!(bob.open_item(bank).unwrap().1.password, "second");
+    alice.sync().unwrap();
+    assert_eq!(alice.open_item(bank).unwrap().1.password, "second");
+    assert!(alice.deleted().unwrap().unwrap().is_empty());
+    assert!(alice.history(bank).unwrap().len() >= 3);
+
+    // Deleted again and then for good: it can't come back.
+    alice.delete(bank).unwrap();
+    assert_eq!(alice.deleted().unwrap().unwrap().len(), 1);
+    alice.purge(bank).unwrap();
+    assert!(alice.deleted().unwrap().unwrap().is_empty());
+    assert!(alice.undelete(bank).is_err());
+    bob.sync().unwrap();
+    assert!(bob.deleted().unwrap().unwrap().is_empty());
+}

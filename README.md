@@ -96,6 +96,14 @@ keystead edit "AWS root"             # new password; or --rename, --username, --
 keystead rm Bank                     # delete for everyone who can open it (asks first)
 ```
 
+A deleted login can be brought back for 30 days (needs a 0.9.0 server):
+
+```sh
+keystead deleted                     # what was deleted, by whom, and until when it's kept
+keystead undelete Bank               # bring it back, for everyone who had it
+keystead purge Bank                  # delete it for good now (asks first)
+```
+
 For sites that ask for a one-time code, keep its setup with the login: the `otpauth://`
 link from the site's QR code, or the setup key it shows for typing in (needs a 0.6.0
 server).

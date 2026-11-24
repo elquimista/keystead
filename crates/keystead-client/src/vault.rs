@@ -10,12 +10,12 @@ use anyhow::{Context, Result, bail};
 use keystead_core::api::{
     AcceptInviteRequest, AddFolderGroupRequest, AddGroupMemberRequest, AddMemberRequest,
     ApprovalRequest, ClaimDeviceTransferRequest, ClaimedAccountSecret, Conflict,
-    CreateFolderRequest, CreateGroupRequest, DeviceList, DeviceTransfer, DeviceTransferState,
-    Directory, Enrolled, Exposures, GroupFolderKey, GroupMemberKey, GroupRekeyRequest, GroupShare,
-    Groups, Health, Invite, InviteRequest, ItemHistory, JoinDeviceTransferRequest, KeyLink, Member,
-    MemberKey, Members, PutItemRequest, RecoverRequest, RecoveryChallenge,
-    RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest, SendAccountSecretRequest,
-    SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
+    CreateFolderRequest, CreateGroupRequest, DeletedItems, DeviceList, DeviceTransfer,
+    DeviceTransferState, Directory, Enrolled, Exposures, GroupFolderKey, GroupMemberKey,
+    GroupRekeyRequest, GroupShare, Groups, Health, Invite, InviteRequest, ItemHistory,
+    JoinDeviceTransferRequest, KeyLink, Member, MemberKey, Members, PutItemRequest, RecoverRequest,
+    RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest,
+    SendAccountSecretRequest, SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring};
@@ -45,6 +45,9 @@ const NEEDS_0_4: &str = "the server is older than Keystead 0.4.0 and doesn't hav
 /// One-time codes came with 0.6.0 (item format 4); an older server can't store them.
 const NEEDS_0_6: &str = "the server is older than Keystead 0.6.0 and can't store one-time \
                          codes; update it to 0.6.0 or later";
+/// Recently deleted came with 0.9.0; an older server forgets a deleted login at once.
+const NEEDS_0_9: &str = "the server is older than Keystead 0.9.0 and keeps nothing of deleted \
+                         logins; update it to 0.9.0 or later";
 /// History came with 0.7.0; an older server keeps only each login's latest version.
 const NEEDS_0_7: &str = "the server is older than Keystead 0.7.0 and keeps no history; update \
                          it to 0.7.0 or later";
@@ -279,6 +282,20 @@ pub struct ItemRow {
     pub role: Role,
     /// It has one-time codes ([`Vault::one_time_code`]).
     pub has_one_time_code: bool,
+}
+
+/// A login deleted in the last 30 days, which can still be brought back.
+#[derive(Debug)]
+pub struct DeletedRow {
+    pub item_id: ItemId,
+    pub name: String,
+    pub username: String,
+    /// Its folder, if it's in one of yours.
+    pub folder: Option<String>,
+    pub deleted_by: String,
+    /// When it was deleted, and until when it can be brought back, in seconds since 1970.
+    pub deleted_at: i64,
+    pub kept_until: i64,
 }
 
 /// One version of a login in its history.
@@ -610,6 +627,8 @@ pub struct Vault {
     history: HashMap<ItemId, Vec<EncryptedItem>>,
     /// A device being added from this one: the transfer's id and token.
     adding_device: Option<(String, String)>,
+    /// The last version of each recently deleted login fetched this session; encrypted.
+    deleted: HashMap<ItemId, EncryptedItem>,
 }
 
 impl Vault {
@@ -632,6 +651,7 @@ impl Vault {
             server_takes_items: false,
             history: HashMap::new(),
             adding_device: None,
+            deleted: HashMap::new(),
         })
     }
 
@@ -655,6 +675,7 @@ impl Vault {
             server_takes_items: false,
             history: HashMap::new(),
             adding_device: None,
+            deleted: HashMap::new(),
             groups: GroupKeyring::default(),
         };
         vault.save()?;
@@ -1660,6 +1681,100 @@ impl Vault {
         Ok(rows)
     }
 
+    /// Logins deleted in the last 30 days that this account can change, newest first,
+    /// fetched fresh; `None` if the server is older than 0.9.0 and keeps none. Deletion
+    /// markers and last versions whose signatures don't check out are left out.
+    pub fn deleted(&mut self) -> Result<Option<Vec<DeletedRow>>> {
+        let list: DeletedItems = match self.call(|client| client.get("/v1/deleted", &[]))? {
+            Ok(list) => list,
+            Err(Failure::Status { code: 404, .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let signed = |item: &EncryptedItem| {
+            self.profile
+                .trusted_keys(item.author)
+                .is_some_and(|keys| item.verify(&keys).is_ok())
+        };
+        let mut rows = Vec::new();
+        let mut kept = HashMap::new();
+        for entry in list.items {
+            let (deleted, last) = (entry.deleted, entry.last);
+            if !deleted.deleted
+                || last.deleted
+                || last.id != deleted.id
+                || last.version >= deleted.version
+                || last.format > ITEM_FORMAT
+                || !signed(&deleted)
+                || !signed(&last)
+            {
+                continue;
+            }
+            let Ok((overview, _)) = self.open_version(&last) else {
+                continue;
+            };
+            let folder = last
+                .folder_id
+                .filter(|folder_id| self.profile.folders.contains_key(folder_id))
+                .map(|folder_id| {
+                    self.profile
+                        .folder_name(&self.keys, &self.groups, folder_id)
+                })
+                .transpose()?;
+            rows.push(DeletedRow {
+                item_id: last.id,
+                name: overview.name,
+                username: overview.username,
+                folder,
+                deleted_by: self.profile.user_name(deleted.author),
+                deleted_at: entry.deleted_at,
+                kept_until: entry.deleted_at + DELETED_KEPT_SECONDS,
+            });
+            kept.insert(last.id, last);
+        }
+        self.deleted = kept;
+        Ok(Some(rows))
+    }
+
+    /// Brings back a login from the list last fetched with [`deleted`](Self::deleted): its
+    /// last version, saved as a new one, so everyone who had it gets it again.
+    pub fn undelete(&mut self, item_id: ItemId) -> Result<EditOutcome> {
+        let last = self
+            .deleted
+            .get(&item_id)
+            .cloned()
+            .context("that login isn't in Recently Deleted; look at it again")?;
+        let (overview, details) = self.open_version(&last)?;
+        self.check_server_takes_items()?;
+        let details = self.with_one_time_code(details)?;
+        self.sync()?;
+        let current = self
+            .profile
+            .items
+            .get(&item_id)
+            .filter(|item| item.deleted)
+            .cloned()
+            .context("that login isn't deleted any more")?;
+        let outcome = self.save_version_with(&current, &overview, &details, People::Same, false)?;
+        self.deleted.remove(&item_id);
+        self.save()?;
+        Ok(outcome)
+    }
+
+    /// Deletes a login for good now, instead of after 30 days: the server forgets its
+    /// earlier versions, so it can't be brought back.
+    pub fn purge(&mut self, item_id: ItemId) -> Result<()> {
+        let path = format!("/v1/deleted/{item_id}");
+        match self.call(|client| client.delete::<()>(&path))? {
+            Ok(()) => {}
+            Err(Failure::Status { code: 404, .. }) if self.server_version()? < (0, 9) => {
+                bail!(NEEDS_0_9)
+            }
+            Err(error) => return Err(error.into()),
+        }
+        self.deleted.remove(&item_id);
+        Ok(())
+    }
+
     /// One version from the history last fetched with [`history`](Self::history), decrypted.
     pub fn history_version(&self, item_id: ItemId, version: u64) -> Result<(Overview, Details)> {
         let item = self
@@ -2129,9 +2244,11 @@ impl Vault {
             }
             People::DropGroup(group_id) => keys.groups.retain(|copy| copy.group_id != group_id),
         }
-        // Anyone who lost access earlier doesn't know a new password.
-        let previous = current.open_details(&self.item_key(current)?)?;
-        let password_changed = password_may_be_new && previous.password != details.password;
+        // Anyone who lost access earlier doesn't know a new password. (A deleted item has
+        // no details to compare; bringing it back isn't a new password.)
+        let password_changed = password_may_be_new
+            && !current.deleted
+            && current.open_details(&self.item_key(current)?)?.password != details.password;
         let item = EncryptedItem::seal(
             self.next_version(current),
             &key,
@@ -2457,6 +2574,9 @@ enum People<'a> {
 }
 
 /// Opens an item with whichever of its folder's keys it was saved with, or directly.
+/// How long a deleted login can be brought back.
+const DELETED_KEPT_SECONDS: i64 = 30 * 86_400;
+
 /// Which of a login's fields differ between two of its versions.
 fn changes(before: &(Overview, Details), after: &(Overview, Details)) -> Vec<String> {
     let ((before_overview, before_details), (after_overview, after_details)) = (before, after);

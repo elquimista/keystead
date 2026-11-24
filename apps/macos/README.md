@@ -35,6 +35,9 @@ account back on a new Mac with a Recovery Kit.
   10): who saved each, when, and what it changed. Each one's password can be shown or
   copied, and Bring Back… saves it as a new version. Editors and managers only; needs a
   0.7.0 server.
+- **Recently Deleted:** a deleted login stays in Recently Deleted (in the sidebar) for 30
+  days, for everyone who could edit it, with who deleted it and when. Bring Back returns it
+  to everyone who had it; Delete Now… deletes it for good. Needs a 0.9.0 server.
 - **Quick search:** ⇧⌘Space (Settings › General: ⌥⌘K, ⌃⌥⌘K or off) opens a Spotlight-style
   box over any app. Type, pick with the arrows, and Return copies the password (Shift-Return
   the username, Option-Return the one-time code) and closes it, so the app you were in is

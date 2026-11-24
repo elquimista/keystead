@@ -27,6 +27,8 @@ final class AppModel {
         case folder(String)
         /// Logins whose passwords someone who lost access may still know.
         case toChange
+        /// Logins deleted in the last 30 days, which can still be brought back.
+        case recentlyDeleted
         case people
         case groups
     }
@@ -96,6 +98,11 @@ final class AppModel {
     /// Passwords to change: who lost access to which logins you can change, most recent
     /// first.
     private(set) var toChange: [ToChange] = []
+    /// Logins deleted in the last 30 days that you can bring back, newest first.
+    private(set) var recentlyDeleted: [DeletedLogin] = []
+    /// The server keeps deleted logins for 30 days (0.9.0 and later).
+    private(set) var keepsDeleted = false
+    var selectedDeletedID: DeletedLogin.ID?
     /// This account's devices, this Mac included.
     private(set) var devices: [AccountDevice] = []
     /// Why the device list couldn't be loaded, such as a server older than 0.2.0.
@@ -142,6 +149,7 @@ final class AppModel {
             case .folder(let folder): guard item.folder == folder else { return false }
             case .sharedWithMe: guard item.sharedWithMe else { return false }
             case .toChange: guard toChange.contains(where: { $0.itemId == item.id }) else { return false }
+            case .recentlyDeleted: return false
             case .allLogins, .people, .groups: break
             }
             let text = "\(item.name) \(item.username) \(item.url) \(item.folder ?? "") \(item.owner ?? "")"
@@ -418,6 +426,39 @@ final class AppModel {
         }
         await reloadLocal()
         await reloadDevices()
+        await reloadDeleted()
+    }
+
+    /// Loads Recently Deleted on its own, like the device list.
+    private func reloadDeleted() async {
+        do {
+            let deleted = try await perform { try $0.deletedLogins() }
+            keepsDeleted = deleted != nil
+            recentlyDeleted = deleted ?? []
+        } catch {
+            recentlyDeleted = []
+        }
+    }
+
+    /// Brings back a deleted login for everyone who had it. Returns a note if someone else
+    /// changed it first, in which case nothing was saved.
+    func undelete(_ login: DeletedLogin) async throws -> String? {
+        let id = login.itemId
+        let outcome = try await perform { try $0.undeleteLogin(itemId: id) }
+        await reloadLocal()
+        await reloadDeleted()
+        if case .saved = outcome {
+            section = .allLogins
+            selectedItemID = id
+        }
+        return conflictNote(outcome, doing: "it wasn't brought back")
+    }
+
+    /// Deletes a deleted login for good, now instead of after 30 days.
+    func purge(_ login: DeletedLogin) async throws {
+        let id = login.itemId
+        try await perform { try $0.purgeLogin(itemId: id) }
+        await reloadDeleted()
     }
 
     /// Loads the device list on its own, so an older server that has no device list
@@ -990,6 +1031,13 @@ extension AppModel {
                     members: [GroupMember(userId: 2, name: "Mo", isManager: true, isMe: false)],
                     isMember: false, canManage: true, canAdd: false),
             ]
+            model.keepsDeleted = true
+            model.recentlyDeleted = [
+                DeletedLogin(
+                    itemId: "00000000-0000-4000-8000-000000000005", name: "Old VPN",
+                    username: "ops", folder: "Production", deletedBy: "Mo",
+                    deletedAt: 1_795_400_000, keptUntil: 1_795_400_000 + 30 * 86_400),
+            ]
             // Pat, removed from the team, could see two of Olivia's logins.
             model.toChange = [
                 ToChange(
@@ -1104,6 +1152,10 @@ extension ItemSummary: Identifiable {
 }
 
 extension GroupSummary: Identifiable {}
+
+extension DeletedLogin: Identifiable {
+    public var id: String { itemId }
+}
 
 extension GroupMember: Identifiable {
     public var id: Int64 { userId }
