@@ -85,9 +85,13 @@ private struct Sidebar: View {
                             Button("New Login in \u{201C}\(folder)\u{201D}…") {
                                 model.sheet = .addLogin(folder: folder)
                             }
-                            Button("Share \u{201C}\(folder)\u{201D}…") {
-                                model.sheet = .share(folder: folder, user: nil)
+                            .disabled(model.folderRoles[folder] == .view)
+                            if model.manages(folder: folder) {
+                                Button("Share \u{201C}\(folder)\u{201D}…") {
+                                    model.sheet = .share(folder: folder, user: nil)
+                                }
                             }
+                            Button("Access…") { model.sheet = .manageFolder(folder) }
                         }
                 }
                 Button {
@@ -167,9 +171,13 @@ private struct LoginList: View {
                             .disabled(item.username.isEmpty)
                         Divider()
                         Button("Edit…") { model.sheet = .editLogin(item) }
-                        Button("Share…") { model.sheet = .shareLogin(item) }
+                            .disabled(item.role == .view)
+                        Button(item.role == .manage ? "Share…" : "Access…") {
+                            model.sheet = .shareLogin(item)
+                        }
                         Divider()
                         Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
+                            .disabled(item.role == .view)
                     }
                 } primaryAction: { ids in
                     // Double-click or Return copies the password.
@@ -189,6 +197,17 @@ private struct LoginList: View {
                     Label("New Login", systemImage: "plus")
                 }
                 .help("Add a login")
+                .disabled(folder.map { model.folderRoles[$0] == .view } ?? false)
+            }
+            if let folder {
+                ToolbarItem {
+                    Button {
+                        model.sheet = .manageFolder(folder)
+                    } label: {
+                        Label("Access", systemImage: "person.2")
+                    }
+                    .help("Who has access to \u{201C}\(folder)\u{201D}")
+                }
             }
         }
     }
@@ -331,6 +350,9 @@ private struct LoginDetail: View {
                 } else if !item.sharedWith.isEmpty {
                     LabeledContent("Also shared with", value: sharedWith)
                 }
+                if item.role != .manage {
+                    LabeledContent("Your access", value: item.role.label)
+                }
             } header: {
                 Text(item.name)
                     .font(.title2.weight(.semibold))
@@ -339,9 +361,13 @@ private struct LoginDetail: View {
             Section {
                 HStack {
                     Button("Edit…") { model.sheet = .editLogin(item) }
-                    Button("Share…") { model.sheet = .shareLogin(item) }
+                        .disabled(item.role == .view)
+                    Button(item.role == .manage ? "Share…" : "Access…") {
+                        model.sheet = .shareLogin(item)
+                    }
                     Spacer()
                     Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
+                        .disabled(item.role == .view)
                 }
             }
             if let error {
@@ -485,13 +511,30 @@ private struct PersonDetail: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+            } else if user.removed {
+                Section {
+                    Text("\(user.name) was removed from the team. Their devices no longer work, "
+                        + "and nobody can share with them.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else {
                 Section {
                     Text("Share a folder to give \(user.name) its logins: everything in it now, "
                         + "and anything added later.")
                         .fixedSize(horizontal: false, vertical: true)
                     Button("Share a Folder…") { model.sheet = .share(folder: nil, user: user) }
-                        .disabled(model.folders.isEmpty)
+                        .disabled(!model.folders.contains { model.manages(folder: $0) })
+                }
+                if model.isOwner && !user.isOwner {
+                    Section {
+                        Text("Removing \(user.name) stops their devices and takes away every "
+                            + "folder and login, for example when they leave the company.")
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Remove from Team…", role: .destructive) {
+                            model.sheet = .removeUser(user)
+                        }
+                    }
                 }
             }
         }
@@ -598,6 +641,7 @@ private extension View {
 
 func status(of user: User) -> String {
     if user.isOwner { return "Owner" }
+    if user.removed { return "Removed" }
     return user.approved ? "Approved" : "Waiting for approval"
 }
 

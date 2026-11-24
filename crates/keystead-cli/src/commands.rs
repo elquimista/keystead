@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 pub use keystead_client::{
-    DeviceRow, EditOutcome, InviteInfo, ItemRow, SyncSummary, UserRow, Whoami, generate_password,
+    DeviceRow, EditOutcome, InviteInfo, ItemRow, MemberRow, SyncSummary, UserRow, Whoami,
+    generate_password,
 };
 use keystead_client::{NewAccount, Vault};
+pub use keystead_core::api::Role;
 use keystead_core::ids::{DeviceId, UserId};
 use keystead_core::items::{Details, Overview};
 use keystead_core::keys::{AccountSecret, SoftwareDeviceKey};
@@ -111,8 +113,32 @@ pub fn create_folder(home: &Path, name: &str) -> Result<()> {
     open(home)?.create_folder(name).map(|_| ())
 }
 
-pub fn share_folder(home: &Path, folder: &str, user: UserId) -> Result<String> {
-    open(home)?.share_folder(folder, user)
+pub fn share_folder(home: &Path, folder: &str, user: UserId, role: Role) -> Result<String> {
+    open(home)?.share_folder(folder, user, role)
+}
+
+pub fn folder_members(home: &Path, folder: &str) -> Result<Vec<MemberRow>> {
+    refreshed(home)?.folder_members(folder)
+}
+
+pub fn set_folder_role(home: &Path, folder: &str, user: UserId, role: Role) -> Result<()> {
+    refreshed(home)?.set_folder_role(folder, user, role)
+}
+
+/// Takes someone out of a folder, then gives the folder a new key.
+pub fn remove_from_folder(home: &Path, folder: &str, user: UserId) -> Result<()> {
+    refreshed(home)?.remove_from_folder(folder, user)
+}
+
+pub fn leave_folder(home: &Path, folder: &str) -> Result<()> {
+    let mut vault = refreshed(home)?;
+    let me = vault.whoami().user_id;
+    vault.remove_from_folder(folder, me)
+}
+
+/// Removes someone from the team (owner only). Returns their name.
+pub fn remove_user(home: &Path, user: UserId) -> Result<String> {
+    open(home)?.remove_user(user)
 }
 
 pub fn folders(home: &Path) -> Result<Vec<String>> {
@@ -125,11 +151,25 @@ pub fn add(home: &Path, folder: Option<&str>, overview: Overview, details: Detai
 }
 
 /// Shares one login with an approved user. Returns their name.
-pub fn share(home: &Path, name: &str, folder: Option<&str>, user: UserId) -> Result<String> {
+pub fn share(
+    home: &Path,
+    name: &str,
+    folder: Option<&str>,
+    user: UserId,
+    role: Role,
+) -> Result<String> {
     let mut vault = open(home)?;
     vault.sync()?;
     let item_id = vault.find_item(name, folder)?;
-    vault.share_item(item_id, user)
+    vault.share_item(item_id, user, role)
+}
+
+/// Takes away someone's copy of a login. Returns their name.
+pub fn unshare(home: &Path, name: &str, folder: Option<&str>, user: UserId) -> Result<String> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.unshare_item(item_id, user)
 }
 
 pub fn list(home: &Path) -> Result<Vec<ItemRow>> {
@@ -205,6 +245,9 @@ pub fn warn_rejected(summary: &SyncSummary) {
             "warning: ignored {} item(s) not signed by an approved user",
             summary.rejected
         );
+    }
+    for problem in &summary.rekey_problems {
+        eprintln!("warning: couldn't give a folder its new key ({problem}); will retry");
     }
 }
 

@@ -286,6 +286,14 @@ impl FolderKey {
     pub(crate) fn format_1_item_key(&self) -> ItemKey {
         ItemKey(self.0)
     }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 /// The symmetric key that encrypts one item. It reaches people through the item's folder

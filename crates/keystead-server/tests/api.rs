@@ -8,9 +8,9 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use keystead_core::api::{
     AcceptInviteRequest, AddMemberRequest, ApprovalRequest, Challenge, ChallengeRequest, Conflict,
-    CreateFolderRequest, DeviceList, Directory, Enrolled, Invite, InviteRequest, PutItemRequest,
-    RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, Session, SetupRequest,
-    SignInRequest, SyncEntry, SyncPage,
+    CreateFolderRequest, DeviceList, Directory, Enrolled, Invite, InviteRequest, Member, MemberKey,
+    Members, PutItemRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest,
+    RekeyRequest, Role, RoleRequest, Session, SetupRequest, SignInRequest, SyncEntry, SyncPage,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::ids::{DeviceId, FolderId, ItemId, UserId};
@@ -137,6 +137,7 @@ impl Person {
             name: self.name.clone(),
             keys: self.keys.public(),
             approval: None,
+            removed: false,
         }
     }
 
@@ -198,6 +199,18 @@ impl Person {
         item: &EncryptedItem,
         base_version: Option<u64>,
     ) -> (StatusCode, Value) {
+        self.put_with_roles(server, item, base_version, Vec::new())
+            .await
+    }
+
+    /// Saves a version that gives these people, new to it, these roles.
+    async fn put_with_roles(
+        &self,
+        server: &Server,
+        item: &EncryptedItem,
+        base_version: Option<u64>,
+        roles: Vec<Member>,
+    ) -> (StatusCode, Value) {
         server
             .call(
                 Method::PUT,
@@ -206,9 +219,21 @@ impl Person {
                 json(&PutItemRequest {
                     base_version,
                     item: item.clone(),
+                    roles,
                 }),
             )
             .await
+    }
+
+    /// Calls the API as this person.
+    async fn call(
+        &self,
+        server: &Server,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        server.call(method, uri, self.token(), body).await
     }
 }
 
@@ -416,6 +441,8 @@ async fn invite_share_sync_and_conflict_end_to_end() {
             json(&AddMemberRequest {
                 user_id: bob.user_id,
                 wrapped_key: bob_keys.wrap_folder_key(&key, folder_id).unwrap(),
+                role: Role::Edit,
+                generation: 0,
             }),
         )
         .await;
@@ -619,6 +646,8 @@ async fn access_rules_are_enforced() {
             json(&AddMemberRequest {
                 user_id: bob.user_id,
                 wrapped_key: bob.keys.public().wrap_folder_key(&key, folder_id).unwrap(),
+                role: Role::Edit,
+                generation: 0,
             }),
         )
         .await;
@@ -835,7 +864,13 @@ async fn an_item_outside_folders_reaches_only_its_owner_and_who_it_is_shared_wit
     let mut with_bob = item.keys.clone();
     with_bob.people.push(copy_for(&bob, &key, item.id));
     let shared = next(&alice, &key, &item, with_bob, "own-secret");
-    let (status, body) = alice.put(&server, &shared, Some(1)).await;
+    let editor = vec![Member {
+        user_id: bob.user_id,
+        role: Role::Edit,
+    }];
+    let (status, body) = alice
+        .put_with_roles(&server, &shared, Some(1), editor)
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let page = bob.sync(&server, bob_cursor, 100).await;
     assert_eq!(item_entries(&page), [(item.id, 2)]);
@@ -850,7 +885,7 @@ async fn an_item_outside_folders_reaches_only_its_owner_and_who_it_is_shared_wit
         [(item.id, 3)]
     );
 
-    // Nobody can be dropped yet, and the item can't move.
+    // As an editor, Bob can't change who has it, and the item can't move.
     let (status, body) = bob
         .put(
             &server,
@@ -858,11 +893,26 @@ async fn an_item_outside_folders_reaches_only_its_owner_and_who_it_is_shared_wit
             Some(3),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     let mut moved = next(&bob, &key, &edited, edited.keys.clone(), "x");
     moved.owner = Some(bob.user_id);
     let (status, _) = bob.put(&server, &moved, Some(3)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Alice, its owner, takes Bob's copy away: his feed says to drop it.
+    let bob_cursor = bob.sync(&server, 0, 100).await.cursor;
+    let unshared = next(&alice, &key, &edited, item.keys.clone(), "rotated");
+    let (status, body) = alice.put(&server, &unshared, Some(3)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page = bob.sync(&server, bob_cursor, 100).await;
+    assert!(
+        page.entries.iter().any(
+            |entry| matches!(entry, SyncEntry::LeftItem { item_id, .. } if *item_id == item.id)
+        ),
+        "{:?}",
+        page.entries
+    );
+    assert!(item_entries(&page).is_empty());
 }
 
 #[tokio::test]
@@ -915,6 +965,8 @@ async fn an_item_in_a_folder_can_be_shared_with_someone_outside_it() {
                     .public()
                     .wrap_folder_key(&folder_key, folder_id)
                     .unwrap(),
+                role: Role::Edit,
+                generation: 0,
             }),
         )
         .await;
@@ -1233,7 +1285,378 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
+}
+
+/// `by` adds `person` to a folder with `role`, wrapping the folder key of `generation`.
+async fn add_to_folder(
+    server: &Server,
+    by: &Person,
+    folder: (FolderId, &FolderKey),
+    person: &Person,
+    role: Role,
+    generation: u32,
+) -> (StatusCode, Value) {
+    let (folder_id, key) = folder;
+    by.call(
+        server,
+        Method::POST,
+        &format!("/v1/folders/{folder_id}/members"),
+        json(&AddMemberRequest {
+            user_id: person.user_id,
+            wrapped_key: person
+                .keys
+                .public()
+                .wrap_folder_key(key, folder_id)
+                .unwrap(),
+            role,
+            generation,
+        }),
+    )
+    .await
+}
+
+async fn folder_members(server: &Server, by: &Person, folder_id: FolderId) -> Vec<(UserId, Role)> {
+    let (status, body) = by
+        .call(
+            server,
+            Method::GET,
+            &format!("/v1/folders/{folder_id}/members"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    decode::<Members>(body)
+        .members
+        .into_iter()
+        .map(|member| (member.user_id, member.role))
+        .collect()
+}
+
+/// Alice owns the server; Bob and Carol are approved members.
+async fn team(server: &Server) -> (Person, Person, Person) {
+    let alice = set_up_owner(server).await;
+    let bob = invite(server, &alice, "Bob").await;
+    approve(server, &alice, &bob).await;
+    let carol = invite(server, &alice, "Carol").await;
+    approve(server, &alice, &carol).await;
+    (alice, bob, carol)
+}
+
+fn new_item(
+    author: &Person,
+    folder_id: FolderId,
+    folder_key: &FolderKey,
+    name: &str,
+) -> EncryptedItem {
+    let at = ItemVersion {
+        id: ItemId::random(),
+        folder_id: Some(folder_id),
+        owner: None,
+        version: 1,
+        author: author.user_id,
+    };
+    seal(author, folder_key, at, name, "pw")
+}
+
+#[tokio::test]
+async fn roles_limit_what_people_can_do_in_a_folder() {
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    let (folder_id, key) = create_folder(&server, &alice, "Production").await;
+    let folder = (folder_id, &key);
+    let (status, body) = add_to_folder(&server, &alice, folder, &bob, Role::View, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, _) = add_to_folder(&server, &alice, folder, &carol, Role::Edit, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        folder_members(&server, &bob, folder_id).await,
+        [
+            (alice.user_id, Role::Manage),
+            (bob.user_id, Role::View),
+            (carol.user_id, Role::Edit)
+        ]
+    );
+
+    // A viewer can't add logins; an editor can, but can't share the folder.
+    let (status, _) = bob
+        .put(&server, &new_item(&bob, folder_id, &key, "x"), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = carol
+        .put(
+            &server,
+            &new_item(&carol, folder_id, &key, "Database"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let dave = invite(&server, &alice, "Dave").await;
+    approve(&server, &alice, &dave).await;
+    let (status, _) = add_to_folder(&server, &carol, folder, &dave, Role::View, 0).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Bob's sync says what he may do there.
+    let page = bob.sync(&server, 0, 100).await;
+    let roles = page.roles.expect("the last page carries roles");
+    assert_eq!(roles.folders[0].role, Role::View);
+
+    // Alice makes Bob an editor; now he can add logins.
+    let role = |role| json(&RoleRequest { role });
+    let path = format!("/v1/folders/{folder_id}/members/{}", bob.user_id);
+    let (status, _) = alice
+        .call(&server, Method::PUT, &path, role(Role::Edit))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = bob
+        .put(&server, &new_item(&bob, folder_id, &key, "Bob's"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Only managers change roles, and the last manager can't step down or leave.
+    let (status, _) = carol
+        .call(&server, Method::PUT, &path, role(Role::Manage))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let alice_path = format!("/v1/folders/{folder_id}/members/{}", alice.user_id);
+    let (status, _) = alice
+        .call(&server, Method::PUT, &alice_path, role(Role::Edit))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = alice.call(&server, Method::DELETE, &alice_path, None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn removing_someone_from_a_folder_ends_their_access_and_changes_its_key() {
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    let (folder_id, key) = create_folder(&server, &alice, "Production").await;
+    let folder = (folder_id, &key);
+    add_to_folder(&server, &alice, folder, &bob, Role::Edit, 0).await;
+    add_to_folder(&server, &alice, folder, &carol, Role::View, 0).await;
+    let item = new_item(&alice, folder_id, &key, "AWS root");
+    alice.put(&server, &item, None).await;
+    let bob_cursor = bob.sync(&server, 0, 100).await.cursor;
+    let carol_cursor = carol.sync(&server, 0, 100).await.cursor;
+
+    // Bob can't remove anyone but himself; Alice removes him.
+    let bob_path = format!("/v1/folders/{folder_id}/members/{}", bob.user_id);
+    let carol_path = format!("/v1/folders/{folder_id}/members/{}", carol.user_id);
+    let (status, _) = bob.call(&server, Method::DELETE, &carol_path, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = alice.call(&server, Method::DELETE, &bob_path, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let page = bob.sync(&server, bob_cursor, 100).await;
+    assert!(
+        matches!(page.entries[..], [SyncEntry::Left { .. }]),
+        "{:?}",
+        page.entries
+    );
+    let edit = seal(
+        &bob,
+        &key,
+        ItemVersion {
+            version: 2,
+            author: bob.user_id,
+            ..ItemVersion {
+                id: item.id,
+                folder_id: Some(folder_id),
+                owner: None,
+                version: 1,
+                author: bob.user_id,
+            }
+        },
+        "AWS root",
+        "x",
+    );
+    let (status, _) = bob.put(&server, &edit, Some(1)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The folder now needs a new key, and Alice's sync says so.
+    let page = alice.sync(&server, 0, 100).await;
+    assert_eq!(page.rekey_needed, [folder_id]);
+
+    // A new key must go to exactly the remaining members, at the next generation.
+    let new_key = FolderKey::generate();
+    let wrapped = |people: &[&Person]| -> Vec<MemberKey> {
+        people
+            .iter()
+            .map(|person| MemberKey {
+                user_id: person.user_id,
+                wrapped_key: person
+                    .keys
+                    .public()
+                    .wrap_folder_key(&new_key, folder_id)
+                    .unwrap(),
+            })
+            .collect()
+    };
+    let rekey = |generation, people: &[&Person]| {
+        json(&RekeyRequest {
+            generation,
+            wrapped_keys: wrapped(people),
+            previous: new_key.seal_previous(&key, folder_id, generation),
+            info: FolderInfo {
+                name: "Production".into(),
+            }
+            .seal(folder_id, &new_key)
+            .unwrap(),
+        })
+    };
+    let path = format!("/v1/folders/{folder_id}/rekey");
+    let (status, _) = alice
+        .call(
+            &server,
+            Method::POST,
+            &path,
+            rekey(1, &[&alice, &bob, &carol]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "Bob is no longer a member");
+    let (status, _) = alice
+        .call(&server, Method::POST, &path, rekey(2, &[&alice, &carol]))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the generation must be the next one"
+    );
+    let (status, _) = carol
+        .call(&server, Method::POST, &path, rekey(1, &[&alice, &carol]))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "only managers");
+    let (status, body) = alice
+        .call(&server, Method::POST, &path, rekey(1, &[&alice, &carol]))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(alice.sync(&server, 0, 100).await.rekey_needed.is_empty());
+
+    // Carol gets the new key, and through the chain still opens the old one.
+    let page = carol.sync(&server, carol_cursor, 100).await;
+    let Some(SyncEntry::Rekeyed {
+        wrapped_key,
+        generation,
+        chain,
+        info,
+        ..
+    }) = page
+        .entries
+        .into_iter()
+        .find(|entry| matches!(entry, SyncEntry::Rekeyed { .. }))
+    else {
+        panic!("expected a new key");
+    };
+    assert_eq!(generation, 1);
+    let carols_key = carol
+        .keys
+        .unwrap_folder_key(&wrapped_key, folder_id)
+        .unwrap();
+    assert_eq!(
+        FolderInfo::open(&info, folder_id, &carols_key)
+            .unwrap()
+            .name,
+        "Production"
+    );
+    let old = carols_key
+        .open_previous(&chain[0].previous, folder_id, 1)
+        .unwrap();
+    assert_eq!(open_password(&carol, &item, Some(&old)), "pw");
+
+    // Adding someone now needs the new key's generation; a new member gets the chain.
+    let (status, _) = add_to_folder(&server, &alice, folder, &bob, Role::View, 0).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) =
+        add_to_folder(&server, &alice, (folder_id, &new_key), &bob, Role::View, 1).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let page = bob.sync(&server, 0, 100).await;
+    let joined_chain = page.entries.iter().find_map(|entry| match entry {
+        SyncEntry::Joined {
+            chain, generation, ..
+        } => Some((chain.len(), *generation)),
+        _ => None,
+    });
+    assert_eq!(joined_chain, Some((1, 1)));
+
+    // Anyone can leave a folder on their own.
+    let (status, _) = carol.call(&server, Method::DELETE, &carol_path, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn the_owner_can_remove_someone_from_the_team() {
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    // Bob made a folder and shared it with Carol as a viewer; Alice isn't in it.
+    let (folder_id, key) = create_folder(&server, &bob, "Bob's team").await;
+    add_to_folder(&server, &bob, (folder_id, &key), &carol, Role::View, 0).await;
+    // Alice shared one of her own logins with Bob.
+    let (item, item_key) = private_item(&server, &alice, "Bank").await;
+    let mut keys = item.keys.clone();
+    keys.people.push(copy_for(&bob, &item_key, item.id));
+    let shared = next(&alice, &item_key, &item, keys, "own-secret");
+    alice.put(&server, &shared, Some(1)).await;
+
+    // Only the owner removes people, and not herself.
+    let path = |person: &Person| format!("/v1/users/{}", person.user_id);
+    let (status, _) = carol.call(&server, Method::DELETE, &path(&bob), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = alice
+        .call(&server, Method::DELETE, &path(&alice), None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let carol_cursor = carol.sync(&server, 0, 100).await.cursor;
+    let (status, body) = alice.call(&server, Method::DELETE, &path(&bob), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Bob's devices stop working, and his account can't be recovered.
+    let (status, _) = devices(&server, &bob).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = recovery_challenge(&server, bob.keys.public()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // He's still in the directory, marked removed, so his past signatures verify.
+    let (_, body) = alice
+        .call(&server, Method::GET, "/v1/directory", None)
+        .await;
+    let directory: Directory = decode(body);
+    let entry = directory
+        .entries
+        .iter()
+        .find(|entry| entry.user_id == bob.user_id)
+        .unwrap();
+    assert!(entry.removed && entry.approval.is_some());
+
+    // Carol now manages Bob's folder, which needs a new key; the login is Alice's alone.
+    assert_eq!(
+        folder_members(&server, &carol, folder_id).await,
+        [(carol.user_id, Role::Manage)]
+    );
+    assert_eq!(
+        carol.sync(&server, carol_cursor, 100).await.rekey_needed,
+        [folder_id]
+    );
+    let (_, body) = alice
+        .call(
+            &server,
+            Method::GET,
+            &format!("/v1/items/{}/people", item.id),
+            None,
+        )
+        .await;
+    let people: Vec<UserId> = decode::<Members>(body)
+        .members
+        .iter()
+        .map(|m| m.user_id)
+        .collect();
+    assert_eq!(people, [alice.user_id]);
+
+    // Nobody can share with him again, but anyone who can save may drop his old copy.
+    let (status, _) = add_to_folder(&server, &carol, (folder_id, &key), &bob, Role::View, 0).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let dropped = next(&alice, &item_key, &shared, item.keys.clone(), "own-secret");
+    let (status, body) = alice.put(&server, &dropped, Some(2)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

@@ -58,6 +58,15 @@ enum DebugSnapshots {
                 ("6c6-closed", { model.sheet = nil }),
                 ("6c7-delete-shared", { model.sheet = .deleteLogin(model.items[3]) }),
                 ("6c8-closed", { model.sheet = nil }),
+                // Roles: sharing AWS root (Olivia manages it), Production's members, a
+                // login Olivia may only view, and Mo's login she may edit but not share.
+                ("6c9-share-aws", { model.sheet = .shareLogin(model.items[0]) }),
+                ("6c10-closed", { model.sheet = nil }),
+                ("6c11-folder-access", { model.sheet = .manageFolder("Production") }),
+                ("6c12-closed", { model.sheet = nil }),
+                ("6c13-view-only-login", { model.selectedItemID = model.items[1].id }),
+                ("6c14-access-shared", { model.sheet = .shareLogin(model.items[3]) }),
+                ("6c15-closed", { model.sheet = nil }),
                 ("6d-new-login", { model.sheet = .addLogin(folder: nil) }),
                 ("6e-shared-with-me", {
                     model.sheet = nil

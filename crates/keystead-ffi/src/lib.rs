@@ -9,7 +9,8 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use keystead_client::{EditOutcome, InviteInfo, NewAccount};
+use keystead_client::{EditOutcome, InviteInfo, MemberRow, NewAccount};
+use keystead_core::api::Role as CoreRole;
 use keystead_core::encoding::Bytes;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
 use keystead_core::items::{Details, Overview};
@@ -129,6 +130,66 @@ pub struct User {
     /// The owner has checked their fingerprint and signed their keys.
     pub approved: bool,
     pub is_owner: bool,
+    /// The owner removed them from the team.
+    pub removed: bool,
+}
+
+/// What someone may do with a folder or a login.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Open and copy.
+    View,
+    /// Also change and delete logins.
+    Edit,
+    /// Also share, change roles and remove people.
+    Manage,
+}
+
+impl From<CoreRole> for Role {
+    fn from(role: CoreRole) -> Self {
+        match role {
+            CoreRole::View => Self::View,
+            CoreRole::Edit => Self::Edit,
+            CoreRole::Manage => Self::Manage,
+        }
+    }
+}
+
+impl From<Role> for CoreRole {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::View => Self::View,
+            Role::Edit => Self::Edit,
+            Role::Manage => Self::Manage,
+        }
+    }
+}
+
+/// Someone who can open a folder or a login, and their role.
+#[derive(uniffi::Record)]
+pub struct Person {
+    pub user_id: i64,
+    pub name: String,
+    pub role: Role,
+    pub is_me: bool,
+}
+
+impl From<MemberRow> for Person {
+    fn from(row: MemberRow) -> Self {
+        Self {
+            user_id: row.user_id.0,
+            name: row.name,
+            role: row.role.into(),
+            is_me: row.me,
+        }
+    }
+}
+
+/// A folder and your role in it.
+#[derive(uniffi::Record)]
+pub struct FolderSummary {
+    pub name: String,
+    pub role: Role,
 }
 
 /// How saving a change to a login went: changing it, or deleting it.
@@ -178,6 +239,8 @@ pub struct ItemSummary {
     pub shared_with: Vec<String>,
     /// You can open it only because it was shared with you directly.
     pub shared_with_me: bool,
+    /// What you may do with it.
+    pub role: Role,
 }
 
 #[derive(uniffi::Record)]
@@ -185,6 +248,8 @@ pub struct SyncResult {
     pub received: u32,
     /// Items ignored because no approved user signed them.
     pub rejected: u32,
+    /// Why a folder you manage didn't get the new key it needs; the next sync retries.
+    pub rekey_problems: Vec<String>,
 }
 
 /// An unlocked vault. Every method blocks on the network or disk, so call it off the
@@ -357,6 +422,7 @@ impl Vault {
         Ok(SyncResult {
             received: summary.received.try_into().unwrap_or(u32::MAX),
             rejected: summary.rejected.try_into().unwrap_or(u32::MAX),
+            rekey_problems: summary.rekey_problems,
         })
     }
 
@@ -375,6 +441,7 @@ impl Vault {
                 owner: row.owner,
                 shared_with: row.shared_with,
                 shared_with_me: row.shared_with_me,
+                role: row.role.into(),
             })
             .collect())
     }
@@ -445,6 +512,7 @@ impl Vault {
                 name: user.name,
                 approved: user.approved,
                 is_owner: user.is_owner,
+                removed: user.removed,
             })
             .collect())
     }
@@ -466,12 +534,66 @@ impl Vault {
     }
 
     /// Shares a folder with an approved user. Returns their name.
-    pub fn share_folder(&self, folder: String, user_id: i64) -> Result<String, CoreError> {
-        Ok(self.vault()?.share_folder(&folder, UserId(user_id))?)
+    /// Shares a folder with an approved user (managers). Returns their name.
+    pub fn share_folder(
+        &self,
+        folder: String,
+        user_id: i64,
+        role: Role,
+    ) -> Result<String, CoreError> {
+        Ok(self
+            .vault()?
+            .share_folder(&folder, UserId(user_id), role.into())?)
     }
 
     pub fn folders(&self) -> Result<Vec<String>, CoreError> {
         Ok(self.vault()?.folders()?)
+    }
+
+    /// Your folders with your role in each, from the local copy.
+    pub fn folder_summaries(&self) -> Result<Vec<FolderSummary>, CoreError> {
+        Ok(self
+            .vault()?
+            .folder_roles()?
+            .into_iter()
+            .map(|(name, role)| FolderSummary {
+                name,
+                role: role.into(),
+            })
+            .collect())
+    }
+
+    /// Everyone in a folder, with their roles.
+    pub fn folder_members(&self, folder: String) -> Result<Vec<Person>, CoreError> {
+        Ok(self
+            .vault()?
+            .folder_members(&folder)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// Changes someone's role in a folder (managers).
+    pub fn set_folder_role(
+        &self,
+        folder: String,
+        user_id: i64,
+        role: Role,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .vault()?
+            .set_folder_role(&folder, UserId(user_id), role.into())?)
+    }
+
+    /// Takes someone out of a folder, or you, to leave it. Someone else's removal also
+    /// gives the folder a new key.
+    pub fn remove_from_folder(&self, folder: String, user_id: i64) -> Result<(), CoreError> {
+        Ok(self.vault()?.remove_from_folder(&folder, UserId(user_id))?)
+    }
+
+    /// Removes someone from the team (owner only). Returns their name.
+    pub fn remove_user(&self, user_id: i64) -> Result<String, CoreError> {
+        Ok(self.vault()?.remove_user(UserId(user_id))?)
     }
 
     /// Adds a login to a folder, or with no folder as yours alone until you share it.
@@ -497,10 +619,44 @@ impl Vault {
 
     /// Shares one login with an approved user, without the rest of its folder. Returns
     /// their name.
-    pub fn share_login(&self, item_id: String, user_id: i64) -> Result<String, CoreError> {
+    pub fn share_login(
+        &self,
+        item_id: String,
+        user_id: i64,
+        role: Role,
+    ) -> Result<String, CoreError> {
         Ok(self
             .vault()?
-            .share_item(item_id_from(&item_id)?, UserId(user_id))?)
+            .share_item(item_id_from(&item_id)?, UserId(user_id), role.into())?)
+    }
+
+    /// Who has a login directly: its owner and everyone it's shared with, with roles.
+    pub fn login_people(&self, item_id: String) -> Result<Vec<Person>, CoreError> {
+        Ok(self
+            .vault()?
+            .item_people(item_id_from(&item_id)?)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// Changes the role of someone a login is shared with directly (managers).
+    pub fn set_login_role(
+        &self,
+        item_id: String,
+        user_id: i64,
+        role: Role,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .vault()?
+            .set_item_role(item_id_from(&item_id)?, UserId(user_id), role.into())?)
+    }
+
+    /// Takes away someone's copy of a login (managers). Returns their name.
+    pub fn unshare_login(&self, item_id: String, user_id: i64) -> Result<String, CoreError> {
+        Ok(self
+            .vault()?
+            .unshare_item(item_id_from(&item_id)?, UserId(user_id))?)
     }
 }
 

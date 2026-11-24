@@ -36,6 +36,10 @@ final class AppModel {
         case shareLogin(ItemSummary)
         case newFolder
         case share(folder: String?, user: User?)
+        /// Who is in a folder, with their roles; managers change them here.
+        case manageFolder(String)
+        /// The owner removes someone from the team.
+        case removeUser(User)
         case invite
         case approve(User)
         /// After joining: the fingerprint to read to the owner.
@@ -52,6 +56,8 @@ final class AppModel {
             case .shareLogin(let item): "share-login-\(item.id)"
             case .newFolder: "new-folder"
             case .share(let folder, let user): "share-\(folder ?? "")-\(user?.userId ?? 0)"
+            case .manageFolder(let folder): "manage-\(folder)"
+            case .removeUser(let user): "remove-user-\(user.userId)"
             case .invite: "invite"
             case .approve(let user): "approve-\(user.userId)"
             case .fingerprint: "fingerprint"
@@ -65,6 +71,8 @@ final class AppModel {
     private(set) var identity: Identity?
     private(set) var items: [ItemSummary] = []
     private(set) var folders: [String] = []
+    /// Your role in each folder, by name.
+    private(set) var folderRoles: [String: Role] = [:]
     private(set) var users: [User] = []
     /// This account's devices, this Mac included.
     private(set) var devices: [AccountDevice] = []
@@ -261,6 +269,7 @@ final class AppModel {
         vault = nil
         items = []
         folders = []
+        folderRoles = [:]
         users = []
         devices = []
         devicesProblem = nil
@@ -298,8 +307,13 @@ final class AppModel {
         do {
             let result = try await perform { try $0.sync() }
             users = try await perform { try $0.users() }
-            message = result.rejected > 0
-                ? "Ignored \(result.rejected) item(s) not signed by an approved user." : nil
+            if result.rejected > 0 {
+                message = "Ignored \(result.rejected) item(s) not signed by an approved user."
+            } else if let problem = result.rekeyProblems.first {
+                message = "Couldn't give a folder its new key (\(problem)). The next sync tries again."
+            } else {
+                message = nil
+            }
         } catch {
             message = "Couldn't sync (\(describe(error))). Showing the copy on this Mac."
         }
@@ -417,14 +431,69 @@ final class AppModel {
         await reloadLocal()
     }
 
-    func share(folder: String, with user: User) async throws {
-        _ = try await perform { try $0.shareFolder(folder: folder, userId: user.userId) }
+    func share(folder: String, with user: User, role: Role) async throws {
+        _ = try await perform {
+            try $0.shareFolder(folder: folder, userId: user.userId, role: role)
+        }
     }
 
     /// Shares one login with an approved person, without the rest of its folder.
-    func share(login item: ItemSummary, with user: User) async throws {
+    func share(login item: ItemSummary, with user: User, role: Role) async throws {
         let id = item.id
-        _ = try await perform { try $0.shareLogin(itemId: id, userId: user.userId) }
+        _ = try await perform { try $0.shareLogin(itemId: id, userId: user.userId, role: role) }
+        await reloadLocal()
+    }
+
+    /// Whether you manage a folder: share it, change roles, remove people.
+    func manages(folder: String) -> Bool { folderRoles[folder] == .manage }
+
+    /// Everyone in a folder, with their roles.
+    func members(of folder: String) async throws -> [Person] {
+        #if DEBUG
+        if isDemo { return Self.demoMembers(folder) }
+        #endif
+        return try await perform { try $0.folderMembers(folder: folder) }
+    }
+
+    func setRole(_ role: Role, for person: Person, in folder: String) async throws {
+        try await perform { try $0.setFolderRole(folder: folder, userId: person.userId, role: role) }
+    }
+
+    /// Takes someone out of a folder; the folder then gets a new key. Taking yourself out
+    /// is leaving it.
+    func remove(_ person: Person, from folder: String) async throws {
+        try await perform { try $0.removeFromFolder(folder: folder, userId: person.userId) }
+        if person.isMe && section == .folder(folder) {
+            section = .allLogins
+        }
+        await reloadLocal()
+    }
+
+    /// Who has a login directly: its owner and everyone it's shared with.
+    func people(of item: ItemSummary) async throws -> [Person] {
+        #if DEBUG
+        if isDemo { return Self.demoPeople(item) }
+        #endif
+        let id = item.id
+        return try await perform { try $0.loginPeople(itemId: id) }
+    }
+
+    func setRole(_ role: Role, for person: Person, on item: ItemSummary) async throws {
+        let id = item.id
+        try await perform { try $0.setLoginRole(itemId: id, userId: person.userId, role: role) }
+    }
+
+    /// Takes away someone's copy of a login.
+    func unshare(_ item: ItemSummary, from person: Person) async throws {
+        let id = item.id
+        _ = try await perform { try $0.unshareLogin(itemId: id, userId: person.userId) }
+        await reloadLocal()
+    }
+
+    /// Removes someone from the team (owner only).
+    func remove(user: User) async throws {
+        _ = try await perform { try $0.removeUser(userId: user.userId) }
+        users = try await perform { try $0.users() }
         await reloadLocal()
     }
 
@@ -516,7 +585,9 @@ final class AppModel {
     private func reloadLocal() async {
         do {
             items = try await perform { try $0.items() }
-            folders = try await perform { try $0.folders() }
+            let summaries = try await perform { try $0.folderSummaries() }
+            folders = summaries.map(\.name).sorted()
+            folderRoles = Dictionary(summaries.map { ($0.name, $0.role) }, uniquingKeysWith: { a, _ in a })
         } catch {
             message = describe(error)
         }
@@ -543,7 +614,7 @@ extension AppModel {
             name: "Olivia", userId: 1, fingerprint: "ab12-cd34-ef56-7890-abcd",
             server: "https://keys.example.com", isOwner: true,
             ownerFingerprint: "ab12-cd34-ef56-7890-abcd")
-        model.users = [User(userId: 1, name: "Olivia", approved: true, isOwner: true)]
+        model.users = [User(userId: 1, name: "Olivia", approved: true, isOwner: true, removed: false)]
         model.devices = [
             AccountDevice(
                 deviceId: "00000000-0000-4000-8000-0000000000d1", name: "Olivia's MacBook Air",
@@ -558,30 +629,51 @@ extension AppModel {
         }
         if !alone {
             model.users += [
-                User(userId: 2, name: "Mo", approved: true, isOwner: false),
-                User(userId: 3, name: "Sam", approved: false, isOwner: false),
+                User(userId: 2, name: "Mo", approved: true, isOwner: false, removed: false),
+                User(userId: 3, name: "Sam", approved: false, isOwner: false, removed: false),
+                User(userId: 4, name: "Pat", approved: true, isOwner: false, removed: true),
             ]
             model.folders = ["Production", "Staging"]
+            // Mo's Staging folder, shared with Olivia to view.
+            model.folderRoles = ["Production": .manage, "Staging": .view]
             model.items = [
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000001", folder: "Production",
                     name: "AWS root", username: "root@example.com", url: "https://aws.amazon.com",
-                    owner: nil, sharedWith: ["Mo"], sharedWithMe: false),
+                    owner: nil, sharedWith: ["Mo"], sharedWithMe: false, role: .manage),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000002", folder: "Staging",
                     name: "Database", username: "admin", url: "",
-                    owner: nil, sharedWith: [], sharedWithMe: false),
+                    owner: nil, sharedWith: [], sharedWithMe: false, role: .view),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000003", folder: nil,
                     name: "Bank", username: "olivia@example.com", url: "https://bank.example.com",
-                    owner: nil, sharedWith: [], sharedWithMe: false),
+                    owner: nil, sharedWith: [], sharedWithMe: false, role: .manage),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000004", folder: nil,
                     name: "Domain registrar", username: "ops@example.com", url: "",
-                    owner: "Mo", sharedWith: [], sharedWithMe: true),
+                    owner: "Mo", sharedWith: [], sharedWithMe: true, role: .edit),
             ]
         }
         return model
+    }
+
+    static func demoMembers(_ folder: String) -> [Person] {
+        folder == "Production"
+            ? [Person(userId: 1, name: "Olivia", role: .manage, isMe: true),
+               Person(userId: 2, name: "Mo", role: .edit, isMe: false)]
+            : [Person(userId: 2, name: "Mo", role: .manage, isMe: false),
+               Person(userId: 1, name: "Olivia", role: .view, isMe: true)]
+    }
+
+    static func demoPeople(_ item: ItemSummary) -> [Person] {
+        switch item.name {
+        case "AWS root": [Person(userId: 2, name: "Mo", role: .edit, isMe: false)]
+        case "Domain registrar":
+            [Person(userId: 2, name: "Mo", role: .manage, isMe: false),
+             Person(userId: 1, name: "Olivia", role: .edit, isMe: true)]
+        default: [Person(userId: 1, name: "Olivia", role: .manage, isMe: true)]
+        }
     }
 
     /// Shows both notices at the bottom of the window, as after a failed sync and a copy.
@@ -623,6 +715,23 @@ extension ItemSummary: Identifiable {
 
 extension User: Identifiable {
     public var id: Int64 { userId }
+}
+
+extension Person: Identifiable {
+    public var id: Int64 { userId }
+}
+
+extension Role {
+    /// How a role reads in a picker.
+    var label: String {
+        switch self {
+        case .view: "Can view"
+        case .edit: "Can edit"
+        case .manage: "Can manage"
+        }
+    }
+
+    static let all: [Role] = [.view, .edit, .manage]
 }
 
 struct AppError: LocalizedError {

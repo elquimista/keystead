@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use keystead_core::api::Health;
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::encoding::Key32;
-use keystead_core::ids::{FolderId, UserId};
+use keystead_core::ids::UserId;
 use keystead_core::keys::AccountPublicKeys;
 use rand::Rng;
 use sqlx::sqlite::{
@@ -56,6 +56,32 @@ const MIGRATIONS: &[&str] = &[
          item_id TEXT NOT NULL REFERENCES items (id),
          PRIMARY KEY (user_id, item_id)
      ) WITHOUT ROWID;",
+    // 3 (0.3.0): roles; removing people from folders, logins and the team; folder keys
+    // that change after someone loses access, chained so older items still open. Everyone
+    // who already had access could do everything, so they become managers.
+    "ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'manage';
+     ALTER TABLE item_access ADD COLUMN role TEXT NOT NULL DEFAULT 'manage';
+     ALTER TABLE folders ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE folders ADD COLUMN needs_rekey INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE users ADD COLUMN removed_at INTEGER;
+     CREATE TABLE folder_keys (
+         folder_id TEXT NOT NULL REFERENCES folders (id),
+         generation INTEGER NOT NULL,
+         previous TEXT NOT NULL,
+         PRIMARY KEY (folder_id, generation)
+     ) WITHOUT ROWID;
+     CREATE TABLE rekey_log (
+         seq INTEGER PRIMARY KEY,
+         user_id INTEGER NOT NULL,
+         folder_id TEXT NOT NULL
+     );
+     CREATE INDEX rekey_log_user ON rekey_log (user_id, seq);
+     CREATE TABLE item_leave_log (
+         seq INTEGER PRIMARY KEY,
+         user_id INTEGER NOT NULL,
+         item_id TEXT NOT NULL
+     );
+     CREATE INDEX item_leave_log_user ON item_leave_log (user_id, seq);",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -132,10 +158,24 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/devices/{device_id}", delete(accounts::remove_device))
         .route("/v1/sign-out", post(accounts::sign_out))
         .route("/v1/users/{user_id}/approval", post(accounts::approve))
+        .route("/v1/users/{user_id}", delete(accounts::remove_user))
         .route("/v1/directory", get(accounts::directory))
         .route("/v1/folders", post(vault::create_folder))
-        .route("/v1/folders/{folder_id}/members", post(vault::add_member))
+        .route(
+            "/v1/folders/{folder_id}/members",
+            post(vault::add_member).get(vault::members),
+        )
+        .route(
+            "/v1/folders/{folder_id}/members/{user_id}",
+            put(vault::set_member_role).delete(vault::remove_member),
+        )
+        .route("/v1/folders/{folder_id}/rekey", post(vault::rekey))
         .route("/v1/items/{item_id}", put(vault::put_item))
+        .route("/v1/items/{item_id}/people", get(vault::item_people))
+        .route(
+            "/v1/items/{item_id}/people/{user_id}",
+            put(vault::set_item_role),
+        )
         .route("/v1/sync", get(vault::sync))
         .with_state(state)
 }
@@ -186,21 +226,10 @@ async fn next_seq(conn: &mut SqliteConnection) -> Result<i64, sqlx::Error> {
     .await
 }
 
-async fn is_member(
-    conn: &mut SqliteConnection,
-    user: UserId,
-    folder_id: FolderId,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM members WHERE user_id = ? AND folder_id = ?)")
-        .bind(user.0)
-        .bind(folder_id.to_string())
-        .fetch_one(conn)
-        .await
-}
+type UserRow = (i64, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool);
 
-type UserRow = (i64, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
-
-const USER_COLUMNS: &str = "SELECT id, name, encryption_key, signing_key, approval FROM users";
+const USER_COLUMNS: &str = "SELECT id, name, encryption_key, signing_key, approval, \
+                            removed_at IS NOT NULL FROM users";
 
 async fn user_entry(
     conn: &mut SqliteConnection,
@@ -214,7 +243,7 @@ async fn user_entry(
 }
 
 fn entry_from_row(
-    (id, name, encryption, signing, approval): UserRow,
+    (id, name, encryption, signing, approval, removed): UserRow,
 ) -> Result<DirectoryEntry, ApiError> {
     let key = |bytes: Vec<u8>| -> Result<Key32, ApiError> {
         let bytes: [u8; 32] = bytes
@@ -230,5 +259,6 @@ fn entry_from_row(
             signing: key(signing)?,
         },
         approval: approval.map(Into::into),
+        removed,
     })
 }

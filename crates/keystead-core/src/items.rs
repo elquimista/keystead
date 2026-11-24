@@ -24,6 +24,44 @@ use crate::encoding::{Bytes, transcript};
 use crate::ids::{FolderId, ItemId, UserId};
 use crate::keys::{AccountKeys, AccountPublicKeys, FolderKey, ItemKey, WrappedKey};
 
+impl FolderKey {
+    /// Seals the folder's previous key with this one, the key of `generation`: one link of
+    /// the folder's key chain. Whoever holds the newest key can open every older one.
+    pub fn seal_previous(&self, previous: &FolderKey, folder: FolderId, generation: u32) -> Sealed {
+        seal_part(
+            &self.cipher(),
+            &chain_aad(folder, generation),
+            previous.as_bytes(),
+        )
+    }
+
+    /// Opens the previous key from a chain link sealed with this one.
+    pub fn open_previous(
+        &self,
+        sealed: &Sealed,
+        folder: FolderId,
+        generation: u32,
+    ) -> Result<FolderKey, Error> {
+        let plaintext = Zeroizing::new(open_part(
+            &self.cipher(),
+            &chain_aad(folder, generation),
+            sealed,
+        )?);
+        let bytes: [u8; 32] = plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Decrypt)?;
+        Ok(FolderKey::from_bytes(bytes))
+    }
+}
+
+fn chain_aad(folder: FolderId, generation: u32) -> Vec<u8> {
+    transcript(
+        "keystead/folder-key-chain/v1",
+        &[folder.as_bytes(), &generation.to_be_bytes()],
+    )
+}
+
 /// The item format this build writes.
 pub const ITEM_FORMAT: u8 = 2;
 
@@ -719,6 +757,19 @@ mod tests {
         let sealed = info.seal(folder, &key).unwrap();
         assert_eq!(FolderInfo::open(&sealed, folder, &key).unwrap(), info);
         assert!(FolderInfo::open(&sealed, FolderId::random(), &key).is_err());
+    }
+
+    #[test]
+    fn a_folder_key_chain_opens_older_keys_only_in_order() {
+        let folder = FolderId::random();
+        let old = FolderKey::generate();
+        let new = FolderKey::generate();
+        let link = new.seal_previous(&old, folder, 1);
+        let opened = new.open_previous(&link, folder, 1).unwrap();
+        assert_eq!(opened.as_bytes(), old.as_bytes());
+        assert!(old.open_previous(&link, folder, 1).is_err());
+        assert!(new.open_previous(&link, folder, 2).is_err());
+        assert!(new.open_previous(&link, FolderId::random(), 1).is_err());
     }
 
     #[test]

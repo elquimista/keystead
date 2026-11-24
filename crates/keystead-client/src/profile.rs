@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use keystead_core::api::{KeyLink, Role, Roles};
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::ids::{DeviceId, FolderId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, FolderInfo, Sealed};
@@ -17,7 +18,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct FolderRecord {
     pub info: Sealed,
+    /// The folder's current key, wrapped for this account.
     pub wrapped_key: WrappedKey,
+    /// Which key that is: 0 at first, one more each time someone loses access.
+    #[serde(default)]
+    pub generation: u32,
+    /// Each older key, sealed with the one after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<KeyLink>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,6 +41,10 @@ pub struct Profile {
     pub folders: BTreeMap<FolderId, FolderRecord>,
     pub items: BTreeMap<ItemId, EncryptedItem>,
     pub directory: Vec<DirectoryEntry>,
+    /// This account's roles, from the last sync. Absent from servers before roles, where
+    /// everyone could do everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Roles>,
 }
 
 impl Profile {
@@ -53,6 +65,7 @@ impl Profile {
             folders: BTreeMap::new(),
             items: BTreeMap::new(),
             directory: Vec::new(),
+            roles: None,
         }
     }
 
@@ -69,12 +82,68 @@ impl Profile {
         write_private(path, &serde_json::to_vec_pretty(self)?)
     }
 
+    /// The folder's current key.
     pub fn folder_key(&self, keys: &AccountKeys, folder_id: FolderId) -> Result<FolderKey> {
         let record = self
             .folders
             .get(&folder_id)
             .context("you don't have access to that folder")?;
         Ok(keys.unwrap_folder_key(&record.wrapped_key, folder_id)?)
+    }
+
+    /// Every key the folder has had, newest first, opened through its chain. Items keep
+    /// whichever key they were saved with.
+    pub fn folder_keys(&self, keys: &AccountKeys, folder_id: FolderId) -> Result<Vec<FolderKey>> {
+        let record = self
+            .folders
+            .get(&folder_id)
+            .context("you don't have access to that folder")?;
+        let mut all = vec![keys.unwrap_folder_key(&record.wrapped_key, folder_id)?];
+        let mut generation = record.generation;
+        while generation > 0 {
+            let link = record
+                .chain
+                .iter()
+                .find(|link| link.generation == generation)
+                .context("the folder's key chain is missing a link")?;
+            let newer = all.last().expect("starts with the current key");
+            all.push(newer.open_previous(&link.previous, folder_id, generation)?);
+            generation -= 1;
+        }
+        Ok(all)
+    }
+
+    /// This account's role in a folder it's in.
+    pub fn folder_role(&self, folder_id: FolderId) -> Role {
+        self.roles
+            .as_ref()
+            .and_then(|roles| {
+                roles
+                    .folders
+                    .iter()
+                    .find(|role| role.folder_id == folder_id)
+            })
+            .map_or_else(Role::before_roles, |role| role.role)
+    }
+
+    /// What this account may do with an item: the higher of its folder role and its direct
+    /// role; an item's owner always manages it.
+    pub fn item_role(&self, item: &EncryptedItem) -> Role {
+        if self.roles.is_none() || item.owner == Some(self.user_id) {
+            return Role::Manage;
+        }
+        let in_folder = item
+            .folder_id
+            .filter(|folder_id| self.folders.contains_key(folder_id))
+            .map(|folder_id| self.folder_role(folder_id));
+        let direct = self.roles.as_ref().and_then(|roles| {
+            roles
+                .items
+                .iter()
+                .find(|role| role.item_id == item.id)
+                .map(|role| role.role)
+        });
+        in_folder.max(direct).unwrap_or(Role::View)
     }
 
     pub fn folder_name(&self, keys: &AccountKeys, folder_id: FolderId) -> Result<String> {
@@ -98,6 +167,13 @@ impl Profile {
             [] => bail!("no folder named {name:?}"),
             _ => bail!("several folders are named {name:?}"),
         }
+    }
+
+    /// Whether the owner removed this user from the team.
+    pub fn is_removed(&self, user: UserId) -> bool {
+        self.directory
+            .iter()
+            .any(|entry| entry.user_id == user && entry.removed)
     }
 
     /// A user's keys, if the pinned owner approved their directory entry.

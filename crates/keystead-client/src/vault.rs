@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{
     AcceptInviteRequest, AddMemberRequest, ApprovalRequest, Conflict, CreateFolderRequest,
-    DeviceList, Directory, Enrolled, Health, Invite, InviteRequest, PutItemRequest, RecoverRequest,
-    RecoveryChallenge, RecoveryChallengeRequest, SetupRequest, SyncEntry, SyncPage,
+    DeviceList, Directory, Enrolled, Health, Invite, InviteRequest, KeyLink, Member, MemberKey,
+    Members, PutItemRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest,
+    RekeyRequest, Role, RoleRequest, SetupRequest, SyncEntry, SyncPage,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::ids::{DeviceId, FolderId, ItemId, UserId};
@@ -103,7 +104,19 @@ pub struct UserRow {
     pub name: String,
     pub approved: bool,
     pub is_owner: bool,
+    /// The owner removed them from the team.
+    pub removed: bool,
     pub fingerprint: String,
+}
+
+/// Someone who can open a folder or a login, with their role.
+#[derive(Debug)]
+pub struct MemberRow {
+    pub user_id: UserId,
+    pub name: String,
+    pub role: Role,
+    /// This account.
+    pub me: bool,
 }
 
 /// One of this account's devices.
@@ -132,6 +145,8 @@ pub struct ItemRow {
     pub shared_with: Vec<String>,
     /// You can open it only because it was shared with you directly.
     pub shared_with_me: bool,
+    /// What you may do with it.
+    pub role: Role,
 }
 
 #[derive(Debug)]
@@ -151,6 +166,10 @@ pub struct SyncSummary {
     pub received: usize,
     /// Items dropped because their author isn't approved or the signature failed.
     pub rejected: usize,
+    /// Folders this account manages that got a new key after someone lost access.
+    pub rekeyed: usize,
+    /// Why a folder that needs a new key didn't get one this time; the next sync retries.
+    pub rekey_problems: Vec<String>,
 }
 
 /// What enrolling a new device needs, whatever the platform.
@@ -171,6 +190,7 @@ pub fn setup(path: &Path, account: NewAccount<'_>, setup_code: &str, name: &str)
         name: name.to_owned(),
         keys: keys.public(),
         approval: None,
+        removed: false,
     };
     entry.approve(&keys);
     let enrolled: Enrolled = Client::new(account.server).post(
@@ -446,7 +466,7 @@ impl Vault {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
         self.profile.directory = directory.entries;
         let mut summary = SyncSummary::default();
-        loop {
+        let rekey_needed = loop {
             let query = [
                 ("cursor", self.profile.cursor.to_string()),
                 ("limit", PAGE_SIZE.to_string()),
@@ -458,10 +478,21 @@ impl Vault {
             }
             self.profile.cursor = page.cursor;
             if !page.more {
-                break;
+                if page.roles.is_some() {
+                    self.profile.roles = page.roles;
+                }
+                break page.rekey_needed;
+            }
+        };
+        self.save()?;
+        // Someone lost access to these folders: give each a new key, so what's saved from
+        // now on is out of their reach. If it fails, the next sync asks again.
+        for folder_id in rekey_needed {
+            match self.rekey(folder_id) {
+                Ok(()) => summary.rekeyed += 1,
+                Err(error) => summary.rekey_problems.push(format!("{error:#}")),
             }
         }
-        self.save()?;
         Ok(summary)
     }
 
@@ -479,6 +510,7 @@ impl Vault {
                 name: entry.name.clone(),
                 approved: entry.verify(&self.profile.owner).is_ok(),
                 is_owner: entry.user_id == OWNER,
+                removed: entry.removed,
                 fingerprint: entry.keys.fingerprint(),
             })
             .collect())
@@ -581,6 +613,8 @@ impl Vault {
             }
             .seal(folder_id, &key)?,
             wrapped_key: self.keys.public().wrap_folder_key(&key, folder_id)?,
+            generation: 0,
+            chain: Vec::new(),
         };
         let request = CreateFolderRequest {
             folder_id,
@@ -593,22 +627,165 @@ impl Vault {
         Ok(folder_id)
     }
 
-    /// Shares a folder with an approved user by wrapping its key for them.
-    pub fn share_folder(&mut self, folder: &str, user: UserId) -> Result<String> {
+    /// Shares a folder with an approved user by wrapping its current key for them.
+    pub fn share_folder(&mut self, folder: &str, user: UserId, role: Role) -> Result<String> {
         self.sync()?;
         let folder_id = self.profile.find_folder(&self.keys, folder)?;
-        let recipient = self
-            .profile
-            .trusted_keys(user)
-            .with_context(|| format!("user {user} isn't approved by the owner yet"))?;
+        let recipient = self.shareable_keys(user)?;
         let key = self.profile.folder_key(&self.keys, folder_id)?;
         let request = AddMemberRequest {
             user_id: user,
             wrapped_key: recipient.wrap_folder_key(&key, folder_id)?,
+            role,
+            generation: self.profile.folders[&folder_id].generation,
         };
         let path = format!("/v1/folders/{folder_id}/members");
         let () = self.call(|client| client.post(&path, &request))??;
         Ok(self.profile.user_name(user))
+    }
+
+    /// Everyone in a folder, with their roles.
+    pub fn folder_members(&mut self, folder: &str) -> Result<Vec<MemberRow>> {
+        let folder_id = self.profile.find_folder(&self.keys, folder)?;
+        let path = format!("/v1/folders/{folder_id}/members");
+        let members: Members = self.call(|client| client.get(&path, &[]))??;
+        Ok(self.member_rows(members))
+    }
+
+    /// Changes someone's role in a folder (managers only).
+    pub fn set_folder_role(&mut self, folder: &str, user: UserId, role: Role) -> Result<()> {
+        let folder_id = self.profile.find_folder(&self.keys, folder)?;
+        let path = format!("/v1/folders/{folder_id}/members/{user}");
+        let () = self.call(|client| client.put(&path, &RoleRequest { role }))??;
+        Ok(())
+    }
+
+    /// Takes someone out of a folder (managers), or this account (anyone). Their access
+    /// ends at once; then the folder gets a new key, so they can't read what's saved
+    /// from now on.
+    pub fn remove_from_folder(&mut self, folder: &str, user: UserId) -> Result<()> {
+        let folder_id = self.profile.find_folder(&self.keys, folder)?;
+        let path = format!("/v1/folders/{folder_id}/members/{user}");
+        let () = self.call(|client| client.delete(&path))??;
+        if user == self.profile.user_id {
+            self.forget_folder(folder_id);
+            self.save()?;
+        } else {
+            // If this fails, the next sync of any manager tries again.
+            self.rekey(folder_id)?;
+        }
+        Ok(())
+    }
+
+    /// Gives a folder a new key, wrapped for each current member, with the old key sealed
+    /// under it so older items still open.
+    fn rekey(&mut self, folder_id: FolderId) -> Result<()> {
+        let record = self
+            .profile
+            .folders
+            .get(&folder_id)
+            .context("you don't have access to that folder")?;
+        let generation = record.generation + 1;
+        let old = self.profile.folder_key(&self.keys, folder_id)?;
+        let info = FolderInfo::open(&record.info, folder_id, &old)?;
+        let path = format!("/v1/folders/{folder_id}/members");
+        let members: Members = self.call(|client| client.get(&path, &[]))??;
+        let key = FolderKey::generate();
+        let mut wrapped_keys = Vec::new();
+        for member in &members.members {
+            let recipient = self.profile.trusted_keys(member.user_id).with_context(|| {
+                format!(
+                    "{} isn't approved by the owner",
+                    self.profile.user_name(member.user_id)
+                )
+            })?;
+            wrapped_keys.push(MemberKey {
+                user_id: member.user_id,
+                wrapped_key: recipient.wrap_folder_key(&key, folder_id)?,
+            });
+        }
+        let request = RekeyRequest {
+            generation,
+            wrapped_keys,
+            previous: key.seal_previous(&old, folder_id, generation),
+            info: info.seal(folder_id, &key)?,
+        };
+        let path = format!("/v1/folders/{folder_id}/rekey");
+        let () = self.call(|client| client.post(&path, &request))??;
+        let wrapped_key = self.keys.public().wrap_folder_key(&key, folder_id)?;
+        let record = self
+            .profile
+            .folders
+            .get_mut(&folder_id)
+            .expect("checked above");
+        record.chain.push(KeyLink {
+            generation,
+            previous: request.previous,
+        });
+        record.generation = generation;
+        record.info = request.info;
+        record.wrapped_key = wrapped_key;
+        self.save()
+    }
+
+    /// Removes someone from the team (owner only): their devices stop working, and they
+    /// lose every folder and login. Folders they were in get new keys from their managers.
+    pub fn remove_user(&mut self, user: UserId) -> Result<String> {
+        let name = self.profile.user_name(user);
+        let path = format!("/v1/users/{user}");
+        let () = self.call(|client| client.delete(&path))??;
+        self.sync()?;
+        Ok(name)
+    }
+
+    fn member_rows(&self, members: Members) -> Vec<MemberRow> {
+        members
+            .members
+            .into_iter()
+            .map(|member| MemberRow {
+                user_id: member.user_id,
+                name: self.profile.user_name(member.user_id),
+                role: member.role,
+                me: member.user_id == self.profile.user_id,
+            })
+            .collect()
+    }
+
+    /// An approved, current member's keys, for sharing with them.
+    fn shareable_keys(&self, user: UserId) -> Result<AccountPublicKeys> {
+        let name = self.profile.user_name(user);
+        if user == self.profile.user_id {
+            bail!("that's you");
+        }
+        if self.profile.is_removed(user) {
+            bail!("{name} was removed from the team");
+        }
+        self.profile
+            .trusted_keys(user)
+            .with_context(|| format!("{name} isn't approved by the owner yet"))
+    }
+
+    fn forget_folder(&mut self, folder_id: FolderId) {
+        // Keep the folder's items that were also shared with us directly.
+        let me = self.profile.user_id;
+        self.profile.folders.remove(&folder_id);
+        self.profile
+            .items
+            .retain(|_, item| item.folder_id != Some(folder_id) || item.reaches_directly(me));
+    }
+
+    /// Each folder's name and this account's role in it, from the local copy.
+    pub fn folder_roles(&self) -> Result<Vec<(String, Role)>> {
+        self.profile
+            .folders
+            .keys()
+            .map(|&folder_id| {
+                Ok((
+                    self.profile.folder_name(&self.keys, folder_id)?,
+                    self.profile.folder_role(folder_id),
+                ))
+            })
+            .collect()
     }
 
     /// Folder names, from the local copy.
@@ -633,15 +810,17 @@ impl Vault {
                 Some(folder_id) if self.profile.folders.contains_key(&folder_id) => {
                     // Each folder key is unwrapped once per listing, not once per item.
                     if let Entry::Vacant(slot) = folders.entry(folder_id) {
-                        let key = self.profile.folder_key(&self.keys, folder_id)?;
+                        let keys = self.profile.folder_keys(&self.keys, folder_id)?;
                         let name = self.profile.folder_name(&self.keys, folder_id)?;
-                        slot.insert((key, name));
+                        slot.insert((keys, name));
                     }
                     folders.get(&folder_id)
                 }
                 _ => None,
             };
-            let key = item.unlock(folder.map(|(key, _)| key), &self.keys, me)?;
+            let no_keys = Vec::new();
+            let folder_keys = folder.map_or(&no_keys, |(keys, _)| keys);
+            let key = unlock_with(item, folder_keys, &self.keys, me)?;
             let overview = item.open_overview(&key)?;
             rows.push(ItemRow {
                 id: item.id,
@@ -661,6 +840,7 @@ impl Vault {
                     .map(|person| self.profile.user_name(person.user_id))
                     .collect(),
                 shared_with_me: folder.is_none() && item.owner != Some(me),
+                role: self.profile.item_role(item),
             });
         }
         rows.sort_by(|a, b| (&a.folder, &a.name).cmp(&(&b.folder, &b.name)));
@@ -736,6 +916,7 @@ impl Vault {
         let request = PutItemRequest {
             base_version: None,
             item: EncryptedItem::seal(at, &key, keys, &self.keys, &overview, &details)?,
+            roles: Vec::new(),
         };
         let path = format!("/v1/items/{id}");
         let saved: EncryptedItem = self.call(|client| client.put(&path, &request))??;
@@ -759,7 +940,7 @@ impl Vault {
         self.check_server_takes_items()?;
         self.sync()?;
         let current = self.live_item(item_id)?.clone();
-        let outcome = self.save_version(&current, overview, details, None)?;
+        let outcome = self.save_version(&current, overview, details, People::Same)?;
         self.save()?;
         Ok(outcome)
     }
@@ -773,7 +954,7 @@ impl Vault {
         let current = self.live_item(item_id)?.clone();
         let (_, keys) = self.next_keys(&current)?;
         let tombstone = EncryptedItem::tombstone(self.next_version(&current), keys, &self.keys);
-        let outcome = self.put_version(&current, tombstone)?;
+        let outcome = self.put_version(&current, tombstone, Vec::new())?;
         self.save()?;
         Ok(outcome)
     }
@@ -787,24 +968,18 @@ impl Vault {
         let overview = current.open_overview(&key)?;
         let mut details = current.open_details(&key)?;
         details.password = password.to_owned();
-        let outcome = self.save_version(&current, &overview, &details, None)?;
+        let outcome = self.save_version(&current, &overview, &details, People::Same)?;
         self.save()?;
         Ok(outcome)
     }
 
     /// Shares one login with an approved user by giving them a copy of its key, in a new
     /// version. They see that login only, not the rest of its folder.
-    pub fn share_item(&mut self, item_id: ItemId, user: UserId) -> Result<String> {
+    pub fn share_item(&mut self, item_id: ItemId, user: UserId, role: Role) -> Result<String> {
         self.check_server_takes_items()?;
         self.sync()?;
         let name = self.profile.user_name(user);
-        if user == self.profile.user_id {
-            bail!("that's you");
-        }
-        let recipient = self
-            .profile
-            .trusted_keys(user)
-            .with_context(|| format!("{name} isn't approved by the owner yet"))?;
+        let recipient = self.shareable_keys(user)?;
         // Sharing doesn't depend on what the login says, so if someone saved first, share
         // their version instead.
         for _ in 0..3 {
@@ -815,9 +990,10 @@ impl Vault {
             let key = self.item_key(&current)?;
             let overview = current.open_overview(&key)?;
             let details = current.open_details(&key)?;
-            let outcome =
-                self.save_version(&current, &overview, &details, Some((user, &recipient)))?;
-            if let EditOutcome::Saved { .. } = outcome {
+            let change = People::Add(user, &recipient, role);
+            if let EditOutcome::Saved { .. } =
+                self.save_version(&current, &overview, &details, change)?
+            {
                 self.save()?;
                 return Ok(name);
             }
@@ -826,22 +1002,108 @@ impl Vault {
         bail!("others kept changing this login; try sharing it again")
     }
 
-    /// Saves the next version of `current` with these contents, sharing it with `add` too
-    /// if given. A format 1 item becomes format 2 here, with a key of its own. If someone
-    /// else saved first, the local copy takes their version instead.
+    /// Takes away someone's copy of a login (managers only), in a new version with a new
+    /// key where possible, and their devices drop it.
+    pub fn unshare_item(&mut self, item_id: ItemId, user: UserId) -> Result<String> {
+        self.check_server_takes_items()?;
+        self.sync()?;
+        let name = self.profile.user_name(user);
+        for _ in 0..3 {
+            let current = self.live_item(item_id)?.clone();
+            if !current
+                .keys
+                .people
+                .iter()
+                .any(|person| person.user_id == user)
+            {
+                bail!("this login isn't shared with {name} directly");
+            }
+            let key = self.item_key(&current)?;
+            let overview = current.open_overview(&key)?;
+            let details = current.open_details(&key)?;
+            if let EditOutcome::Saved { .. } =
+                self.save_version(&current, &overview, &details, People::Drop(user))?
+            {
+                self.save()?;
+                return Ok(name);
+            }
+        }
+        self.save()?;
+        bail!("others kept changing this login; try again")
+    }
+
+    /// Who has a login directly: its owner and everyone it's shared with, with roles.
+    pub fn item_people(&mut self, item_id: ItemId) -> Result<Vec<MemberRow>> {
+        let path = format!("/v1/items/{item_id}/people");
+        let members: Members = self.call(|client| client.get(&path, &[]))??;
+        Ok(self.member_rows(members))
+    }
+
+    /// Changes the role of someone a login is shared with directly (managers only).
+    pub fn set_item_role(&mut self, item_id: ItemId, user: UserId, role: Role) -> Result<()> {
+        let path = format!("/v1/items/{item_id}/people/{user}");
+        let () = self.call(|client| client.put(&path, &RoleRequest { role }))??;
+        Ok(())
+    }
+
+    /// Saves the next version of `current` with these contents, adding or dropping one
+    /// person's key copy if asked. A format 1 item becomes format 2 here. If someone else
+    /// saved first, the local copy takes their version instead.
+    ///
+    /// Each version gets a new item key when this account can seal every copy, so anyone
+    /// who has lost access can't read what's saved from now on. Only an item's owner can
+    /// seal the owner's copy, so others saving an item outside folders keep its key.
     fn save_version(
         &mut self,
         current: &EncryptedItem,
         overview: &Overview,
         details: &Details,
-        add: Option<(UserId, &AccountPublicKeys)>,
+        change: People<'_>,
     ) -> Result<EditOutcome> {
-        let (key, mut keys) = self.next_keys(current)?;
-        if let Some((user_id, recipient)) = add {
-            keys.people.push(PersonKey {
-                user_id,
-                wrapped_key: recipient.wrap_item_key(&key, current.id)?,
-            });
+        let me = self.profile.user_id;
+        let fresh = current.owner.is_none() || current.owner == Some(me);
+        let (key, mut keys) = if fresh {
+            let key = ItemKey::generate();
+            let mut keys = ItemKeys::default();
+            if let Some(folder_id) = current.folder_id {
+                let folder_key = self.profile.folder_key(&self.keys, folder_id)?;
+                keys.folder = Some(key.seal_for_folder(current.id, folder_id, &folder_key));
+            }
+            if let Some(owner) = current.owner {
+                keys.owner = Some(key.seal_for_owner(current.id, owner, &self.keys));
+            }
+            for person in &current.keys.people {
+                // People the owner removed from the team are dropped as the item is saved.
+                if self.profile.is_removed(person.user_id) {
+                    continue;
+                }
+                let recipient = self
+                    .profile
+                    .trusted_keys(person.user_id)
+                    .context("someone this login is shared with isn't approved")?;
+                keys.people.push(PersonKey {
+                    user_id: person.user_id,
+                    wrapped_key: recipient.wrap_item_key(&key, current.id)?,
+                });
+            }
+            (key, keys)
+        } else {
+            let mut keys = current.keys.clone();
+            keys.people
+                .retain(|person| !self.profile.is_removed(person.user_id));
+            (self.item_key(current)?, keys)
+        };
+        let mut roles = Vec::new();
+        match change {
+            People::Same => {}
+            People::Add(user_id, recipient, role) => {
+                keys.people.push(PersonKey {
+                    user_id,
+                    wrapped_key: recipient.wrap_item_key(&key, current.id)?,
+                });
+                roles.push(Member { user_id, role });
+            }
+            People::Drop(user_id) => keys.people.retain(|person| person.user_id != user_id),
         }
         let item = EncryptedItem::seal(
             self.next_version(current),
@@ -851,11 +1113,11 @@ impl Vault {
             overview,
             details,
         )?;
-        self.put_version(current, item)
+        self.put_version(current, item, roles)
     }
 
-    /// The key and key copies for the next version of `current`: the same ones, or for a
-    /// format 1 item, a new key of its own sealed for its folder.
+    /// The key and key copies for a deletion marker after `current`: the same ones, or for
+    /// a format 1 item, a new key of its own sealed for its folder.
     fn next_keys(&self, current: &EncryptedItem) -> Result<(ItemKey, ItemKeys)> {
         if current.format < ITEM_FORMAT {
             let folder_id = current
@@ -885,10 +1147,16 @@ impl Vault {
 
     /// Saves `item` as the version after `current`. If someone else saved first, the local
     /// copy takes their version instead.
-    fn put_version(&mut self, current: &EncryptedItem, item: EncryptedItem) -> Result<EditOutcome> {
+    fn put_version(
+        &mut self,
+        current: &EncryptedItem,
+        item: EncryptedItem,
+        roles: Vec<Member>,
+    ) -> Result<EditOutcome> {
         let request = PutItemRequest {
             base_version: Some(current.version),
             item,
+            roles,
         };
         let path = format!("/v1/items/{}", current.id);
         Ok(
@@ -927,12 +1195,13 @@ impl Vault {
 
     /// The key that opens an item, through its folder if it's in one of ours, or directly.
     fn item_key(&self, item: &EncryptedItem) -> Result<ItemKey> {
-        let folder_key = item
-            .folder_id
-            .filter(|folder_id| self.profile.folders.contains_key(folder_id))
-            .map(|folder_id| self.profile.folder_key(&self.keys, folder_id))
-            .transpose()?;
-        Ok(item.unlock(folder_key.as_ref(), &self.keys, self.profile.user_id)?)
+        let folder_keys = match item.folder_id {
+            Some(folder_id) if self.profile.folders.contains_key(&folder_id) => {
+                self.profile.folder_keys(&self.keys, folder_id)?
+            }
+            _ => Vec::new(),
+        };
+        unlock_with(item, &folder_keys, &self.keys, self.profile.user_id)
     }
 
     /// Servers older than 0.2.0 store only format 1 items; saving to one would fail with
@@ -956,6 +1225,8 @@ impl Vault {
                 folder_id,
                 info,
                 wrapped_key,
+                generation,
+                chain,
                 items,
                 ..
             } => {
@@ -967,20 +1238,51 @@ impl Vault {
                     summary.rejected += items.len();
                     return;
                 }
-                self.profile
-                    .folders
-                    .insert(folder_id, FolderRecord { info, wrapped_key });
+                let record = FolderRecord {
+                    info,
+                    wrapped_key,
+                    generation,
+                    chain,
+                };
+                self.profile.folders.insert(folder_id, record);
                 for item in items {
                     self.apply_item(item, summary);
                 }
             }
-            SyncEntry::Left { folder_id, .. } => {
-                // Keep the folder's items that were also shared with us directly.
-                let me = self.profile.user_id;
-                self.profile.folders.remove(&folder_id);
-                self.profile.items.retain(|_, item| {
-                    item.folder_id != Some(folder_id) || item.reaches_directly(me)
+            SyncEntry::Rekeyed {
+                folder_id,
+                info,
+                wrapped_key,
+                generation,
+                chain,
+                ..
+            } => {
+                // Only a key that opens, from a folder already here; a newer one wins.
+                let newer = self
+                    .profile
+                    .folders
+                    .get(&folder_id)
+                    .is_some_and(|record| record.generation <= generation);
+                if newer && self.keys.unwrap_folder_key(&wrapped_key, folder_id).is_ok() {
+                    let record = FolderRecord {
+                        info,
+                        wrapped_key,
+                        generation,
+                        chain,
+                    };
+                    self.profile.folders.insert(folder_id, record);
+                }
+            }
+            SyncEntry::Left { folder_id, .. } => self.forget_folder(folder_id),
+            SyncEntry::LeftItem { item_id, .. } => {
+                // Keep it if one of our folders still has it.
+                let in_folder = self.profile.items.get(&item_id).is_some_and(|item| {
+                    item.folder_id
+                        .is_some_and(|folder_id| self.profile.folders.contains_key(&folder_id))
                 });
+                if !in_folder {
+                    self.profile.items.remove(&item_id);
+                }
             }
         }
     }
@@ -1038,6 +1340,28 @@ impl Vault {
     fn save(&self) -> Result<()> {
         self.profile.save(&self.path)
     }
+}
+
+/// How a save changes who has a login directly.
+enum People<'a> {
+    Same,
+    Add(UserId, &'a AccountPublicKeys, Role),
+    Drop(UserId),
+}
+
+/// Opens an item with whichever of its folder's keys it was saved with, or directly.
+fn unlock_with(
+    item: &EncryptedItem,
+    folder_keys: &[FolderKey],
+    keys: &AccountKeys,
+    me: UserId,
+) -> Result<ItemKey> {
+    for folder_key in folder_keys {
+        if let Ok(key) = item.unlock(Some(folder_key), keys, me) {
+            return Ok(key);
+        }
+    }
+    Ok(item.unlock(None, keys, me)?)
 }
 
 /// Puts a fingerprint typed in by hand into the canonical form, whatever spacing, dashes or

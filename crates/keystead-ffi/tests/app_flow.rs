@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use keystead_ffi::{
-    CoreError, DeviceSigner, SaveOutcome, Vault, account_secret_from_recovery_words, new_device_id,
-    parse_invite, recovery_words,
+    CoreError, DeviceSigner, Role, SaveOutcome, Vault, account_secret_from_recovery_words,
+    new_device_id, parse_invite, recovery_words,
 };
 use keystead_server::AppState;
 use p256::ecdsa::signature::Signer as _;
@@ -170,7 +170,7 @@ fn an_owner_sets_up_invites_approves_and_shares() {
         .unwrap();
     assert_eq!(
         owner
-            .share_folder("Production".into(), them.user_id)
+            .share_folder("Production".into(), them.user_id, Role::Edit)
             .unwrap(),
         "Mo"
     );
@@ -214,7 +214,9 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     member.sync().unwrap();
     assert_eq!(member.items().unwrap().len(), 1);
     assert_eq!(
-        owner.share_login(bank.id.clone(), them.user_id).unwrap(),
+        owner
+            .share_login(bank.id.clone(), them.user_id, Role::Edit)
+            .unwrap(),
         "Mo"
     );
     member.sync().unwrap();

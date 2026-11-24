@@ -19,6 +19,11 @@ pub struct DirectoryEntry {
     pub keys: AccountPublicKeys,
     /// The owner's signature over the user id, name and keys. `None` until approved.
     pub approval: Option<Bytes>,
+    /// The owner removed this person from the team. Their entry stays, so what they
+    /// signed still verifies, but nobody shares with them any more. Not signed: it only
+    /// ever takes access away.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
 }
 
 impl DirectoryEntry {
@@ -58,6 +63,7 @@ mod tests {
             name: name.into(),
             keys: keys.public(),
             approval: None,
+            removed: false,
         };
         (entry, keys)
     }

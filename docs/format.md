@@ -33,8 +33,8 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
 | Account encryption key | X25519, derived from the secret | Derived in memory at unlock |
 | Account signing key | Ed25519, derived from the secret | Derived in memory at unlock |
 | Account personal key | 32 bytes, derived from the secret | Derived in memory at unlock |
-| Folder key | 32 random bytes per folder | Wrapped for each member's account encryption key |
-| Item key | 32 random bytes per item | With the item: sealed with its folder key or its owner's personal key, and wrapped for each person it's shared with |
+| Folder key | 32 random bytes per folder, replaced after someone loses access | Wrapped for each member's account encryption key; each older key sealed with the next |
+| Item key | 32 random bytes per item version | With the item: sealed with its folder key or its owner's personal key, and wrapped for each person it's shared with |
 | Device key | Signs the device in to the server | Secure Enclave, TPM, or (CLI) a local file |
 | Recovery kit | The account secret as 24 words | On paper, with the user |
 
@@ -225,7 +225,7 @@ transcript("keystead/directory-entry/v1", user id, name, encryption key, signing
 
 The owner approves their own entry at setup. A client joining the org pins the owner's
 keys (by fingerprint, from the invite) and shares only with entries whose signature
-verifies against them.
+verifies against them, and that aren't marked `"removed": true` (see Removing access).
 
 ## API
 
@@ -248,9 +248,16 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/sign-out` | | 204 | The device itself, which is then forgotten |
 | `POST /v1/users/{id}/approval` | `ApprovalRequest` | 204 | Owner |
 | `GET /v1/directory` | | `Directory` | Members |
-| `POST /v1/folders` | `CreateFolderRequest` | 201 | Members |
-| `POST /v1/folders/{id}/members` | `AddMemberRequest` | 204 | Folder members |
-| `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Anyone who can open the item; for a new one, folder members or its owner |
+| `DELETE /v1/users/{id}` | | 204 | Owner, for anyone but themselves |
+| `POST /v1/folders` | `CreateFolderRequest` | 201 | Members; they manage it |
+| `POST /v1/folders/{id}/members` | `AddMemberRequest` | 204 | Folder managers |
+| `GET /v1/folders/{id}/members` | | `Members` | Folder members |
+| `PUT /v1/folders/{id}/members/{user}` | `RoleRequest` | 204 | Folder managers |
+| `DELETE /v1/folders/{id}/members/{user}` | | 204 | Folder managers, or the member themselves |
+| `POST /v1/folders/{id}/rekey` | `RekeyRequest` | 204 | Folder managers |
+| `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Editors and managers of the item (see Roles) |
+| `GET /v1/items/{id}/people` | | `Members` | Anyone who can open the item |
+| `PUT /v1/items/{id}/people/{user}` | `RoleRequest` | 204 | Managers of the item |
 | `GET /v1/sync?cursor=N&limit=M` | | `SyncPage` | Members |
 
 `Health` is `{"status", "version", "item_format"}`. `item_format` is the newest item
@@ -259,27 +266,92 @@ so clients check it before saving.
 
 When saving an item, the server checks that the path and body ids match, the session's
 user is the author and the version is `base_version + 1` (or 1 for a new item). The
-author must be able to open the current version: in its folder, its owner, or in its
-`people`. A new item must be in a folder the author is in, or be the author's own. The
-item can't change folder, owner or go back a format, everyone newly in `people` must be
-approved, and for now nobody can be dropped from `people`. If another version was saved
-first, it answers 409 with that version.
+author must be an editor or manager of the current version (see Roles); a new item must
+be in a folder where the author edits or manages, or be the author's own. Adding anyone
+to `people`, or dropping anyone, takes a manager, except that anyone who can save may
+drop people the owner removed from the team. The item can't change folder, owner or go
+back a format, and everyone newly in `people` must be approved and not removed.
+`PutItemRequest.roles` gives the roles of people new to `people`. If another version was
+saved first, it answers 409 with that version.
+
+### Roles
+
+Everyone who can open a folder or an item has a role there:
+
+| Role | Can |
+| --- | --- |
+| `view` | Open and copy |
+| `edit` | Also save new versions: change and delete items |
+| `manage` | Also share, change roles, remove people, and give a folder a new key |
+
+A folder's creator manages it, and so does an item's owner. Someone with access both
+through a folder and directly gets the higher role. A folder always keeps at least one
+manager. Members and shares from before roles existed are managers, since everyone could
+do everything then. Roles are kept and enforced by the server; reading depends only on the
+keys someone holds.
+
+### Removing access, and new keys
+
+A manager removes someone from a folder (`DELETE …/members/{user}`), or a member leaves.
+Their access ends at once, their feed gets a `left` entry, and the folder is marked as
+needing a new key. A manager's client then **rekeys** it: it makes a new folder key,
+wraps it for exactly the remaining members, seals the folder info with it, and seals the
+previous key with it:
+
+```
+link = XChaCha20-Poly1305 under the new key, of the previous key, with associated data
+       transcript("keystead/folder-key-chain/v1", folder id, new generation)
+```
+
+Generations count up from 0. A member holding the newest key opens every older one
+through the chain, so items saved under any of them still open; someone removed never
+gets a newer key. Adding a member names the generation it wrapped, which must still be
+the current one. Each sync tells managers which of their folders need a new key
+(`SyncPage.rekey_needed`), so it happens even if the manager who removed someone wasn't
+the one to do it.
+
+Clients give an item a **new item key every time they save it**, with fresh copies for
+its folder (under the folder's current key), its owner and its people, so what's saved
+after someone lost access is out of their reach. The exception is an item outside
+folders saved by someone other than its owner: only the owner can seal the owner's copy,
+so the key stays until the owner saves it.
+
+Taking someone's copy of an item away is a new version without it; their feed gets a
+`left_item` entry, and their devices drop the item unless one of their folders still has
+it.
+
+**Removing someone from the team** (`DELETE /v1/users/{id}`, owner only) ends their
+sessions and removes their devices, takes them out of every folder (marking each for a
+new key) and every item shared with them. Their directory entry stays, with `"removed":
+true`, so what they signed still verifies; nobody can share with them again, and their
+account can't be recovered. A folder left without a manager gets one: whoever has been
+in it longest. Clients drop removed people's copies from items as they save them.
+Passwords someone has already seen can't be taken back; apps list the ones to change.
 
 **Sync** returns feed entries after the cursor, in change-number order, from one
-consistent snapshot: `item` entries for the latest version of each changed item the user
-can open (in their folders, their own, or shared with them directly), `joined` entries
-carrying the folder key wrapped for the user plus the folder's info and items, and `left`
-entries telling the device to drop a folder (keeping its items that were also shared with
-the user directly). An item shared directly arrives as an `item` entry: sharing saved a
-new version, with a new change number. The prototype in `prototypes/change-feed` shows
-why each item arrives exactly once.
+consistent snapshot:
+
+- `item`: the latest version of each changed item the user can open (in their folders,
+  their own, or shared with them directly). An item shared directly arrives this way:
+  sharing saved a new version, with a new change number.
+- `joined`: the folder key wrapped for the user, with its `generation` and `chain`, plus
+  the folder's info and items.
+- `left`: drop a folder, keeping its items that were also shared with the user directly.
+- `rekeyed`: a folder the user is in has a new key: the new one wrapped for them, its
+  generation, the whole chain and the info sealed with it.
+- `left_item`: the user lost direct access to an item.
+
+The last page also carries the user's `roles` (in each folder, and on each item shared
+with them directly), and every page `rekey_needed`. The prototype in
+`prototypes/change-feed` shows why each item arrives exactly once.
 
 ## Not in this format yet
 
 - Adding a second device by approving it from an existing one, and recovery by admins.
   (A recovery kit can already add a device.)
+- Signed membership changes. Roles and memberships are enforced by the server; a
+  server that lied could let someone save who shouldn't, though every version stays
+  signed by its author.
 - Group keys.
-- Read-only and manage roles (everyone who can open an item can edit and share it).
-- Removing someone's access to a folder or an item, with new keys afterwards.
 - Moving an item to another folder.
 - Paginating a large folder that arrives with a join.

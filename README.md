@@ -94,6 +94,20 @@ keystead edit "AWS root"             # new password; or --rename, --username, --
 keystead rm Bank                     # delete for everyone who can open it (asks first)
 ```
 
+Everyone who can open a folder or a login has a role: `view`, `edit` or `manage`.
+Managers share (`--role`, edit by default), change roles and remove people; removing
+someone from a folder gives it a new key, so they can't read what's saved afterwards.
+
+```sh
+keystead folder share Production 3 --role view
+keystead folder members Production   # who is in it, with roles
+keystead folder role Production 3 edit
+keystead folder remove Production 3  # takes them out and changes the folder's key
+keystead folder leave Production
+keystead unshare Bank 2              # take away someone's copy of one login
+keystead remove-user 3               # owner: remove someone from the team (asks first)
+```
+
 A login added without `--folder` is yours alone until you share it. `keystead share`
 shares one login, from a folder or not, without the rest of its folder.
 

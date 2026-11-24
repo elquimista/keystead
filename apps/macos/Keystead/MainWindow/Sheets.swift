@@ -18,6 +18,10 @@ struct SheetContent: View {
             NewFolderSheet(model: model)
         case .share(let folder, let user):
             ShareSheet(model: model, folder: folder, user: user)
+        case .manageFolder(let folder):
+            ManageFolderSheet(model: model, folder: folder)
+        case .removeUser(let user):
+            RemoveUserSheet(model: model, user: user)
         case .invite:
             InviteSheet(model: model)
         case .approve(let user):
@@ -337,11 +341,14 @@ private struct DeleteLoginSheet: View {
     }
 }
 
-/// Shares one login with an approved person.
+/// Shares one login with an approved person, and shows who already has it directly.
 private struct ShareLoginSheet: View {
     let model: AppModel
     let item: ItemSummary
     @State private var userId: Int64
+    @State private var role: Role = .edit
+    @State private var people: [Person] = []
+    @State private var problem: String?
 
     init(model: AppModel, item: ItemSummary) {
         self.model = model
@@ -352,46 +359,273 @@ private struct ShareLoginSheet: View {
     /// Approved people other than you who don't have this login directly yet.
     private static func candidates(for item: ItemSummary, in model: AppModel) -> [User] {
         model.users.filter { user in
-            user.approved && user.userId != model.identity?.userId && user.name != item.owner
-                && !item.sharedWith.contains(user.name)
+            user.approved && !user.removed && user.userId != model.identity?.userId
+                && user.name != item.owner && !item.sharedWith.contains(user.name)
         }
     }
 
     private var candidates: [User] { Self.candidates(for: item, in: model) }
     private var recipient: User? { candidates.first { $0.userId == userId } }
+    private var manages: Bool { item.role == .manage }
 
     var body: some View {
         SheetScaffold(
-            title: "Share \u{201C}\(item.name)\u{201D}", actionTitle: "Share", canAct: recipient != nil
+            title: manages ? "Share \u{201C}\(item.name)\u{201D}" : "Access to \u{201C}\(item.name)\u{201D}",
+            actionTitle: manages ? "Share" : "Done",
+            canAct: !manages || recipient != nil,
+            showsCancel: manages
         ) {
-            guard let recipient else { return false }
-            try await model.share(login: item, with: recipient)
+            guard manages, let recipient else { return true }
+            try await model.share(login: item, with: recipient, role: role)
             return true
         } content: {
-            if candidates.isEmpty {
-                Text(model.users.contains { $0.approved && $0.userId != model.identity?.userId }
-                    ? "Everyone approved can already open this login."
-                    : "There's no one approved to share with yet. "
-                        + (model.isOwner
-                            ? "Invite people from People, then approve them once they've joined."
-                            : "The owner approves people as they join."))
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Form {
-                    Picker("With", selection: $userId) {
-                        ForEach(candidates) { Text($0.name).tag($0.userId) }
+            if manages {
+                if candidates.isEmpty {
+                    Text(model.users.contains { $0.approved && !$0.removed && $0.userId != model.identity?.userId }
+                        ? "Everyone approved can already open this login."
+                        : "There's no one approved to share with yet. "
+                            + (model.isOwner
+                                ? "Invite people from People, then approve them once they've joined."
+                                : "The owner approves people as they join."))
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Form {
+                        Picker("With", selection: $userId) {
+                            ForEach(candidates) { Text($0.name).tag($0.userId) }
+                        }
+                        Picker("Access", selection: $role) {
+                            ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
+                        }
+                    }
+                    if let recipient {
+                        Text("\(recipient.name) will see this login"
+                            + (item.folder.map { ", not the rest of \u{201C}\($0)\u{201D}" } ?? "")
+                            + ".")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                if let recipient {
-                    Text("\(recipient.name) will see this login"
-                        + (item.folder.map { ", not the rest of \u{201C}\($0)\u{201D}" } ?? "")
-                        + ". They can change it and share it too.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            } else {
+                Text("Only people who manage this login can share it.")
+                    .foregroundStyle(.secondary)
+            }
+            if !people.isEmpty {
+                PeopleWithAccess(
+                    title: "Has it directly", people: people, canManage: manages, canLeave: false,
+                    isOwner: { $0.name == (item.owner ?? model.identity?.name) && $0.role == .manage && item.folder == nil },
+                    setRole: { person, role in
+                        try await model.setRole(role, for: person, on: item)
+                        await reload()
+                    },
+                    remove: { person in
+                        try await model.unshare(item, from: person)
+                        await reload()
+                    })
+            }
+            if let problem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .task { await reload() }
+    }
+
+    private func reload() async {
+        do {
+            people = try await model.people(of: item)
+            problem = nil
+        } catch {
+            problem = describe(error)
+        }
+    }
+}
+
+/// A list of people with access and their roles. Managers change roles and remove people
+/// here; everyone else just reads it.
+private struct PeopleWithAccess: View {
+    let title: String
+    let people: [Person]
+    let canManage: Bool
+    /// Whether people who don't manage can take themselves off, as members leave a folder.
+    var canLeave = true
+    /// Rows that can't be changed, like a login's owner.
+    var isOwner: (Person) -> Bool = { _ in false }
+    var setRole: (Person, Role) async throws -> Void
+    var remove: (Person) async throws -> Void
+    var removeTitle: (Person) -> String = { $0.isMe ? "Leave" : "Remove" }
+    @State private var busy: Int64?
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.headline)
+            ForEach(people) { person in
+                HStack {
+                    Text(person.isMe ? "\(person.name) (you)" : person.name)
+                    Spacer()
+                    if isOwner(person) {
+                        Text("Owner")
+                            .foregroundStyle(.secondary)
+                    } else if canManage {
+                        Picker("", selection: Binding(
+                            get: { person.role },
+                            set: { role in run(person) { try await setRole(person, role) } }
+                        )) {
+                            ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        Button(removeTitle(person)) { run(person) { try await remove(person) } }
+                    } else {
+                        Text(person.role.label)
+                            .foregroundStyle(.secondary)
+                        if person.isMe && canLeave {
+                            Button(removeTitle(person)) { run(person) { try await remove(person) } }
+                        }
+                    }
+                }
+                .disabled(busy != nil)
+            }
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func run(_ person: Person, _ action: @escaping () async throws -> Void) {
+        busy = person.userId
+        Task {
+            do {
+                try await action()
+                error = nil
+            } catch let failure {
+                error = describe(failure)
+            }
+            busy = nil
+        }
+    }
+}
+
+/// Who is in a folder, with their roles. Managers change roles and remove people; anyone
+/// can leave. Removing someone gives the folder a new key.
+private struct ManageFolderSheet: View {
+    let model: AppModel
+    let folder: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var members: [Person] = []
+    @State private var problem: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Access to \u{201C}\(folder)\u{201D}")
+                .font(.title3.weight(.semibold))
+            if !members.isEmpty {
+                PeopleWithAccess(
+                    title: "\(members.count) \(members.count == 1 ? "person" : "people")",
+                    people: members, canManage: model.manages(folder: folder),
+                    setRole: { person, role in
+                        try await model.setRole(role, for: person, in: folder)
+                        await reload()
+                    },
+                    remove: { person in
+                        try await model.remove(person, from: folder)
+                        if person.isMe { dismiss() } else { await reload() }
+                    })
+            } else if problem == nil {
+                ProgressView().frame(maxWidth: .infinity)
+            }
+            Text(model.manages(folder: folder)
+                ? "Viewers can open and copy, editors can also change logins, and managers can "
+                    + "also share and remove people. Removing someone gives the folder a new key, "
+                    + "so they can't read what's saved afterwards."
+                : "Only the folder's managers change who has access.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let problem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                if model.manages(folder: folder) {
+                    Button("Share…") { model.sheet = .share(folder: folder, user: nil) }
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
+        .task { await reload() }
+    }
+
+    private func reload() async {
+        do {
+            members = try await model.members(of: folder)
+            problem = nil
+        } catch {
+            problem = describe(error)
+        }
+    }
+}
+
+/// The owner removes someone from the team, after saying what that does.
+private struct RemoveUserSheet: View {
+    let model: AppModel
+    let user: User
+    @Environment(\.dismiss) private var dismiss
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Remove \(user.name) from the Team?")
+                .font(.title3.weight(.semibold))
+            Text("Their devices stop working right away, and they lose every folder and login. "
+                + "Folders they were in get new keys, so they can't read what's saved afterwards.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Passwords they've already seen can't be taken back. Change the important ones.")
+                .fixedSize(horizontal: false, vertical: true)
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                if busy {
+                    ProgressView().controlSize(.small)
+                }
+                // Return cancels; removing someone takes a deliberate click.
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                Button("Remove", role: .destructive) {
+                    Task {
+                        busy = true
+                        do {
+                            try await model.remove(user: user)
+                            dismiss()
+                        } catch let failure {
+                            error = describe(failure)
+                        }
+                        busy = false
+                    }
+                }
+                .disabled(busy)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
     }
 }
 
@@ -424,16 +658,22 @@ private struct ShareSheet: View {
     let model: AppModel
     @State private var folder: String
     @State private var userId: Int64
+    @State private var role: Role = .edit
 
     init(model: AppModel, folder: String?, user: User?) {
         self.model = model
-        _folder = State(initialValue: folder ?? model.folders.first ?? "")
+        _folder = State(initialValue: folder ?? Self.folders(in: model).first ?? "")
         _userId = State(initialValue: user?.userId ?? Self.candidates(in: model).first?.userId ?? 0)
     }
 
-    /// Approved people other than you.
+    /// Approved people other than you who are still on the team.
     private static func candidates(in model: AppModel) -> [User] {
-        model.users.filter { $0.approved && $0.userId != model.identity?.userId }
+        model.users.filter { $0.approved && !$0.removed && $0.userId != model.identity?.userId }
+    }
+
+    /// The folders you manage, which are the ones you can share.
+    private static func folders(in model: AppModel) -> [String] {
+        model.folders.filter { model.manages(folder: $0) }
     }
 
     private var recipient: User? { Self.candidates(in: model).first { $0.userId == userId } }
@@ -441,10 +681,14 @@ private struct ShareSheet: View {
     var body: some View {
         SheetScaffold(title: "Share a Folder", actionTitle: "Share", canAct: recipient != nil && !folder.isEmpty) {
             guard let recipient else { return false }
-            try await model.share(folder: folder, with: recipient)
+            try await model.share(folder: folder, with: recipient, role: role)
             return true
         } content: {
-            if Self.candidates(in: model).isEmpty {
+            if Self.folders(in: model).isEmpty {
+                Text("You don't manage any folders, so you can't share one. A folder's managers "
+                    + "can share it with \(Self.candidates(in: model).first { $0.userId == userId }?.name ?? "people").")
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if Self.candidates(in: model).isEmpty {
                 Text("There's no one approved to share with yet. "
                     + (model.isOwner
                         ? "Invite people from People, then approve them once they've joined."
@@ -453,10 +697,13 @@ private struct ShareSheet: View {
             } else {
                 Form {
                     Picker("Folder", selection: $folder) {
-                        ForEach(model.folders, id: \.self) { Text($0).tag($0) }
+                        ForEach(Self.folders(in: model), id: \.self) { Text($0).tag($0) }
                     }
                     Picker("With", selection: $userId) {
                         ForEach(Self.candidates(in: model)) { Text($0.name).tag($0.userId) }
+                    }
+                    Picker("Access", selection: $role) {
+                        ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
                     }
                 }
                 if let recipient {

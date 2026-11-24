@@ -23,6 +23,7 @@ use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
+use crate::vault::{leave, leave_item, parse_folder};
 use crate::{ApiError, AppState, USER_COLUMNS, UserRow, entry_from_row, user_entry};
 
 const SESSION_LIFETIME: Duration = Duration::from_secs(15 * 60);
@@ -88,6 +89,7 @@ pub(crate) async fn setup(
         name: request.name.clone(),
         keys: request.keys.clone(),
         approval: Some(request.approval.clone()),
+        removed: false,
     };
     entry
         .verify(&request.keys)
@@ -298,12 +300,14 @@ pub(crate) async fn recovery_challenge(
     State(state): State<AppState>,
     Json(request): Json<RecoveryChallengeRequest>,
 ) -> Result<Json<RecoveryChallenge>, ApiError> {
-    let user_id: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM users WHERE encryption_key = ? AND signing_key = ?")
-            .bind(&request.keys.encryption.0[..])
-            .bind(&request.keys.signing.0[..])
-            .fetch_optional(&state.readers)
-            .await?;
+    let user_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM users
+             WHERE encryption_key = ? AND signing_key = ? AND removed_at IS NULL",
+    )
+    .bind(&request.keys.encryption.0[..])
+    .bind(&request.keys.signing.0[..])
+    .fetch_optional(&state.readers)
+    .await?;
     let user_id = user_id.ok_or_else(|| {
         ApiError::Forbidden("this server has no account for that recovery kit".into())
     })?;
@@ -465,6 +469,82 @@ pub(crate) async fn directory(
         .map(entry_from_row)
         .collect::<Result<_, _>>()?;
     Ok(Json(Directory { entries }))
+}
+
+/// `DELETE /v1/users/{user_id}` (owner only): removes someone from the team. Their devices
+/// stop working at once, they leave every folder and lose every login shared with them,
+/// and each folder they were in is marked for a new key. Their directory entry stays,
+/// marked removed, so what they signed before still verifies.
+pub(crate) async fn remove_user(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(user_id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let user = UserId(user_id);
+    let mut tx = state.writer.begin().await?;
+    require_owner(&mut tx, auth.user_id).await?;
+    if user == auth.user_id {
+        return Err(ApiError::BadRequest("the owner can't be removed".into()));
+    }
+    match user_entry(&mut tx, user).await? {
+        Some(entry) if !entry.removed => {}
+        _ => return Err(ApiError::NotFound),
+    }
+    sqlx::query(
+        "UPDATE users SET removed_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE id = ?",
+    )
+    .bind(user.0)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM devices WHERE user_id = ?")
+        .bind(user.0)
+        .execute(&mut *tx)
+        .await?;
+
+    let folders: Vec<String> =
+        sqlx::query_scalar("SELECT folder_id FROM members WHERE user_id = ?")
+            .bind(user.0)
+            .fetch_all(&mut *tx)
+            .await?;
+    for folder_id in folders {
+        leave(&mut tx, user, parse_folder(&folder_id)?).await?;
+        // A folder left without a manager gets one: whoever has been in it longest.
+        sqlx::query(
+            "UPDATE members SET role = 'manage'
+             WHERE folder_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM members WHERE folder_id = ?1 AND role = 'manage')
+               AND joined_seq = (SELECT MIN(joined_seq) FROM members WHERE folder_id = ?1)",
+        )
+        .bind(&folder_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let items: Vec<String> =
+        sqlx::query_scalar("SELECT item_id FROM item_access WHERE user_id = ?")
+            .bind(user.0)
+            .fetch_all(&mut *tx)
+            .await?;
+    for item_id in items {
+        leave_item(&mut tx, user, &item_id).await?;
+        // A login outside folders that has lost its owner is managed by everyone it was
+        // shared with.
+        sqlx::query(
+            "UPDATE item_access SET role = 'manage'
+             WHERE item_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM item_access WHERE item_id = ?1 AND role = 'manage')
+               AND (SELECT folder_id FROM items WHERE id = ?1) IS NULL",
+        )
+        .bind(&item_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    state
+        .sessions
+        .lock()
+        .expect("session lock poisoned")
+        .retain(|_, session| session.user_id != user);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn require_owner(

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use keystead_cli::commands::{self, EditOutcome};
+use keystead_cli::commands::{self, EditOutcome, Role};
 use keystead_core::ids::UserId;
 use keystead_core::items::{Details, Overview};
 use keystead_server::AppState;
@@ -96,7 +96,7 @@ fn alice_and_bob_share_a_password() {
 
     // Until Alice approves Bob, she can't share with him.
     commands::create_folder(&alice, "Production").unwrap();
-    assert!(commands::share_folder(&alice, "Production", me.user_id).is_err());
+    assert!(commands::share_folder(&alice, "Production", me.user_id, Role::Edit).is_err());
 
     // A wrong fingerprint is refused; the one Bob reads out works.
     assert!(commands::approve(&alice, me.user_id, "0000-0000-0000-0000-0000").is_err());
@@ -104,7 +104,7 @@ fn alice_and_bob_share_a_password() {
     let users = commands::users(&bob).unwrap();
     assert!(users.iter().all(|user| user.approved));
 
-    commands::share_folder(&alice, "Production", me.user_id).unwrap();
+    commands::share_folder(&alice, "Production", me.user_id, Role::Edit).unwrap();
     let (overview, details) = login("AWS root", "first-secret");
     commands::add(&alice, Some("Production"), overview, details).unwrap();
 
@@ -125,7 +125,7 @@ fn alice_and_bob_share_a_password() {
     commands::add(&alice, None, overview, details).unwrap();
     assert_eq!(commands::list(&bob).unwrap().len(), 1);
     assert_eq!(
-        commands::share(&alice, "Bank", None, me.user_id).unwrap(),
+        commands::share(&alice, "Bank", None, me.user_id, Role::Edit).unwrap(),
         "Bob"
     );
     let rows = commands::list(&bob).unwrap();

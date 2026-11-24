@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use keystead_client::http::Client;
 use keystead_client::{DeviceSigner, EditOutcome, NewAccount, Vault, join, recover, setup};
-use keystead_core::api::PutItemRequest;
+use keystead_core::api::{PutItemRequest, Role};
 use keystead_core::encoding::Bytes;
-use keystead_core::ids::{DeviceId, ItemId};
+use keystead_core::ids::{DeviceId, ItemId, UserId};
 use keystead_core::items::{Details, EncryptedItem, ItemVersion, Overview};
 use keystead_core::keys::{
     AccountKeys, AccountSecret, DeviceKeyScheme, DevicePublicKey, SoftwareDeviceKey,
@@ -134,7 +134,7 @@ fn a_secure_enclave_style_device_joins_and_syncs() {
         .unwrap();
     alice.create_folder("Production").unwrap();
     alice
-        .share_folder("Production", bob_identity.user_id)
+        .share_folder("Production", bob_identity.user_id, Role::Edit)
         .unwrap();
     alice
         .add(
@@ -361,6 +361,7 @@ struct Team {
     carol: Vault,
     alice_secret: AccountSecret,
     alice_signer: Arc<dyn DeviceSigner>,
+    bob_secret: AccountSecret,
 }
 
 fn team(fixture: &Fixture) -> Team {
@@ -381,11 +382,12 @@ fn team(fixture: &Fixture) -> Team {
     .unwrap();
     let mut member = |name: &str| {
         let invite = alice.invite(name).unwrap();
-        join(
+        let secret = AccountSecret::generate();
+        let vault = join(
             &fixture.profile(name),
             NewAccount {
                 server: &invite.server,
-                secret: &AccountSecret::generate(),
+                secret: &secret,
                 device_id: DeviceId::random(),
                 device_name: "Test device",
                 signer: Arc::new(SoftwareDeviceKey::generate()),
@@ -393,10 +395,11 @@ fn team(fixture: &Fixture) -> Team {
             &invite.token,
             &invite.owner_fingerprint,
         )
-        .unwrap()
+        .unwrap();
+        (vault, secret)
     };
-    let bob = member("Bob");
-    let carol = member("Carol");
+    let (bob, bob_secret) = member("Bob");
+    let (carol, _) = member("Carol");
     let bob_identity = bob.whoami();
     alice
         .approve(bob_identity.user_id, &bob_identity.fingerprint)
@@ -407,6 +410,7 @@ fn team(fixture: &Fixture) -> Team {
         carol,
         alice_secret,
         alice_signer,
+        bob_secret,
     }
 }
 
@@ -434,12 +438,12 @@ fn a_login_outside_folders_is_private_until_shared() {
 
     // Only approved people, once each, and not yourself.
     let carol_id = carol.whoami().user_id;
-    let error = alice.share_item(bank, carol_id).unwrap_err();
+    let error = alice.share_item(bank, carol_id, Role::Edit).unwrap_err();
     assert!(format!("{error:#}").contains("isn't approved"), "{error:#}");
     let me = alice.whoami().user_id;
-    assert!(alice.share_item(bank, me).is_err());
-    assert_eq!(alice.share_item(bank, bob_id).unwrap(), "Bob");
-    assert!(alice.share_item(bank, bob_id).is_err());
+    assert!(alice.share_item(bank, me, Role::Edit).is_err());
+    assert_eq!(alice.share_item(bank, bob_id, Role::Edit).unwrap(), "Bob");
+    assert!(alice.share_item(bank, bob_id, Role::Edit).is_err());
     assert_eq!(alice.list().unwrap()[0].shared_with, ["Bob"]);
 
     bob.sync().unwrap();
@@ -503,6 +507,7 @@ fn one_login_from_a_folder_can_be_shared_alone() {
             &PutItemRequest {
                 base_version: None,
                 item: old.clone(),
+                roles: Vec::new(),
             },
         )
         .unwrap();
@@ -510,7 +515,7 @@ fn one_login_from_a_folder_can_be_shared_alone() {
     assert_eq!(alice.open_item(old.id).unwrap().1.password, "aws-pass");
 
     // Sharing it converts it to the new format with a key of its own, in one version.
-    alice.share_item(old.id, bob_id).unwrap();
+    alice.share_item(old.id, bob_id, Role::Edit).unwrap();
     let saved = &alice.profile().items[&old.id];
     assert_eq!((saved.format, saved.version), (2, 2));
 
@@ -563,6 +568,7 @@ fn one_login_from_a_folder_can_be_shared_alone() {
             &PutItemRequest {
                 base_version: None,
                 item: legacy.clone(),
+                roles: Vec::new(),
             },
         )
         .unwrap();
@@ -601,4 +607,149 @@ fn one_login_from_a_folder_can_be_shared_alone() {
 
 fn rand_core_rng() -> impl p256::elliptic_curve::rand_core::CryptoRngCore {
     p256::elliptic_curve::rand_core::OsRng
+}
+
+#[test]
+fn someone_removed_from_a_folder_cant_read_what_is_saved_afterwards() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        bob_secret,
+        ..
+    } = team(&fixture);
+    let (bob_id, carol_id) = (bob.whoami().user_id, carol.whoami().user_id);
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_id, &carol_identity.fingerprint)
+        .unwrap();
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    alice
+        .share_folder("Production", carol_id, Role::View)
+        .unwrap();
+    let (overview, details) = login("Database", "db-pass");
+    let database = alice.add(Some("Production"), overview, details).unwrap();
+    bob.sync().unwrap();
+    carol.sync().unwrap();
+    let folder_id = alice.profile().items[&database].folder_id.unwrap();
+    // What Bob holds before he's removed: the folder's key, and his account keys.
+    let bob_keys = AccountKeys::derive(&bob_secret);
+    let bobs_old_key = bob.profile().folder_key(&bob_keys, folder_id).unwrap();
+
+    // Carol, a viewer, can read but not change, share or remove.
+    assert_eq!(carol.list().unwrap()[0].role, Role::View);
+    assert_eq!(carol.open_item(database).unwrap().1.password, "db-pass");
+    assert!(carol.edit(database, "mine").is_err());
+    assert!(
+        carol
+            .share_folder("Production", bob_id, Role::View)
+            .is_err()
+    );
+    assert!(carol.remove_from_folder("Production", bob_id).is_err());
+    let members = alice.folder_members("Production").unwrap();
+    let roles: Vec<(UserId, Role)> = members.iter().map(|m| (m.user_id, m.role)).collect();
+    assert_eq!(
+        roles,
+        [
+            (alice.whoami().user_id, Role::Manage),
+            (bob_id, Role::Edit),
+            (carol_id, Role::View)
+        ]
+    );
+
+    // Alice removes Bob: the folder gets a new key at once.
+    alice.remove_from_folder("Production", bob_id).unwrap();
+    assert_eq!(alice.profile().folders[&folder_id].generation, 1);
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap().is_empty());
+    assert!(bob.folders().unwrap().is_empty());
+
+    // Carol still opens the login saved under the old key, through the chain.
+    carol.sync().unwrap();
+    assert_eq!(carol.profile().folders[&folder_id].generation, 1);
+    assert_eq!(carol.open_item(database).unwrap().1.password, "db-pass");
+    assert_eq!(carol.folders().unwrap(), ["Production"]);
+
+    // Alice changes the password: even holding the old folder key, Bob can't open it.
+    alice.edit(database, "rotated").unwrap();
+    let new_version = alice.profile().items[&database].clone();
+    assert!(
+        new_version
+            .unlock(Some(&bobs_old_key), &bob_keys, bob_id)
+            .is_err()
+    );
+    carol.sync().unwrap();
+    assert_eq!(carol.open_item(database).unwrap().1.password, "rotated");
+
+    // Carol leaves; the next sync of Alice, the manager, gives the folder a new key again.
+    carol.remove_from_folder("Production", carol_id).unwrap();
+    assert!(carol.list().unwrap().is_empty());
+    let summary = alice.sync().unwrap();
+    assert_eq!((summary.rekeyed, summary.rekey_problems.len()), (1, 0));
+    assert_eq!(alice.profile().folders[&folder_id].generation, 2);
+    assert_eq!(alice.open_item(database).unwrap().1.password, "rotated");
+}
+
+#[test]
+fn roles_on_a_login_and_removing_someone_from_the_team() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let (overview, details) = login("Bank", "s3cret");
+    let bank = alice.add(None, overview, details).unwrap();
+
+    // Shared with Bob to view: he can open it but not change it.
+    alice.share_item(bank, bob_id, Role::View).unwrap();
+    bob.sync().unwrap();
+    assert_eq!(bob.list().unwrap()[0].role, Role::View);
+    assert!(bob.edit(bank, "mine").is_err());
+    let people: Vec<(UserId, Role)> = alice
+        .item_people(bank)
+        .unwrap()
+        .iter()
+        .map(|person| (person.user_id, person.role))
+        .collect();
+    assert_eq!(
+        people,
+        [(alice.whoami().user_id, Role::Manage), (bob_id, Role::View)]
+    );
+
+    // Made an editor, he can change it, but not share it or take anyone's copy away.
+    alice.set_item_role(bank, bob_id, Role::Edit).unwrap();
+    bob.sync().unwrap();
+    assert!(matches!(
+        bob.edit(bank, "bobs").unwrap(),
+        EditOutcome::Saved { .. }
+    ));
+    assert!(bob.unshare_item(bank, bob_id).is_err());
+
+    // Alice takes his copy away; his devices drop it.
+    alice.sync().unwrap();
+    alice.unshare_item(bank, bob_id).unwrap();
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap().is_empty());
+
+    // Shared again, then Bob is removed from the team: his device stops working, he's
+    // marked removed, and nobody can share with him again.
+    alice.share_item(bank, bob_id, Role::Edit).unwrap();
+    assert_eq!(alice.remove_user(bob_id).unwrap(), "Bob");
+    assert!(bob.sync().is_err());
+    let users = alice.users().unwrap();
+    assert!(
+        users
+            .iter()
+            .any(|user| user.user_id == bob_id && user.removed)
+    );
+    let error = alice.share_item(bank, bob_id, Role::View).unwrap_err();
+    assert!(format!("{error:#}").contains("removed"), "{error:#}");
+    // His past copy is gone from the login the next time it's saved.
+    alice.edit(bank, "after-bob").unwrap();
+    let saved = &alice.profile().items[&bank];
+    assert!(saved.keys.people.is_empty());
 }

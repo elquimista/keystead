@@ -13,6 +13,10 @@ account back on a new Mac with a Recovery Kit.
   password. Each login can be edited (name, username, website, password and notes; notes
   stay hidden until shown, like the password), shared with one person, or deleted for
   everyone who can open it.
+- **Roles and access:** folders and logins are shared to view, edit or manage. A folder's
+  Access… (in its right-click menu or toolbar) lists its members; managers change roles
+  and remove people, and anyone can leave. Actions someone's role doesn't allow are
+  greyed out. The owner removes someone from the team under People.
 - **Quick search:** ⇧⌘Space (Settings › General: ⌥⌘K, ⌃⌥⌘K or off) opens a Spotlight-style
   box over any app. Type, pick with the arrows, and Return copies the password (Shift-Return
   the username) and closes it, so the app you were in is still in front to paste into. It

@@ -7,7 +7,7 @@ use std::io::{BufRead, IsTerminal};
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use keystead_cli::commands::{self, EditOutcome};
 use keystead_cli::default_home;
 use keystead_core::ids::UserId;
@@ -94,6 +94,23 @@ enum Command {
         user_id: i64,
         #[arg(long)]
         folder: Option<String>,
+        #[arg(long, value_enum, default_value_t = RoleArg::Edit)]
+        role: RoleArg,
+    },
+    /// Take away someone's copy of a login (managers)
+    Unshare {
+        name: String,
+        user_id: i64,
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Remove someone from the team: their devices stop working and they lose every
+    /// folder and login (owner only)
+    RemoveUser {
+        user_id: i64,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        yes: bool,
     },
     /// List logins
     Ls,
@@ -150,10 +167,49 @@ enum DevicesCommand {
 enum FolderCommand {
     /// Create a folder
     Create { name: String },
-    /// Share a folder with an approved user
-    Share { folder: String, user_id: i64 },
+    /// Share a folder with an approved user (managers)
+    Share {
+        folder: String,
+        user_id: i64,
+        #[arg(long, value_enum, default_value_t = RoleArg::Edit)]
+        role: RoleArg,
+    },
+    /// List who is in a folder, with their roles
+    Members { folder: String },
+    /// Change someone's role in a folder (managers)
+    Role {
+        folder: String,
+        user_id: i64,
+        #[arg(value_enum)]
+        role: RoleArg,
+    },
+    /// Take someone out of a folder; it then gets a new key (managers)
+    Remove { folder: String, user_id: i64 },
+    /// Leave a folder
+    Leave { folder: String },
     /// List your folders
     List,
+}
+
+/// What someone may do with a folder or a login.
+#[derive(Clone, Copy, ValueEnum)]
+enum RoleArg {
+    /// Open and copy
+    View,
+    /// Also change and delete logins
+    Edit,
+    /// Also share, change roles and remove people
+    Manage,
+}
+
+impl From<RoleArg> for commands::Role {
+    fn from(role: RoleArg) -> Self {
+        match role {
+            RoleArg::View => Self::View,
+            RoleArg::Edit => Self::Edit,
+            RoleArg::Manage => Self::Manage,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -298,15 +354,22 @@ fn run(cli: Cli) -> Result<()> {
             let rows = commands::users(&home)?
                 .into_iter()
                 .map(|user| {
+                    let status = if user.removed {
+                        "removed"
+                    } else if user.approved {
+                        "approved"
+                    } else {
+                        "waiting"
+                    };
                     vec![
                         user.user_id.to_string(),
                         user.name,
-                        if user.approved { "yes" } else { "no" }.to_owned(),
+                        status.to_owned(),
                         user.fingerprint,
                     ]
                 })
                 .collect();
-            print_table(&["ID", "NAME", "APPROVED", "FINGERPRINT"], rows);
+            print_table(&["ID", "NAME", "STATUS", "FINGERPRINT"], rows);
         }
         Command::Approve {
             user_id,
@@ -319,9 +382,47 @@ fn run(cli: Cli) -> Result<()> {
             commands::create_folder(&home, &name)?;
             println!("Created folder {name}.");
         }
-        Command::Folder(FolderCommand::Share { folder, user_id }) => {
-            let name = commands::share_folder(&home, &folder, UserId(user_id))?;
+        Command::Folder(FolderCommand::Share {
+            folder,
+            user_id,
+            role,
+        }) => {
+            let name = commands::share_folder(&home, &folder, UserId(user_id), role.into())?;
             println!("Shared {folder} with {name}.");
+        }
+        Command::Folder(FolderCommand::Members { folder }) => {
+            let rows = commands::folder_members(&home, &folder)?
+                .into_iter()
+                .map(|member| {
+                    let name = if member.me {
+                        format!("{} (you)", member.name)
+                    } else {
+                        member.name
+                    };
+                    vec![
+                        member.user_id.to_string(),
+                        name,
+                        member.role.name().to_owned(),
+                    ]
+                })
+                .collect();
+            print_table(&["ID", "NAME", "ROLE"], rows);
+        }
+        Command::Folder(FolderCommand::Role {
+            folder,
+            user_id,
+            role,
+        }) => {
+            commands::set_folder_role(&home, &folder, UserId(user_id), role.into())?;
+            println!("Changed their role in {folder}.");
+        }
+        Command::Folder(FolderCommand::Remove { folder, user_id }) => {
+            commands::remove_from_folder(&home, &folder, UserId(user_id))?;
+            println!("Removed them from {folder}, and gave it a new key.");
+        }
+        Command::Folder(FolderCommand::Leave { folder }) => {
+            commands::leave_folder(&home, &folder)?;
+            println!("Left {folder}.");
         }
         Command::Folder(FolderCommand::List) => {
             for name in commands::folders(&home)? {
@@ -355,9 +456,43 @@ fn run(cli: Cli) -> Result<()> {
             name,
             user_id,
             folder,
+            role,
         } => {
-            let who = commands::share(&home, &name, folder.as_deref(), UserId(user_id))?;
+            let who = commands::share(
+                &home,
+                &name,
+                folder.as_deref(),
+                UserId(user_id),
+                role.into(),
+            )?;
             println!("Shared {name} with {who}.");
+        }
+        Command::Unshare {
+            name,
+            user_id,
+            folder,
+        } => {
+            let who = commands::unshare(&home, &name, folder.as_deref(), UserId(user_id))?;
+            println!("{who} no longer has {name}.");
+        }
+        Command::RemoveUser { user_id, yes } => {
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!("add --yes to remove them without being asked");
+                }
+                println!("Their devices stop working and they lose every folder and login.");
+                println!("Passwords they've already seen can't be taken back; change those.");
+                print!("Remove user {user_id} from the team? [y/N] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("Not removed.");
+                    return Ok(());
+                }
+            }
+            let name = commands::remove_user(&home, UserId(user_id))?;
+            println!("Removed {name} from the team.");
         }
         Command::Ls => {
             let rows = commands::list(&home)?

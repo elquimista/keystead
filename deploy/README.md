@@ -157,6 +157,12 @@ shared one by one. Update the server first, then every Mac app and the CLI: apps
 can't save logins to an older server, and older apps can't open logins saved by 0.2.0.
 Existing logins keep working and switch to the new format when next saved.
 
+**Updating to 0.3.0.** Folders and logins get roles (view, edit, manage), and people can
+be removed from folders, from logins and from the team. Everyone who already had access
+becomes a manager, so nothing changes until someone changes it. Update every app and the
+CLI along with the server: once someone is removed from anything, apps older than 0.3.0
+can't sync with that server any more.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
