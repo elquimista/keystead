@@ -418,17 +418,17 @@ final class AppModel {
         clipboard.copy(kit.words.joined(separator: " "))
     }
 
-    /// Signs out after Touch ID: the server forgets this Mac, so it can't sign in again, and
-    /// the account's files and keys on this Mac are deleted. Coming back takes the Recovery
-    /// Kit. Ends on the welcome screen.
-    func signOut() async throws {
+    /// Signs out: the server forgets this Mac, so it can't sign in again, and the account's
+    /// files and keys on this Mac are deleted. Coming back takes the Recovery Kit. Ends on the
+    /// welcome screen. The vault is already unlocked, so there's no Touch ID step; the
+    /// confirmation sheet guards against signing out by accident.
+    func signOut() async {
         #if DEBUG
         if isDemo {
             forgetAccount(note: nil)
             return
         }
         #endif
-        _ = try await DeviceAuthentication.authenticate(reason: "sign out of Keystead on this Mac")
         var notTold: String?
         do {
             notTold = try await perform { try $0.signOut() }

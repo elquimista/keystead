@@ -23,7 +23,7 @@ account back on a new Mac with a Recovery Kit.
   Recovering on a new Mac checks the owner's fingerprint from the kit before registering
   anything (the owner can leave it out); the old Mac can then be removed from the device
   list under People › You. Needs a 0.2.0 server.
-- **Sign out:** People › You, Settings › Account or Vault › Sign Out, after Touch ID. The
+- **Sign out:** People › You, Settings › Account or Vault › Sign Out, after a confirmation. The
   server forgets this Mac, and the account's files and keys here are deleted; coming back
   takes the Recovery Kit.
 - **Keys:** two Secure Enclave keys per Mac. One signs in to the server
