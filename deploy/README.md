@@ -169,6 +169,13 @@ app and the CLI before anyone does: apps older than 0.4.0 can't sync once their 
 a group, and can't open logins shared with one. Apps from 0.4.0 still work with a 0.3.0
 server, but can't use groups until the server is updated.
 
+**Updating to 0.5.0.** Passwords to change: from now on, when someone loses access, the
+server remembers which passwords they could see until new ones are saved, and apps list
+them under To Change. Nothing is recorded for people removed before the update. Older apps
+keep working, but they don't tell the server when they save a new password, so a password
+changed in one stays on the list until someone chooses to keep it; update the apps too.
+Apps from 0.5.0 work with older servers and just show no list.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
