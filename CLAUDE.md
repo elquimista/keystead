@@ -12,10 +12,12 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`
 - macOS app (in `apps/macos`): `scripts/build-core.sh` first on a fresh clone, then
   `xcodebuild -project Keystead.xcodeproj -scheme Keystead -configuration Release
-  -derivedDataPath build/DerivedData build CODE_SIGN_IDENTITY=-`. The user's
-  git-ignored `Config/Signing.local.xcconfig` signs their own builds with their Apple
-  Development certificate; always pass `CODE_SIGN_IDENTITY=-` so command-line builds stay
-  ad hoc and never trigger a keychain prompt.
+  -derivedDataPath build/DerivedData build CODE_SIGN_IDENTITY=-`. Builds for checking pass
+  `CODE_SIGN_IDENTITY=-` so they stay ad hoc and never trigger a keychain prompt. A Release
+  app the user will run (the copy in `apps/macos/build/Release`) must be signed with their
+  Apple Development certificate, set in their git-ignored `Config/Signing.local.xcconfig`:
+  build it without `CODE_SIGN_IDENTITY=-`, and say first that macOS may ask for their
+  keychain password.
 - Launching the app or unlocking shows UI or a Touch ID prompt on the user's screen; say
   so before doing it
 - To check the main window without a server or Touch ID, run the Debug app with
