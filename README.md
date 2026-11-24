@@ -37,8 +37,10 @@ cargo fmt --all --check
 
 Run the server. It listens on `127.0.0.1:8080` (set `KEYSTEAD_LISTEN` to change it) and
 keeps its database in `./keystead-data` (set `KEYSTEAD_DATA`). On first start it prints a
-one-time setup code that the first admin uses to become the owner, either in the Mac app
-(Set up a new team) or with `keystead setup`.
+one-time setup code. Whoever uses it, in the Mac app (Set up a new team) or with
+`keystead setup`, becomes the team's **owner**: the one account that invites and approves
+people, removes them from the team and makes groups. Running the server doesn't make you
+the owner, and the server holds no key that opens anything.
 
 ```sh
 cargo run -p keystead-server
@@ -111,6 +113,25 @@ keystead remove-user 3               # owner: remove someone from the team (asks
 A login added without `--folder` is yours alone until you share it. `keystead share`
 shares one login, from a folder or not, without the rest of its folder.
 
+Groups share folders and logins with several people at once, and people added later get
+them too. The owner makes groups; a group's managers add and remove people. Taking
+someone out gives the group, and the folders shared with it, new keys.
+
+```sh
+keystead group create Engineering 2 3   # owner: a group with Bob and Carol, Alice managing
+keystead group list
+keystead folder share Production --group Engineering --role edit
+keystead share Bank --group Engineering --role view
+keystead group add Engineering 4
+keystead group remove Engineering 3     # takes Carol out; new keys for the group and its folders
+keystead group manager Engineering 2    # Bob can add and remove people too (--remove undoes it)
+keystead group rename Engineering Platform
+keystead folder group-role Production Platform view
+keystead folder remove Production --group Platform
+keystead unshare Bank --group Platform
+keystead group leave Platform
+```
+
 Each account has a recovery kit: its secret as 24 words, to bring it back on a new device.
 
 ```sh
@@ -179,8 +200,8 @@ very different schedules; until then they'd add a compatibility table to keep up
    - `KEYSTEAD_VERSION` in `deploy/.env.example`.
 2. Run the checks (`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
    warnings`, `cargo test --workspace`), which also updates `Cargo.lock`.
-3. If admins must do something when updating, such as updating the server before the apps,
-   add it to the Updating section of `deploy/README.md`.
+3. If whoever runs the server must do something when updating, such as updating the
+   server before the apps, add it to the Updating section of `deploy/README.md`.
 4. Commit as "Release 0.2.1", then tag and push:
 
    ```sh

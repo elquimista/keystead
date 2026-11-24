@@ -69,3 +69,7 @@ random_id!(
     /// One installation of an app or the CLI.
     DeviceId
 );
+random_id!(
+    /// A group of people, shared with as one.
+    GroupId
+);

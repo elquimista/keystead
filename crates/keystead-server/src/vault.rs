@@ -2,46 +2,54 @@
 //!
 //! The server can't open anything, but it decides who receives what and who may change
 //! it. An item goes to the members of its folder, its owner, and everyone it's shared with
-//! directly, each with a role: view, edit or manage. Who holds a key copy comes from the
-//! item itself, which its author signed; roles are the server's to enforce.
+//! directly, each with a role: view, edit or manage. Folders and items can also be shared
+//! with groups, which gives each of their members the group's role. Who holds a key copy
+//! comes from the item itself, which its author signed; roles are the server's to enforce.
+//!
+//! Who can open what, whichever way, is kept in two tables derived from the rest: `access`
+//! (folders, and since when) and `item_reach` (items reached without their folder).
+//! [`reconcile`] brings them up to date after every change, and logs each join and leave
+//! for the feed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use keystead_core::api::{
-    AddMemberRequest, CreateFolderRequest, FolderRole, ItemRole, KeyLink, Member, Members,
-    PutItemRequest, RekeyRequest, Role, RoleRequest, Roles, SyncEntry, SyncPage,
+    AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, FolderRole, GroupShare, ItemRole,
+    KeyLink, Member, Members, PutItemRequest, RekeyRequest, Role, RoleRequest, Roles, SyncEntry,
+    SyncPage, ViaGroup,
 };
-use keystead_core::ids::{FolderId, ItemId, UserId};
+use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
 use keystead_core::keys::WrappedKey;
 use serde::Deserialize;
 use sqlx::SqliteConnection;
 
 use crate::accounts::Auth;
+use crate::groups::{group_key_state, group_member_ids, group_state, parse_group};
 use crate::{ApiError, AppState, next_seq, user_entry};
 
 const DEFAULT_PAGE: i64 = 500;
 const MAX_PAGE: i64 = 1_000;
 
 /// One ordered stream: the latest version of each item in the user's folders, then of
-/// each item they reach directly (owned or shared with them) outside those folders, plus
-/// the user's own joins and leaves, new folder keys, and logins they lost direct access
-/// to. Folders joined after the cursor are left out here; their items ride on the join
-/// entry instead. An item reached directly always arrives on its own: whatever gave the
-/// access saved a new version, with a new change number.
+/// each item they reach directly (owned, or shared with them or a group of theirs) outside
+/// those folders, plus the user's own joins and leaves of folders, items and groups, new
+/// folder keys, and changes to their groups. Folders joined after the cursor are left out
+/// here; their items ride on the join entry instead. An item reached directly after its
+/// latest version (through a group just joined) rides on its own join entry.
 const FEED_QUERY: &str = "
     SELECT i.seq AS seq, 'item' AS kind, i.body AS body, NULL AS target, NULL AS joined
-    FROM items i JOIN members m ON m.folder_id = i.folder_id
-    WHERE m.user_id = ?1 AND i.seq > ?2 AND m.joined_seq <= ?2
+    FROM items i JOIN access a ON a.folder_id = i.folder_id
+    WHERE a.user_id = ?1 AND i.seq > ?2 AND a.joined_seq <= ?2
     UNION ALL
     SELECT i.seq, 'item', i.body, NULL, NULL
-    FROM item_access a JOIN items i ON i.id = a.item_id
-    WHERE a.user_id = ?1 AND i.seq > ?2
-      AND NOT EXISTS (SELECT 1 FROM members m WHERE m.user_id = ?1 AND m.folder_id = i.folder_id)
+    FROM item_reach r JOIN items i ON i.id = r.item_id
+    WHERE r.user_id = ?1 AND i.seq > ?2
+      AND NOT EXISTS (SELECT 1 FROM access a WHERE a.user_id = ?1 AND a.folder_id = i.folder_id)
     UNION ALL
     SELECT seq, 'membership', NULL, folder_id, joined
     FROM membership_log WHERE user_id = ?1 AND seq > ?2
@@ -51,6 +59,12 @@ const FEED_QUERY: &str = "
     UNION ALL
     SELECT seq, 'left_item', NULL, item_id, NULL
     FROM item_leave_log WHERE user_id = ?1 AND seq > ?2
+    UNION ALL
+    SELECT seq, 'joined_item', NULL, item_id, NULL
+    FROM item_join_log WHERE user_id = ?1 AND seq > ?2
+    UNION ALL
+    SELECT seq, 'group', NULL, group_id, joined
+    FROM group_log WHERE user_id = ?1 AND seq > ?2
     ORDER BY seq
     LIMIT ?3
 ";
@@ -105,7 +119,7 @@ pub(crate) async fn add_member(
         "share this folder",
     )?;
     require_shareable(&mut tx, request.user_id).await?;
-    if folder_role(&mut tx, request.user_id, folder_id)
+    if direct_role(&mut tx, request.user_id, folder_id)
         .await?
         .is_some()
     {
@@ -128,8 +142,8 @@ pub(crate) async fn add_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /v1/folders/{folder_id}/members`: everyone in the folder and their roles, for its
-/// members.
+/// `GET /v1/folders/{folder_id}/members`: everyone in the folder and the groups it's
+/// shared with, and their roles, for anyone who can open it.
 pub(crate) async fn members(
     State(state): State<AppState>,
     auth: Auth,
@@ -143,6 +157,7 @@ pub(crate) async fn members(
     )?;
     Ok(Json(Members {
         members: folder_members(&mut conn, folder_id).await?,
+        groups: folder_groups(&mut conn, folder_id).await?,
     }))
 }
 
@@ -160,11 +175,11 @@ pub(crate) async fn set_member_role(
         Role::Manage,
         "change roles in this folder",
     )?;
-    let current = folder_role(&mut tx, user, folder_id)
+    let current = direct_role(&mut tx, user, folder_id)
         .await?
         .ok_or(ApiError::NotFound)?;
     if current == Role::Manage && request.role != Role::Manage {
-        require_another_manager(&mut tx, folder_id, user).await?;
+        require_another_manager(&mut tx, folder_id, Some(user), None).await?;
     }
     sqlx::query("UPDATE members SET role = ? WHERE user_id = ? AND folder_id = ?")
         .bind(request.role.name())
@@ -177,8 +192,8 @@ pub(crate) async fn set_member_role(
 }
 
 /// `DELETE /v1/folders/{folder_id}/members/{user_id}`: a manager removes someone, or a
-/// member leaves. Their access ends at once; the folder then needs a new key, which a
-/// manager's app makes with `rekey`.
+/// member leaves. Their access ends at once, unless a group still gives it; the folder
+/// then needs a new key, which a manager's app makes with `rekey`.
 pub(crate) async fn remove_member(
     State(state): State<AppState>,
     auth: Auth,
@@ -190,11 +205,11 @@ pub(crate) async fn remove_member(
     if user != auth.user_id {
         require(mine, Role::Manage, "remove people from this folder")?;
     }
-    let theirs = folder_role(&mut tx, user, folder_id)
+    let theirs = direct_role(&mut tx, user, folder_id)
         .await?
         .ok_or(ApiError::NotFound)?;
     if theirs == Role::Manage {
-        require_another_manager(&mut tx, folder_id, user).await?;
+        require_another_manager(&mut tx, folder_id, Some(user), None).await?;
     }
     leave(&mut tx, user, folder_id).await?;
     tx.commit().await?;
@@ -202,7 +217,8 @@ pub(crate) async fn remove_member(
 }
 
 /// `POST /v1/folders/{folder_id}/rekey`: a manager gives the folder a new key, wrapped for
-/// exactly its current members, with the old key sealed under the new one.
+/// exactly its current members and groups, with the old key sealed under the new one. A
+/// group that lost someone gets its own new key first, so the folder's can't reach them.
 pub(crate) async fn rekey(
     State(state): State<AppState>,
     auth: Auth,
@@ -232,6 +248,30 @@ pub(crate) async fn rekey(
             "the folder's members changed; sync and try again".into(),
         ));
     }
+    let groups: HashSet<GroupId> = folder_groups(&mut tx, folder_id)
+        .await?
+        .into_iter()
+        .map(|share| share.group_id)
+        .collect();
+    let wrapped: HashSet<GroupId> = request.group_keys.iter().map(|key| key.group_id).collect();
+    if wrapped != groups || wrapped.len() != request.group_keys.len() {
+        return Err(ApiError::Conflict(
+            "the groups this folder is shared with changed; sync and try again".into(),
+        ));
+    }
+    for key in &request.group_keys {
+        let (generation, needs_rekey) = group_key_state(&mut tx, key.group_id).await?;
+        if needs_rekey {
+            return Err(ApiError::Conflict(
+                "a group this folder is shared with needs a new key first".into(),
+            ));
+        }
+        if key.group_generation != generation {
+            return Err(ApiError::Conflict(
+                "a group's key changed; sync and try again".into(),
+            ));
+        }
+    }
     sqlx::query("INSERT INTO folder_keys (folder_id, generation, previous) VALUES (?, ?, ?)")
         .bind(folder_id.to_string())
         .bind(request.generation)
@@ -251,10 +291,30 @@ pub(crate) async fn rekey(
             .bind(folder_id.to_string())
             .execute(&mut *tx)
             .await?;
+    }
+    for key in &request.group_keys {
+        sqlx::query(
+            "UPDATE folder_groups SET wrapped_key = ?, group_generation = ?
+             WHERE folder_id = ? AND group_id = ?",
+        )
+        .bind(serde_json::to_string(&key.wrapped_key)?)
+        .bind(key.group_generation)
+        .bind(folder_id.to_string())
+        .bind(key.group_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+    // Everyone who can open the folder, whichever way, hears about the new key.
+    let users: Vec<i64> =
+        sqlx::query_scalar("SELECT user_id FROM access WHERE folder_id = ? ORDER BY user_id")
+            .bind(folder_id.to_string())
+            .fetch_all(&mut *tx)
+            .await?;
+    for user in users {
         let seq = next_seq(&mut tx).await?;
         sqlx::query("INSERT INTO rekey_log (seq, user_id, folder_id) VALUES (?, ?, ?)")
             .bind(seq)
-            .bind(key.user_id.0)
+            .bind(user)
             .bind(folder_id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -263,10 +323,123 @@ pub(crate) async fn rekey(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /v1/folders/{folder_id}/groups`: a manager shares the folder with a group, with
+/// the folder's current key wrapped for the group's current key.
+pub(crate) async fn add_folder_group(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(folder_id): Path<FolderId>,
+    Json(request): Json<AddFolderGroupRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    require(
+        folder_role(&mut tx, auth.user_id, folder_id).await?,
+        Role::Manage,
+        "share this folder",
+    )?;
+    let (group_generation, _) = group_key_state(&mut tx, request.group_id).await?;
+    if request.group_generation != group_generation {
+        return Err(ApiError::Conflict(
+            "the group's key changed; sync and try again".into(),
+        ));
+    }
+    if request.generation != generation(&mut tx, folder_id).await? {
+        return Err(ApiError::Conflict(
+            "the folder's key changed; sync and try again".into(),
+        ));
+    }
+    if folder_group_role(&mut tx, folder_id, request.group_id)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict(
+            "the folder is already shared with this group".into(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO folder_groups (folder_id, group_id, role, group_generation, wrapped_key)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(folder_id.to_string())
+    .bind(request.group_id.to_string())
+    .bind(request.role.name())
+    .bind(request.group_generation)
+    .bind(serde_json::to_string(&request.wrapped_key)?)
+    .execute(&mut *tx)
+    .await?;
+    for member in group_member_ids(&mut tx, request.group_id).await? {
+        reconcile(&mut tx, member).await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /v1/folders/{folder_id}/groups/{group_id}`: a manager changes a group's role.
+pub(crate) async fn set_folder_group_role(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((folder_id, group_id)): Path<(FolderId, GroupId)>,
+    Json(request): Json<RoleRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    require(
+        folder_role(&mut tx, auth.user_id, folder_id).await?,
+        Role::Manage,
+        "change roles in this folder",
+    )?;
+    let current = folder_group_role(&mut tx, folder_id, group_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if current == Role::Manage && request.role != Role::Manage {
+        require_another_manager(&mut tx, folder_id, None, Some(group_id)).await?;
+    }
+    sqlx::query("UPDATE folder_groups SET role = ? WHERE folder_id = ? AND group_id = ?")
+        .bind(request.role.name())
+        .bind(folder_id.to_string())
+        .bind(group_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/folders/{folder_id}/groups/{group_id}`: a manager stops sharing the folder
+/// with a group. Its members lose access at once, unless they have it another way, and the
+/// folder then needs a new key.
+pub(crate) async fn remove_folder_group(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((folder_id, group_id)): Path<(FolderId, GroupId)>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    require(
+        folder_role(&mut tx, auth.user_id, folder_id).await?,
+        Role::Manage,
+        "remove groups from this folder",
+    )?;
+    let current = folder_group_role(&mut tx, folder_id, group_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if current == Role::Manage {
+        require_another_manager(&mut tx, folder_id, None, Some(group_id)).await?;
+    }
+    sqlx::query("DELETE FROM folder_groups WHERE folder_id = ? AND group_id = ?")
+        .bind(folder_id.to_string())
+        .bind(group_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    for member in group_member_ids(&mut tx, group_id).await? {
+        reconcile(&mut tx, member).await?;
+        resend_keys(&mut tx, member, &[folder_id.to_string()]).await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // MARK: - Items
 
 /// `PUT /v1/items/{item_id}`: saves a new version if it builds on the latest one. Editors
-/// can change an item; managers can also share it with more people or take someone's
+/// can change an item; managers can also share it with more people or groups, or take a
 /// copy away.
 pub(crate) async fn put_item(
     State(state): State<AppState>,
@@ -329,7 +502,9 @@ pub(crate) async fn put_item(
                     "items can't move between folders or owners".into(),
                 ));
             }
-            if item.format < current.format {
+            // Format 3 goes back to 2 when its last group is removed, but nothing goes
+            // back to format 1.
+            if item.format < current.format.min(2) {
                 return Err(ApiError::BadRequest(
                     "an item can't go back to an older format".into(),
                 ));
@@ -362,13 +537,32 @@ pub(crate) async fn put_item(
             .is_none_or(|entry| entry.removed);
         dropped_active |= !removed;
     }
-    if (!added.is_empty() || dropped_active) && role != Role::Manage {
+    let groups_before: HashSet<GroupId> = current
+        .iter()
+        .flat_map(|current| current.keys.groups.iter().map(|copy| copy.group_id))
+        .collect();
+    let groups_after: HashSet<GroupId> = item.keys.groups.iter().map(|c| c.group_id).collect();
+    let groups_changed = groups_before != groups_after;
+    if (!added.is_empty() || dropped_active || groups_changed) && role != Role::Manage {
         return Err(ApiError::Forbidden(
             "you need manage access to change who this login is shared with".into(),
         ));
     }
     for &user in &added {
         require_shareable(&mut tx, user).await?;
+    }
+    // Copies for a group are for one of its generations: the current one when the group
+    // is new to the item, and never one that doesn't exist yet.
+    for copy in &item.keys.groups {
+        let (generation, _) = group_key_state(&mut tx, copy.group_id)
+            .await
+            .map_err(|_| ApiError::BadRequest(format!("no group {}", copy.group_id)))?;
+        let new = !groups_before.contains(&copy.group_id);
+        if copy.generation > generation || (new && copy.generation != generation) {
+            return Err(ApiError::Conflict(
+                "a group's key changed; sync and try again".into(),
+            ));
+        }
     }
 
     let seq = next_seq(&mut tx).await?;
@@ -423,21 +617,51 @@ pub(crate) async fn put_item(
             .execute(&mut *tx)
             .await?;
     }
-    for user in dropped {
-        let seq = next_seq(&mut tx).await?;
-        sqlx::query("INSERT INTO item_leave_log (seq, user_id, item_id) VALUES (?, ?, ?)")
-            .bind(seq)
-            .bind(user.0)
+
+    // Groups the same way; a group shared with before roles existed can't happen.
+    let group_roles: Vec<(String, String)> =
+        sqlx::query_as("SELECT group_id, role FROM item_groups WHERE item_id = ?")
             .bind(item_id.to_string())
+            .fetch_all(&mut *tx)
+            .await?;
+    let mut group_roles: HashMap<GroupId, Role> = group_roles
+        .into_iter()
+        .map(|(group, role)| Ok((parse_group(&group)?, parse_role(&role)?)))
+        .collect::<Result<_, ApiError>>()?;
+    for share in &request.group_roles {
+        if !groups_before.contains(&share.group_id) {
+            group_roles.insert(share.group_id, share.role);
+        }
+    }
+    sqlx::query("DELETE FROM item_groups WHERE item_id = ?")
+        .bind(item_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    for group in &groups_after {
+        let role = group_roles.get(group).copied().unwrap_or(Role::View);
+        sqlx::query("INSERT INTO item_groups (item_id, group_id, role) VALUES (?, ?, ?)")
+            .bind(item_id.to_string())
+            .bind(group.to_string())
+            .bind(role.name())
             .execute(&mut *tx)
             .await?;
+    }
+
+    // Everyone whose reach may have changed: people and members of groups, before and after.
+    let mut affected: BTreeSet<UserId> = before.union(&after).copied().collect();
+    affected.extend(item.owner);
+    for group in groups_before.union(&groups_after) {
+        affected.extend(group_member_ids(&mut tx, *group).await?);
+    }
+    for user in affected {
+        reconcile(&mut tx, user).await?;
     }
     tx.commit().await?;
     Ok(Json(item))
 }
 
-/// `GET /v1/items/{item_id}/people`: who has the item directly (its owner and everyone
-/// it's shared with) and their roles, for anyone who can open it.
+/// `GET /v1/items/{item_id}/people`: who has the item directly (its owner, and everyone
+/// and every group it's shared with) and their roles, for anyone who can open it.
 pub(crate) async fn item_people(
     State(state): State<AppState>,
     auth: Auth,
@@ -464,7 +688,22 @@ pub(crate) async fn item_people(
             })
         })
         .collect::<Result<_, ApiError>>()?;
-    Ok(Json(Members { members }))
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT group_id, role FROM item_groups WHERE item_id = ? ORDER BY group_id",
+    )
+    .bind(item_id.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let groups = rows
+        .into_iter()
+        .map(|(group, role)| {
+            Ok(GroupShare {
+                group_id: parse_group(&group)?,
+                role: parse_role(&role)?,
+            })
+        })
+        .collect::<Result<_, ApiError>>()?;
+    Ok(Json(Members { members, groups }))
 }
 
 /// `PUT /v1/items/{item_id}/people/{user_id}`: a manager changes the role of someone the
@@ -502,8 +741,37 @@ pub(crate) async fn set_item_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /v1/items/{item_id}/groups/{group_id}`: a manager changes the role of a group the
+/// item is shared with.
+pub(crate) async fn set_item_group_role(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((item_id, group_id)): Path<(ItemId, GroupId)>,
+    Json(request): Json<RoleRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    let item = stored_item(&mut tx, item_id).await?;
+    require(
+        item_role(&mut tx, auth.user_id, &item).await?,
+        Role::Manage,
+        "change roles on this login",
+    )?;
+    let updated = sqlx::query("UPDATE item_groups SET role = ? WHERE item_id = ? AND group_id = ?")
+        .bind(request.role.name())
+        .bind(item_id.to_string())
+        .bind(group_id.to_string())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if updated == 0 {
+        return Err(ApiError::NotFound);
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Checks what the server can see of an item: its format, that it has a folder or an
-/// owner and the matching key copy, and that nobody is listed twice.
+/// owner and the matching key copy, and that nobody and no group is listed twice.
 fn check_shape(item: &EncryptedItem) -> Result<(), ApiError> {
     let bad = |message: &str| Err(ApiError::BadRequest(message.into()));
     match item.format {
@@ -512,8 +780,15 @@ fn check_shape(item: &EncryptedItem) -> Result<(), ApiError> {
                 return bad("a format 1 item is in a folder and has no key copies");
             }
         }
-        2 => {
+        2 | 3 => {
             let keys = &item.keys;
+            if (item.format == 3) == keys.groups.is_empty() {
+                return bad("format 3 items, and only they, have copies for groups");
+            }
+            let mut groups = HashSet::new();
+            if !keys.groups.iter().all(|copy| groups.insert(copy.group_id)) {
+                return bad("each group gets one copy of an item's key");
+            }
             let in_folder = item.folder_id.is_some();
             let owned = item.owner.is_some();
             if in_folder == owned
@@ -576,9 +851,9 @@ pub(crate) async fn sync(
         _ => high_water.max(cursor),
     };
 
-    // Current memberships that began inside this page, with what their join entries carry.
+    // Current access that began inside this page, with what its join entries carry.
     let joins: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT folder_id, joined_seq FROM members
+        "SELECT folder_id, joined_seq FROM access
          WHERE user_id = ? AND joined_seq > ? AND joined_seq <= ?",
     )
     .bind(user)
@@ -611,6 +886,7 @@ pub(crate) async fn sync(
                 wrapped_key: key.wrapped_key,
                 generation: key.generation,
                 chain: key.chain,
+                via_group: key.via_group,
                 items,
             },
         );
@@ -643,29 +919,68 @@ pub(crate) async fn sync(
                         wrapped_key: key.wrapped_key,
                         generation: key.generation,
                         chain: key.chain,
+                        via_group: key.via_group,
                     });
                 }
             }
             ("left_item", _, Some(item_id)) => entries.push(SyncEntry::LeftItem {
                 seq,
-                item_id: ItemId::from_str(&item_id)
-                    .map_err(|_| ApiError::Internal(format!("bad stored item id {item_id}")))?,
+                item_id: parse_item(&item_id)?,
+            }),
+            // Reached through a group joined after the item's latest version, which the
+            // item rows would never send again. Later versions arrive as item rows.
+            ("joined_item", _, Some(item_id)) => {
+                let row: Option<(String, i64)> = sqlx::query_as(
+                    "SELECT i.body, i.seq FROM item_reach r JOIN items i ON i.id = r.item_id
+                     WHERE r.user_id = ?1 AND r.item_id = ?2
+                       AND NOT EXISTS (SELECT 1 FROM access a
+                                       WHERE a.user_id = ?1 AND a.folder_id = i.folder_id)",
+                )
+                .bind(user)
+                .bind(&item_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some((body, item_seq)) = row
+                    && item_seq <= cursor
+                {
+                    entries.push(SyncEntry::Item {
+                        seq,
+                        item: serde_json::from_str(&body)?,
+                    });
+                }
+            }
+            // Built from the group as it is now, like a new folder key.
+            ("group", _, Some(group_id)) if was_join == Some(true) => {
+                let group_id = parse_group(&group_id)?;
+                entries.extend(group_state(&mut tx, auth.user_id, group_id, seq).await?);
+            }
+            ("group", _, Some(group_id)) => entries.push(SyncEntry::LeftGroup {
+                seq,
+                group_id: parse_group(&group_id)?,
             }),
             _ => {}
         }
     }
 
+    // Folders wait for the groups they're shared with to get their new keys first.
     let rekey_needed: Vec<String> = sqlx::query_scalar(
-        "SELECT m.folder_id FROM members m JOIN folders f ON f.id = m.folder_id
-         WHERE m.user_id = ? AND m.role = 'manage' AND f.needs_rekey = 1",
+        "SELECT a.folder_id FROM access a JOIN folders f ON f.id = a.folder_id
+         WHERE a.user_id = ? AND f.needs_rekey = 1
+           AND NOT EXISTS (SELECT 1 FROM folder_groups fg JOIN team_groups g ON g.id = fg.group_id
+                           WHERE fg.folder_id = f.id AND g.needs_rekey = 1)
+         ORDER BY a.folder_id",
     )
     .bind(user)
     .fetch_all(&mut *tx)
     .await?;
-    let rekey_needed = rekey_needed
-        .iter()
-        .map(|folder_id| parse_folder(folder_id))
-        .collect::<Result<_, _>>()?;
+    let mut folders = Vec::new();
+    for folder_id in rekey_needed {
+        let folder_id = parse_folder(&folder_id)?;
+        if folder_role(&mut tx, auth.user_id, folder_id).await? == Some(Role::Manage) {
+            folders.push(folder_id);
+        }
+    }
+    let group_rekey_needed = crate::groups::rekey_needed(&mut tx, auth.user_id).await?;
     let roles = if more {
         None
     } else {
@@ -677,8 +992,9 @@ pub(crate) async fn sync(
         entries,
         cursor: next_cursor,
         more,
-        rekey_needed,
+        rekey_needed: folders,
         roles,
+        group_rekey_needed,
     }))
 }
 
@@ -700,8 +1016,36 @@ pub(crate) fn parse_role(name: &str) -> Result<Role, ApiError> {
     Role::from_name(name).ok_or_else(|| ApiError::Internal(format!("bad stored role {name}")))
 }
 
-/// `user`'s role in a folder, if they're in it.
-async fn folder_role(
+/// The highest of some roles, as stored.
+fn highest(roles: Vec<String>) -> Result<Option<Role>, ApiError> {
+    roles
+        .iter()
+        .map(|role| parse_role(role))
+        .try_fold(None, |best, role| Ok(best.max(Some(role?))))
+}
+
+/// `user`'s role in a folder, if they can open it: the highest of their own and those of
+/// the groups they're in that it's shared with.
+pub(crate) async fn folder_role(
+    conn: &mut SqliteConnection,
+    user: UserId,
+    folder_id: FolderId,
+) -> Result<Option<Role>, ApiError> {
+    let roles: Vec<String> = sqlx::query_scalar(
+        "SELECT role FROM members WHERE user_id = ?1 AND folder_id = ?2
+         UNION ALL
+         SELECT fg.role FROM folder_groups fg JOIN group_members gm ON gm.group_id = fg.group_id
+         WHERE gm.user_id = ?1 AND fg.folder_id = ?2",
+    )
+    .bind(user.0)
+    .bind(folder_id.to_string())
+    .fetch_all(conn)
+    .await?;
+    highest(roles)
+}
+
+/// `user`'s own role in a folder, not counting groups.
+async fn direct_role(
     conn: &mut SqliteConnection,
     user: UserId,
     folder_id: FolderId,
@@ -715,8 +1059,23 @@ async fn folder_role(
     role.as_deref().map(parse_role).transpose()
 }
 
-/// What `user` may do with a stored item: the higher of their role in its folder and their
-/// direct role (its owner always manages it).
+async fn folder_group_role(
+    conn: &mut SqliteConnection,
+    folder_id: FolderId,
+    group_id: GroupId,
+) -> Result<Option<Role>, ApiError> {
+    let role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM folder_groups WHERE folder_id = ? AND group_id = ?")
+            .bind(folder_id.to_string())
+            .bind(group_id.to_string())
+            .fetch_optional(conn)
+            .await?;
+    role.as_deref().map(parse_role).transpose()
+}
+
+/// What `user` may do with a stored item: the highest of their role in its folder, their
+/// direct role (its owner always manages it), and the roles of their groups it's shared
+/// with.
 async fn item_role(
     conn: &mut SqliteConnection,
     user: UserId,
@@ -726,14 +1085,17 @@ async fn item_role(
         Some(folder_id) => folder_role(conn, user, folder_id).await?,
         None => None,
     };
-    let direct: Option<String> =
-        sqlx::query_scalar("SELECT role FROM item_access WHERE user_id = ? AND item_id = ?")
-            .bind(user.0)
-            .bind(item.id.to_string())
-            .fetch_optional(&mut *conn)
-            .await?;
-    let direct = direct.as_deref().map(parse_role).transpose()?;
-    Ok(in_folder.max(direct))
+    let direct: Vec<String> = sqlx::query_scalar(
+        "SELECT role FROM item_access WHERE user_id = ?1 AND item_id = ?2
+         UNION ALL
+         SELECT ig.role FROM item_groups ig JOIN group_members gm ON gm.group_id = ig.group_id
+         WHERE gm.user_id = ?1 AND ig.item_id = ?2",
+    )
+    .bind(user.0)
+    .bind(item.id.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(in_folder.max(highest(direct)?))
 }
 
 async fn stored_item(
@@ -749,7 +1111,10 @@ async fn stored_item(
 }
 
 /// Approved, and not removed from the team.
-async fn require_shareable(conn: &mut SqliteConnection, user: UserId) -> Result<(), ApiError> {
+pub(crate) async fn require_shareable(
+    conn: &mut SqliteConnection,
+    user: UserId,
+) -> Result<(), ApiError> {
     match user_entry(conn, user).await? {
         Some(entry) if entry.approval.is_some() && !entry.removed => Ok(()),
         _ => Err(ApiError::Forbidden(format!(
@@ -758,17 +1123,27 @@ async fn require_shareable(conn: &mut SqliteConnection, user: UserId) -> Result<
     }
 }
 
-/// A folder must keep a manager: someone has to be able to share it and change its key.
+/// A folder must keep a manager, a person or a group: someone has to be able to share it
+/// and change its key.
 async fn require_another_manager(
     conn: &mut SqliteConnection,
     folder_id: FolderId,
-    leaving: UserId,
+    leaving: Option<UserId>,
+    leaving_group: Option<GroupId>,
 ) -> Result<(), ApiError> {
     let others: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM members WHERE folder_id = ? AND role = 'manage' AND user_id != ?",
+        "SELECT (SELECT COUNT(*) FROM members
+                 WHERE folder_id = ?1 AND role = 'manage' AND user_id != ?2)
+              + (SELECT COUNT(*) FROM folder_groups
+                 WHERE folder_id = ?1 AND role = 'manage' AND group_id != ?3)",
     )
     .bind(folder_id.to_string())
-    .bind(leaving.0)
+    .bind(leaving.map_or(0, |user| user.0))
+    .bind(
+        leaving_group
+            .map(|group| group.to_string())
+            .unwrap_or_default(),
+    )
     .fetch_one(conn)
     .await?;
     if others == 0 {
@@ -798,6 +1173,26 @@ pub(crate) async fn folder_members(
         .collect()
 }
 
+async fn folder_groups(
+    conn: &mut SqliteConnection,
+    folder_id: FolderId,
+) -> Result<Vec<GroupShare>, ApiError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT group_id, role FROM folder_groups WHERE folder_id = ? ORDER BY group_id",
+    )
+    .bind(folder_id.to_string())
+    .fetch_all(conn)
+    .await?;
+    rows.into_iter()
+        .map(|(group, role)| {
+            Ok(GroupShare {
+                group_id: parse_group(&group)?,
+                role: parse_role(&role)?,
+            })
+        })
+        .collect()
+}
+
 async fn generation(conn: &mut SqliteConnection, folder_id: FolderId) -> Result<u32, ApiError> {
     sqlx::query_scalar("SELECT generation FROM folders WHERE id = ?")
         .bind(folder_id.to_string())
@@ -806,12 +1201,14 @@ async fn generation(conn: &mut SqliteConnection, folder_id: FolderId) -> Result<
         .ok_or(ApiError::NotFound)
 }
 
-/// A folder's current key as one member holds it.
+/// A folder's current key as one member holds it: wrapped for them, or for a group
+/// they're in.
 struct MemberFolderKey {
     info: Sealed,
     wrapped_key: WrappedKey,
     generation: u32,
     chain: Vec<KeyLink>,
+    via_group: Option<ViaGroup>,
 }
 
 async fn current_key(
@@ -819,18 +1216,40 @@ async fn current_key(
     user: UserId,
     folder_id: FolderId,
 ) -> Result<Option<MemberFolderKey>, ApiError> {
-    let row: Option<(String, String, u32)> = sqlx::query_as(
-        "SELECT m.wrapped_key, f.info, f.generation
-         FROM members m JOIN folders f ON f.id = m.folder_id
-         WHERE m.user_id = ? AND m.folder_id = ?",
-    )
-    .bind(user.0)
-    .bind(folder_id.to_string())
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((wrapped_key, info, generation)) = row else {
-        return Ok(None);
+    let direct: Option<String> =
+        sqlx::query_scalar("SELECT wrapped_key FROM members WHERE user_id = ? AND folder_id = ?")
+            .bind(user.0)
+            .bind(folder_id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    let (wrapped_key, via_group) = match direct {
+        Some(wrapped_key) => (wrapped_key, None),
+        None => {
+            let row: Option<(String, String, u32)> = sqlx::query_as(
+                "SELECT fg.wrapped_key, fg.group_id, fg.group_generation
+                 FROM folder_groups fg JOIN group_members gm ON gm.group_id = fg.group_id
+                 WHERE gm.user_id = ? AND fg.folder_id = ?
+                 ORDER BY fg.group_id LIMIT 1",
+            )
+            .bind(user.0)
+            .bind(folder_id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+            let Some((wrapped_key, group_id, generation)) = row else {
+                return Ok(None);
+            };
+            let via = ViaGroup {
+                group_id: parse_group(&group_id)?,
+                generation,
+            };
+            (wrapped_key, Some(via))
+        }
     };
+    let (info, generation): (String, u32) =
+        sqlx::query_as("SELECT info, generation FROM folders WHERE id = ?")
+            .bind(folder_id.to_string())
+            .fetch_one(&mut *conn)
+            .await?;
     let links: Vec<(u32, String)> = sqlx::query_as(
         "SELECT generation, previous FROM folder_keys WHERE folder_id = ? ORDER BY generation",
     )
@@ -851,43 +1270,63 @@ async fn current_key(
         wrapped_key: serde_json::from_str(&wrapped_key)?,
         generation,
         chain,
+        via_group,
     }))
 }
 
+/// `user`'s role in every folder they can open and on every item they reach directly, the
+/// highest of the ways they reach each.
 async fn user_roles(conn: &mut SqliteConnection, user: UserId) -> Result<Roles, ApiError> {
-    let folders: Vec<(String, String)> =
-        sqlx::query_as("SELECT folder_id, role FROM members WHERE user_id = ?")
-            .bind(user.0)
-            .fetch_all(&mut *conn)
-            .await?;
-    let items: Vec<(String, String)> =
-        sqlx::query_as("SELECT item_id, role FROM item_access WHERE user_id = ?")
-            .bind(user.0)
-            .fetch_all(&mut *conn)
-            .await?;
+    let highest_by = |rows: Vec<(String, String)>| -> Result<BTreeMap<String, Role>, ApiError> {
+        let mut best = BTreeMap::new();
+        for (id, role) in rows {
+            let role = parse_role(&role)?;
+            let entry = best.entry(id).or_insert(role);
+            *entry = (*entry).max(role);
+        }
+        Ok(best)
+    };
+    let folders: Vec<(String, String)> = sqlx::query_as(
+        "SELECT folder_id, role FROM members WHERE user_id = ?1
+         UNION ALL
+         SELECT fg.folder_id, fg.role FROM folder_groups fg
+         JOIN group_members gm ON gm.group_id = fg.group_id WHERE gm.user_id = ?1",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    let items: Vec<(String, String)> = sqlx::query_as(
+        "SELECT item_id, role FROM item_access WHERE user_id = ?1
+         UNION ALL
+         SELECT ig.item_id, ig.role FROM item_groups ig
+         JOIN group_members gm ON gm.group_id = ig.group_id WHERE gm.user_id = ?1",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
     Ok(Roles {
-        folders: folders
+        folders: highest_by(folders)?
             .into_iter()
             .map(|(folder_id, role)| {
                 Ok(FolderRole {
                     folder_id: parse_folder(&folder_id)?,
-                    role: parse_role(&role)?,
+                    role,
                 })
             })
             .collect::<Result<_, ApiError>>()?,
-        items: items
+        items: highest_by(items)?
             .into_iter()
             .map(|(item_id, role)| {
                 Ok(ItemRole {
-                    item_id: ItemId::from_str(&item_id)
-                        .map_err(|_| ApiError::Internal(format!("bad stored item id {item_id}")))?,
-                    role: parse_role(&role)?,
+                    item_id: parse_item(&item_id)?,
+                    role,
                 })
             })
             .collect::<Result<_, ApiError>>()?,
     })
 }
 
+/// Makes `user` a member of a folder themselves.
 async fn join(
     conn: &mut SqliteConnection,
     user: UserId,
@@ -907,17 +1346,12 @@ async fn join(
     .bind(role.name())
     .execute(&mut *conn)
     .await?;
-    sqlx::query("INSERT INTO membership_log (seq, user_id, folder_id, joined) VALUES (?, ?, ?, 1)")
-        .bind(seq)
-        .bind(user.0)
-        .bind(folder_id.to_string())
-        .execute(&mut *conn)
-        .await?;
-    Ok(())
+    reconcile(conn, user).await
 }
 
-/// Takes `user` out of a folder: their access ends at once, their feed tells their devices
-/// to drop it, and the folder is marked for a new key if anyone's still in it.
+/// Takes `user` out of a folder they're in themselves. Unless a group still gives it,
+/// their access ends at once, their feed tells their devices to drop it, and the folder is
+/// marked for a new key if anyone can still open it.
 pub(crate) async fn leave(
     conn: &mut SqliteConnection,
     user: UserId,
@@ -928,25 +1362,11 @@ pub(crate) async fn leave(
         .bind(folder_id.to_string())
         .execute(&mut *conn)
         .await?;
-    let seq = next_seq(conn).await?;
-    sqlx::query("INSERT INTO membership_log (seq, user_id, folder_id, joined) VALUES (?, ?, ?, 0)")
-        .bind(seq)
-        .bind(user.0)
-        .bind(folder_id.to_string())
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query(
-        "UPDATE folders SET needs_rekey = 1
-         WHERE id = ? AND EXISTS (SELECT 1 FROM members WHERE folder_id = ?)",
-    )
-    .bind(folder_id.to_string())
-    .bind(folder_id.to_string())
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
+    reconcile(conn, user).await
 }
 
-/// Takes away `user`'s direct access to an item, and tells their devices to drop it.
+/// Takes away `user`'s own direct access to an item; unless a group still gives it, their
+/// devices drop it.
 pub(crate) async fn leave_item(
     conn: &mut SqliteConnection,
     user: UserId,
@@ -957,16 +1377,155 @@ pub(crate) async fn leave_item(
         .bind(item_id)
         .execute(&mut *conn)
         .await?;
-    let seq = next_seq(conn).await?;
-    sqlx::query("INSERT INTO item_leave_log (seq, user_id, item_id) VALUES (?, ?, ?)")
+    reconcile(conn, user).await
+}
+
+/// Sends `user` the current key of each of these folders they can still open, after the
+/// way they reached it (a group) went away: the copy their devices hold may be the one
+/// wrapped for that group.
+pub(crate) async fn resend_keys(
+    conn: &mut SqliteConnection,
+    user: UserId,
+    folders: &[String],
+) -> Result<(), ApiError> {
+    for folder_id in folders {
+        let still: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM access WHERE user_id = ? AND folder_id = ?)",
+        )
+        .bind(user.0)
+        .bind(folder_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if still {
+            let seq = next_seq(conn).await?;
+            sqlx::query("INSERT INTO rekey_log (seq, user_id, folder_id) VALUES (?, ?, ?)")
+                .bind(seq)
+                .bind(user.0)
+                .bind(folder_id)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Brings what `user` can open up to date after anything that may have changed it: the
+/// folders they can open and the items they reach directly, themselves or through their
+/// groups. Each folder or item gained or lost goes in their feed as a join or a leave, and
+/// a folder they lost is marked for a new key if anyone can still open it.
+pub(crate) async fn reconcile(conn: &mut SqliteConnection, user: UserId) -> Result<(), ApiError> {
+    let reachable: BTreeSet<String> = sqlx::query_scalar(
+        "SELECT folder_id FROM members WHERE user_id = ?1
+         UNION
+         SELECT fg.folder_id FROM folder_groups fg
+         JOIN group_members gm ON gm.group_id = fg.group_id WHERE gm.user_id = ?1",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let held: BTreeSet<String> =
+        sqlx::query_scalar("SELECT folder_id FROM access WHERE user_id = ?")
+            .bind(user.0)
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+    for folder_id in reachable.difference(&held) {
+        let seq = next_seq(conn).await?;
+        sqlx::query("INSERT INTO access (user_id, folder_id, joined_seq) VALUES (?, ?, ?)")
+            .bind(user.0)
+            .bind(folder_id)
+            .bind(seq)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query(
+            "INSERT INTO membership_log (seq, user_id, folder_id, joined) VALUES (?, ?, ?, 1)",
+        )
         .bind(seq)
         .bind(user.0)
-        .bind(item_id)
+        .bind(folder_id)
         .execute(&mut *conn)
         .await?;
+    }
+    for folder_id in held.difference(&reachable) {
+        sqlx::query("DELETE FROM access WHERE user_id = ? AND folder_id = ?")
+            .bind(user.0)
+            .bind(folder_id)
+            .execute(&mut *conn)
+            .await?;
+        let seq = next_seq(conn).await?;
+        sqlx::query(
+            "INSERT INTO membership_log (seq, user_id, folder_id, joined) VALUES (?, ?, ?, 0)",
+        )
+        .bind(seq)
+        .bind(user.0)
+        .bind(folder_id)
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
+            "UPDATE folders SET needs_rekey = 1
+             WHERE id = ?1 AND EXISTS (SELECT 1 FROM access WHERE folder_id = ?1)",
+        )
+        .bind(folder_id)
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    let reachable: BTreeSet<String> = sqlx::query_scalar(
+        "SELECT item_id FROM item_access WHERE user_id = ?1
+         UNION
+         SELECT ig.item_id FROM item_groups ig
+         JOIN group_members gm ON gm.group_id = ig.group_id WHERE gm.user_id = ?1",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let held: BTreeSet<String> =
+        sqlx::query_scalar("SELECT item_id FROM item_reach WHERE user_id = ?")
+            .bind(user.0)
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+    for item_id in reachable.difference(&held) {
+        sqlx::query("INSERT INTO item_reach (user_id, item_id) VALUES (?, ?)")
+            .bind(user.0)
+            .bind(item_id)
+            .execute(&mut *conn)
+            .await?;
+        let seq = next_seq(conn).await?;
+        sqlx::query("INSERT INTO item_join_log (seq, user_id, item_id) VALUES (?, ?, ?)")
+            .bind(seq)
+            .bind(user.0)
+            .bind(item_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    for item_id in held.difference(&reachable) {
+        sqlx::query("DELETE FROM item_reach WHERE user_id = ? AND item_id = ?")
+            .bind(user.0)
+            .bind(item_id)
+            .execute(&mut *conn)
+            .await?;
+        let seq = next_seq(conn).await?;
+        sqlx::query("INSERT INTO item_leave_log (seq, user_id, item_id) VALUES (?, ?, ?)")
+            .bind(seq)
+            .bind(user.0)
+            .bind(item_id)
+            .execute(&mut *conn)
+            .await?;
+    }
     Ok(())
 }
 
 pub(crate) fn parse_folder(text: &str) -> Result<FolderId, ApiError> {
     FolderId::from_str(text).map_err(|_| ApiError::Internal(format!("bad stored folder id {text}")))
+}
+
+fn parse_item(text: &str) -> Result<ItemId, ApiError> {
+    ItemId::from_str(text).map_err(|_| ApiError::Internal(format!("bad stored item id {text}")))
 }

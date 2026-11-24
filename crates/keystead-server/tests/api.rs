@@ -7,19 +7,23 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use keystead_core::api::{
-    AcceptInviteRequest, AddMemberRequest, ApprovalRequest, Challenge, ChallengeRequest, Conflict,
-    CreateFolderRequest, DeviceList, Directory, Enrolled, Invite, InviteRequest, Member, MemberKey,
-    Members, PutItemRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest,
-    RekeyRequest, Role, RoleRequest, Session, SetupRequest, SignInRequest, SyncEntry, SyncPage,
+    AcceptInviteRequest, AddFolderGroupRequest, AddGroupMemberRequest, AddMemberRequest,
+    ApprovalRequest, Challenge, ChallengeRequest, Conflict, CreateFolderRequest,
+    CreateGroupRequest, DeviceList, Directory, Enrolled, FolderRole, GroupFolderKey,
+    GroupMemberKey, GroupRekeyRequest, GroupShare, Groups, Invite, InviteRequest, ItemRole, Member,
+    MemberKey, Members, PutItemRequest, RecoverRequest, RecoveryChallenge,
+    RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest, Session, SetupRequest,
+    SignInRequest, SyncEntry, SyncPage, UpdateGroupRequest, ViaGroup,
 };
 use keystead_core::directory::DirectoryEntry;
-use keystead_core::ids::{DeviceId, FolderId, ItemId, UserId};
+use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries};
+use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{
-    Details, EncryptedItem, FolderInfo, ItemKeys, ItemVersion, Overview, PersonKey,
+    Details, EncryptedItem, FolderInfo, GroupKeyCopy, ItemKeys, ItemVersion, Overview, PersonKey,
 };
 use keystead_core::keys::{
-    AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, ItemKey, SoftwareDeviceKey,
-    recovery_message, sign_in_message,
+    AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, GroupKeys, GroupSecret, ItemKey,
+    SoftwareDeviceKey, recovery_message, sign_in_message,
 };
 use keystead_server::{AppState, router};
 use serde::Serialize;
@@ -220,6 +224,7 @@ impl Person {
                     base_version,
                     item: item.clone(),
                     roles,
+                    group_roles: Vec::new(),
                 }),
             )
             .await
@@ -798,7 +803,7 @@ async fn an_item_outside_folders_reaches_only_its_owner_and_who_it_is_shared_wit
     let (status, body) = server.call(Method::GET, "/v1/health", None, None).await;
     assert_eq!(
         (status, &body["item_format"]),
-        (StatusCode::OK, &Value::from(2)),
+        (StatusCode::OK, &Value::from(3)),
         "{body}"
     );
 
@@ -1246,6 +1251,8 @@ async fn a_database_from_0_1_0_is_upgraded() {
             .unwrap();
         sqlx::raw_sql(
             "INSERT INTO folders (id, info) VALUES ('f1', '{}');
+             INSERT INTO members (user_id, folder_id, joined_seq, wrapped_key)
+                 VALUES (1, 'f1', 4, '{}');
              INSERT INTO items (id, folder_id, version, seq, body) VALUES ('i1', 'f1', 1, 5, '{}');",
         )
         .execute(&pool)
@@ -1274,6 +1281,13 @@ async fn a_database_from_0_1_0_is_upgraded() {
             .await
             .unwrap();
     assert_eq!(item, ("i1".to_owned(), Some("f1".to_owned()), 5));
+    // Members can open their folders, and since when is kept.
+    let access: (i64, String, i64) =
+        sqlx::query_as("SELECT user_id, folder_id, joined_seq FROM access")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(access, (1, "f1".to_owned(), 4));
     sqlx::raw_sql(
         "INSERT INTO items (id, folder_id, version, seq, body) VALUES ('i2', NULL, 1, 6, '{}');
          INSERT INTO item_access (user_id, item_id) VALUES (1, 'i2');",
@@ -1285,7 +1299,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }
@@ -1498,6 +1512,7 @@ async fn removing_someone_from_a_folder_ends_their_access_and_changes_its_key() 
         json(&RekeyRequest {
             generation,
             wrapped_keys: wrapped(people),
+            group_keys: Vec::new(),
             previous: new_key.seal_previous(&key, folder_id, generation),
             info: FolderInfo {
                 name: "Production".into(),
@@ -1659,4 +1674,455 @@ async fn the_owner_can_remove_someone_from_the_team() {
     let dropped = next(&alice, &item_key, &shared, item.keys.clone(), "own-secret");
     let (status, body) = alice.put(&server, &dropped, Some(2)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// A group's secret wrapped for `person`.
+fn group_copy(
+    person: &Person,
+    secret: &GroupSecret,
+    group: GroupId,
+    generation: u32,
+) -> GroupMemberKey {
+    GroupMemberKey {
+        user_id: person.user_id,
+        wrapped_secret: person
+            .keys
+            .public()
+            .wrap_group_secret(secret, group, generation)
+            .unwrap(),
+    }
+}
+
+/// The group keys `person` gets from a sync page, after checking each group's entries.
+fn keyring_from(page: &SyncPage, person: &Person, people: &[&Person]) -> GroupKeyring {
+    let keys_of = |user: UserId| {
+        people
+            .iter()
+            .find(|someone| someone.user_id == user)
+            .map(|someone| someone.keys.public())
+    };
+    let mut keyring = GroupKeyring::default();
+    for entry in &page.entries {
+        if let SyncEntry::Group {
+            group_id,
+            entries,
+            generation,
+            wrapped_secret,
+            chain,
+            ..
+        } = entry
+        {
+            let latest = verify_entries(entries, UserId(1), keys_of).unwrap();
+            assert_eq!(latest.generation, *generation);
+            let secret = person
+                .keys
+                .unwrap_group_secret(wrapped_secret, *group_id, *generation)
+                .unwrap();
+            keyring.add(latest, secret, chain).unwrap();
+        }
+    }
+    keyring
+}
+
+fn has(page: &SyncPage, matches: impl Fn(&SyncEntry) -> bool) -> bool {
+    page.entries.iter().any(matches)
+}
+
+#[tokio::test]
+async fn groups_share_folders_and_logins_and_lose_access_when_someone_leaves() {
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    let people = [&alice, &bob, &carol];
+
+    // Only the owner makes groups.
+    let group_id = GroupId::random();
+    let secret = GroupSecret::generate();
+    let group_keys = GroupKeys::derive(&secret);
+    let mut first = GroupEntry::first(group_id, "Ops", &group_keys, vec![alice.user_id]);
+    let members = vec![
+        group_copy(&alice, &secret, group_id, 1),
+        group_copy(&bob, &secret, group_id, 1),
+    ];
+    first.sign(bob.user_id, &bob.keys);
+    let request = CreateGroupRequest {
+        entry: first.clone(),
+        members: members.clone(),
+    };
+    let (status, _) = server
+        .call(Method::POST, "/v1/groups", bob.token(), json(&request))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    first.sign(alice.user_id, &alice.keys);
+    let request = CreateGroupRequest {
+        entry: first.clone(),
+        members,
+    };
+    let (status, body) = server
+        .call(Method::POST, "/v1/groups", alice.token(), json(&request))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // A folder shared with the group reaches its members, with the group's role.
+    let (folder_id, folder_key) = create_folder(&server, &alice, "Production").await;
+    let item = new_item(&alice, folder_id, &folder_key, "Database");
+    let (status, body) = alice.put(&server, &item, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let share = AddFolderGroupRequest {
+        group_id,
+        wrapped_key: group_keys
+            .public()
+            .wrap_folder_key(&folder_key, folder_id)
+            .unwrap(),
+        group_generation: 1,
+        role: Role::Edit,
+        generation: 0,
+    };
+    let path = format!("/v1/folders/{folder_id}/groups");
+    let (status, body) = server
+        .call(Method::POST, &path, alice.token(), json(&share))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let page = bob.sync(&server, 0, 100).await;
+    let keyring = keyring_from(&page, &bob, &people);
+    let (wrapped, via, items) = page
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            SyncEntry::Joined {
+                folder_id: id,
+                wrapped_key,
+                via_group,
+                items,
+                ..
+            } if *id == folder_id => Some((wrapped_key, *via_group, items)),
+            _ => None,
+        })
+        .expect("Bob joined the folder");
+    assert_eq!(
+        via,
+        Some(ViaGroup {
+            group_id,
+            generation: 1
+        })
+    );
+    let bobs_key = keyring
+        .get(group_id, 1)
+        .unwrap()
+        .unwrap_folder_key(wrapped, folder_id)
+        .unwrap();
+    assert_eq!(open_password(&bob, &items[0], Some(&bobs_key)), "pw");
+    assert_eq!(
+        page.roles.unwrap().folders,
+        [FolderRole {
+            folder_id,
+            role: Role::Edit
+        }]
+    );
+    let bob_cursor = page.cursor;
+
+    // So does a login shared with the group: format 3, opened with the group's key.
+    let (login, login_key) = private_item(&server, &alice, "Pager").await;
+    let mut keys = login.keys.clone();
+    keys.groups.push(GroupKeyCopy {
+        group_id,
+        generation: 1,
+        wrapped_key: group_keys
+            .public()
+            .wrap_item_key(&login_key, login.id)
+            .unwrap(),
+    });
+    let shared = next(&alice, &login_key, &login, keys, "own-secret");
+    assert_eq!(shared.format, 3);
+    let put = PutItemRequest {
+        base_version: Some(1),
+        item: shared.clone(),
+        roles: Vec::new(),
+        group_roles: vec![GroupShare {
+            group_id,
+            role: Role::View,
+        }],
+    };
+    let (status, _) = server
+        .call(
+            Method::PUT,
+            &format!("/v1/items/{}", shared.id),
+            bob.token(),
+            json(&PutItemRequest {
+                item: next(&bob, &login_key, &login, shared.keys.clone(), "x"),
+                ..put.clone()
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = server
+        .call(
+            Method::PUT,
+            &format!("/v1/items/{}", shared.id),
+            alice.token(),
+            json(&put),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page = bob.sync(&server, bob_cursor, 100).await;
+    let copies: Vec<_> = item_entries(&page)
+        .into_iter()
+        .filter(|(id, _)| *id == shared.id)
+        .collect();
+    assert_eq!(copies, [(shared.id, 2)]);
+    let key = shared
+        .unlock_with(None, &bob.keys, bob.user_id, &keyring)
+        .unwrap();
+    assert_eq!(shared.open_details(&key).unwrap().password, "own-secret");
+    assert!(page.roles.unwrap().items.contains(&ItemRole {
+        item_id: shared.id,
+        role: Role::View
+    }));
+    let bob_cursor = page.cursor;
+
+    // Only managers add people. Carol, added later, gets what the group already had.
+    let carol_before = carol.sync(&server, 0, 100).await.cursor;
+    let add = AddGroupMemberRequest {
+        user_id: carol.user_id,
+        generation: 1,
+        wrapped_secret: carol
+            .keys
+            .public()
+            .wrap_group_secret(&secret, group_id, 1)
+            .unwrap(),
+    };
+    let path = format!("/v1/groups/{group_id}/members");
+    let (status, _) = server
+        .call(Method::POST, &path, bob.token(), json(&add))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = server
+        .call(Method::POST, &path, alice.token(), json(&add))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let page = carol.sync(&server, carol_before, 100).await;
+    assert!(has(
+        &page,
+        |entry| matches!(entry, SyncEntry::Group { group_id: id, .. } if *id == group_id)
+    ));
+    assert!(has(
+        &page,
+        |entry| matches!(entry, SyncEntry::Joined { folder_id: id, .. } if *id == folder_id)
+    ));
+    let copies: Vec<_> = item_entries(&page)
+        .into_iter()
+        .filter(|(id, _)| *id == shared.id)
+        .collect();
+    assert_eq!(copies, [(shared.id, 2)]);
+    let carol_cursor = page.cursor;
+
+    // Only the owner and managers rename a group or change its managers.
+    let mut renamed = first.next();
+    renamed.name = "Operations".into();
+    renamed.managers.push(carol.user_id);
+    renamed.sign(carol.user_id, &carol.keys);
+    let path = format!("/v1/groups/{group_id}");
+    let (status, _) = server
+        .call(
+            Method::PUT,
+            &path,
+            carol.token(),
+            json(&UpdateGroupRequest {
+                entry: renamed.clone(),
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    renamed.sign(alice.user_id, &alice.keys);
+    let (status, body) = server
+        .call(
+            Method::PUT,
+            &path,
+            alice.token(),
+            json(&UpdateGroupRequest {
+                entry: renamed.clone(),
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Bob can't remove others; Alice removes him, and everything the group gave him goes.
+    let path = format!("/v1/groups/{group_id}/members/{}", carol.user_id);
+    let (status, _) = server.call(Method::DELETE, &path, bob.token(), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let path = format!("/v1/groups/{group_id}/members/{}", bob.user_id);
+    let (status, body) = server
+        .call(Method::DELETE, &path, alice.token(), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let page = bob.sync(&server, bob_cursor, 100).await;
+    assert!(has(
+        &page,
+        |entry| matches!(entry, SyncEntry::LeftGroup { group_id: id, .. } if *id == group_id)
+    ));
+    assert!(has(
+        &page,
+        |entry| matches!(entry, SyncEntry::Left { folder_id: id, .. } if *id == folder_id)
+    ));
+    assert!(has(
+        &page,
+        |entry| matches!(entry, SyncEntry::LeftItem { item_id, .. } if *item_id == shared.id)
+    ));
+    let (status, _) = server
+        .call(
+            Method::GET,
+            &format!("/v1/folders/{folder_id}/members"),
+            bob.token(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The group needs a new key first; the folder's waits for it.
+    let page = alice.sync(&server, 0, 1000).await;
+    assert_eq!(page.group_rekey_needed, [group_id]);
+    assert!(page.rekey_needed.is_empty());
+    let new_folder_key = FolderKey::generate();
+    let folder_rekey = |group_generation: u32, keys: &GroupKeys| RekeyRequest {
+        generation: 1,
+        wrapped_keys: vec![MemberKey {
+            user_id: alice.user_id,
+            wrapped_key: alice
+                .keys
+                .public()
+                .wrap_folder_key(&new_folder_key, folder_id)
+                .unwrap(),
+        }],
+        group_keys: vec![GroupFolderKey {
+            group_id,
+            group_generation,
+            wrapped_key: keys
+                .public()
+                .wrap_folder_key(&new_folder_key, folder_id)
+                .unwrap(),
+        }],
+        previous: new_folder_key.seal_previous(&folder_key, folder_id, 1),
+        info: FolderInfo {
+            name: "Production".into(),
+        }
+        .seal(folder_id, &new_folder_key)
+        .unwrap(),
+    };
+    let path = format!("/v1/folders/{folder_id}/rekey");
+    let (status, _) = server
+        .call(
+            Method::POST,
+            &path,
+            alice.token(),
+            json(&folder_rekey(1, &group_keys)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let new_secret = GroupSecret::generate();
+    let new_group_keys = GroupKeys::derive(&new_secret);
+    let mut rekeyed = renamed.next_generation(&new_group_keys);
+    rekeyed.managers.retain(|&manager| manager != bob.user_id);
+    rekeyed.sign(alice.user_id, &alice.keys);
+    let rekey = GroupRekeyRequest {
+        entry: rekeyed,
+        members: vec![
+            group_copy(&alice, &new_secret, group_id, 2),
+            group_copy(&carol, &new_secret, group_id, 2),
+        ],
+        previous: new_group_keys.seal_previous(&secret, group_id, 2),
+    };
+    let group_path = format!("/v1/groups/{group_id}/rekey");
+    let mut with_bob = rekey.clone();
+    with_bob
+        .members
+        .push(group_copy(&bob, &new_secret, group_id, 2));
+    let (status, _) = server
+        .call(Method::POST, &group_path, alice.token(), json(&with_bob))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body) = server
+        .call(Method::POST, &group_path, alice.token(), json(&rekey))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let page = alice.sync(&server, 0, 1000).await;
+    assert!(page.group_rekey_needed.is_empty());
+    assert_eq!(page.rekey_needed, [folder_id]);
+
+    // The folder's new key goes to the group's new key, not the old one Bob still knows.
+    let (status, _) = server
+        .call(
+            Method::POST,
+            &path,
+            alice.token(),
+            json(&folder_rekey(1, &group_keys)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body) = server
+        .call(
+            Method::POST,
+            &path,
+            alice.token(),
+            json(&folder_rekey(2, &new_group_keys)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Carol gets the group's new key, then the folder's, and still opens the login shared
+    // with the group's first key, through its chain.
+    let page = carol.sync(&server, carol_cursor, 100).await;
+    let keyring = keyring_from(&page, &carol, &people);
+    let (info, wrapped, via) = page
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            SyncEntry::Rekeyed {
+                folder_id: id,
+                info,
+                wrapped_key,
+                via_group,
+                ..
+            } if *id == folder_id => Some((info, wrapped_key, *via_group)),
+            _ => None,
+        })
+        .expect("the folder's new key");
+    assert_eq!(
+        via,
+        Some(ViaGroup {
+            group_id,
+            generation: 2
+        })
+    );
+    let opened = keyring
+        .get(group_id, 2)
+        .unwrap()
+        .unwrap_folder_key(wrapped, folder_id)
+        .unwrap();
+    assert_eq!(
+        FolderInfo::open(info, folder_id, &opened).unwrap().name,
+        "Production"
+    );
+    let key = shared
+        .unlock_with(None, &carol.keys, carol.user_id, &keyring)
+        .unwrap();
+    assert_eq!(shared.open_details(&key).unwrap().password, "own-secret");
+
+    // Anyone can list the groups, and their entries check out.
+    let (status, body) = server
+        .call(Method::GET, "/v1/groups", bob.token(), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let groups: Groups = decode(body);
+    let info = &groups.groups[0];
+    let keys_of = |user: UserId| {
+        people
+            .iter()
+            .find(|someone| someone.user_id == user)
+            .map(|someone| someone.keys.public())
+    };
+    let latest = verify_entries(&info.entries, alice.user_id, keys_of).unwrap();
+    assert_eq!((latest.name.as_str(), latest.generation), ("Operations", 2));
+    assert_eq!(info.members, [alice.user_id, carol.user_id]);
+    assert!(!info.needs_rekey);
 }

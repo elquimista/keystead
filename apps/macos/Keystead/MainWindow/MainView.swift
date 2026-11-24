@@ -94,7 +94,7 @@ struct WelcomeView: View {
 
     private var joinForm: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Paste the invite your admin sent you.")
+            Text("Paste the invite your team's owner sent you.")
             TextField(
                 "", text: $invite, prompt: Text("keystead join https://… --owner …"), axis: .vertical
             )
@@ -115,8 +115,8 @@ struct WelcomeView: View {
 
     private var setUpForm: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("For whoever runs your team's Keystead server. You'll become its owner: you "
-                + "invite people, approve them, and decide who sees which folders.")
+            Text("For whoever runs your team's Keystead server. You'll become your team's owner: "
+                + "you invite people, approve them and make groups.")
                 .fixedSize(horizontal: false, vertical: true)
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 12) {
                 GridRow {

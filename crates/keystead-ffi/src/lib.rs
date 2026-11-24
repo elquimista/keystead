@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use keystead_client::{EditOutcome, InviteInfo, MemberRow, NewAccount};
+use keystead_client::{EditOutcome, GroupShareRow, InviteInfo, MemberRow, NewAccount, SyncSummary};
 use keystead_core::api::Role as CoreRole;
 use keystead_core::encoding::Bytes;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
@@ -185,6 +185,59 @@ impl From<MemberRow> for Person {
     }
 }
 
+/// A group that can open a folder or a login, and its role there.
+#[derive(uniffi::Record)]
+pub struct GroupShare {
+    pub group_id: String,
+    pub name: String,
+    pub role: Role,
+    /// You're in the group.
+    pub is_mine: bool,
+}
+
+impl From<GroupShareRow> for GroupShare {
+    fn from(row: GroupShareRow) -> Self {
+        Self {
+            group_id: row.group_id.to_string(),
+            name: row.name,
+            role: row.role.into(),
+            is_mine: row.mine,
+        }
+    }
+}
+
+/// Everyone who can open a folder or a login directly, and the groups it's shared with.
+#[derive(uniffi::Record)]
+pub struct Sharing {
+    pub people: Vec<Person>,
+    pub groups: Vec<GroupShare>,
+}
+
+/// Someone in a group.
+#[derive(uniffi::Record)]
+pub struct GroupMember {
+    pub user_id: i64,
+    pub name: String,
+    pub is_manager: bool,
+    pub is_me: bool,
+}
+
+/// A group on the team, and what you can do with it.
+#[derive(uniffi::Record)]
+pub struct GroupSummary {
+    pub id: String,
+    pub name: String,
+    /// Managers first, then by name.
+    pub members: Vec<GroupMember>,
+    /// You're in it.
+    pub is_member: bool,
+    /// You can rename it, change its managers and remove people: you're the owner, or a
+    /// manager in it.
+    pub can_manage: bool,
+    /// You can add people: you can manage it and you're in it.
+    pub can_add: bool,
+}
+
 /// A folder and your role in it.
 #[derive(uniffi::Record)]
 pub struct FolderSummary {
@@ -237,7 +290,9 @@ pub struct ItemSummary {
     pub owner: Option<String>,
     /// Everyone it's shared with directly, except you.
     pub shared_with: Vec<String>,
-    /// You can open it only because it was shared with you directly.
+    /// The groups it's shared with directly.
+    pub shared_with_groups: Vec<String>,
+    /// You can open it only because it was shared with you, or a group you're in, directly.
     pub shared_with_me: bool,
     /// What you may do with it.
     pub role: Role,
@@ -248,8 +303,19 @@ pub struct SyncResult {
     pub received: u32,
     /// Items ignored because no approved user signed them.
     pub rejected: u32,
-    /// Why a folder you manage didn't get the new key it needs; the next sync retries.
+    /// Why a folder or group you manage didn't get the new key it needs; the next sync
+    /// retries.
     pub rekey_problems: Vec<String>,
+}
+
+impl From<SyncSummary> for SyncResult {
+    fn from(summary: SyncSummary) -> Self {
+        Self {
+            received: summary.received.try_into().unwrap_or(u32::MAX),
+            rejected: summary.rejected.try_into().unwrap_or(u32::MAX),
+            rekey_problems: summary.rekey_problems,
+        }
+    }
 }
 
 /// An unlocked vault. Every method blocks on the network or disk, so call it off the
@@ -418,12 +484,7 @@ impl Vault {
 
     /// Fetches changes from the server and saves them.
     pub fn sync(&self) -> Result<SyncResult, CoreError> {
-        let summary = self.vault()?.sync()?;
-        Ok(SyncResult {
-            received: summary.received.try_into().unwrap_or(u32::MAX),
-            rejected: summary.rejected.try_into().unwrap_or(u32::MAX),
-            rekey_problems: summary.rekey_problems,
-        })
+        Ok(self.vault()?.sync()?.into())
     }
 
     /// Every login's searchable fields, from the local copy.
@@ -440,6 +501,7 @@ impl Vault {
                 url: row.url,
                 owner: row.owner,
                 shared_with: row.shared_with,
+                shared_with_groups: row.shared_with_groups,
                 shared_with_me: row.shared_with_me,
                 role: row.role.into(),
             })
@@ -630,7 +692,7 @@ impl Vault {
             .share_item(item_id_from(&item_id)?, UserId(user_id), role.into())?)
     }
 
-    /// Who has a login directly: its owner and everyone it's shared with, with roles.
+    /// Who has a login directly: whoever made it and everyone it's shared with, with roles.
     pub fn login_people(&self, item_id: String) -> Result<Vec<Person>, CoreError> {
         Ok(self
             .vault()?
@@ -657,6 +719,154 @@ impl Vault {
         Ok(self
             .vault()?
             .unshare_item(item_id_from(&item_id)?, UserId(user_id))?)
+    }
+
+    // Groups
+
+    /// Every group on the team, from the local copy.
+    pub fn groups(&self) -> Result<Vec<GroupSummary>, CoreError> {
+        Ok(self
+            .vault()?
+            .groups()
+            .into_iter()
+            .map(|group| GroupSummary {
+                id: group.id.to_string(),
+                name: group.name,
+                members: group
+                    .members
+                    .into_iter()
+                    .map(|member| GroupMember {
+                        user_id: member.user_id.0,
+                        name: member.name,
+                        is_manager: member.manager,
+                        is_me: member.me,
+                    })
+                    .collect(),
+                is_member: group.member,
+                can_manage: group.can_manage,
+                can_add: group.can_add,
+            })
+            .collect())
+    }
+
+    /// Makes a group (owner only) with you and these people in it, and you as its manager.
+    pub fn create_group(&self, name: String, member_ids: Vec<i64>) -> Result<(), CoreError> {
+        let members: Vec<UserId> = member_ids.into_iter().map(UserId).collect();
+        self.vault()?.create_group(&name, &members)?;
+        Ok(())
+    }
+
+    /// Adds someone to a group (its managers in it). Returns their name.
+    pub fn add_to_group(&self, group: String, user_id: i64) -> Result<String, CoreError> {
+        Ok(self.vault()?.add_to_group(&group, UserId(user_id))?)
+    }
+
+    /// Takes someone out of a group, or you, to leave it. The group, and folders shared
+    /// with it, then get new keys.
+    pub fn remove_from_group(&self, group: String, user_id: i64) -> Result<SyncResult, CoreError> {
+        Ok(self
+            .vault()?
+            .remove_from_group(&group, UserId(user_id))?
+            .into())
+    }
+
+    pub fn rename_group(&self, group: String, name: String) -> Result<(), CoreError> {
+        Ok(self.vault()?.rename_group(&group, &name)?)
+    }
+
+    /// Makes someone in a group one of its managers, or not.
+    pub fn set_group_manager(
+        &self,
+        group: String,
+        user_id: i64,
+        manager: bool,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .vault()?
+            .set_group_manager(&group, UserId(user_id), manager)?)
+    }
+
+    /// Everyone in a folder and every group it's shared with, with their roles.
+    pub fn folder_sharing(&self, folder: String) -> Result<Sharing, CoreError> {
+        let (people, groups) = self.vault()?.folder_sharing(&folder)?;
+        Ok(Sharing {
+            people: people.into_iter().map(Into::into).collect(),
+            groups: groups.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    /// Shares a folder with a group (managers). Returns the group's name.
+    pub fn share_folder_with_group(
+        &self,
+        folder: String,
+        group: String,
+        role: Role,
+    ) -> Result<String, CoreError> {
+        Ok(self
+            .vault()?
+            .share_folder_with_group(&folder, &group, role.into())?)
+    }
+
+    pub fn set_folder_group_role(
+        &self,
+        folder: String,
+        group: String,
+        role: Role,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .vault()?
+            .set_folder_group_role(&folder, &group, role.into())?)
+    }
+
+    /// Stops sharing a folder with a group (managers); the folder then gets a new key.
+    pub fn remove_group_from_folder(
+        &self,
+        folder: String,
+        group: String,
+    ) -> Result<SyncResult, CoreError> {
+        Ok(self
+            .vault()?
+            .remove_group_from_folder(&folder, &group)?
+            .into())
+    }
+
+    /// Who has a login directly, and the groups it's shared with, with roles.
+    pub fn login_sharing(&self, item_id: String) -> Result<Sharing, CoreError> {
+        let (people, groups) = self.vault()?.item_sharing(item_id_from(&item_id)?)?;
+        Ok(Sharing {
+            people: people.into_iter().map(Into::into).collect(),
+            groups: groups.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    /// Shares one login with a group. Returns the group's name.
+    pub fn share_login_with_group(
+        &self,
+        item_id: String,
+        group: String,
+        role: Role,
+    ) -> Result<String, CoreError> {
+        Ok(self
+            .vault()?
+            .share_item_with_group(item_id_from(&item_id)?, &group, role.into())?)
+    }
+
+    pub fn set_login_group_role(
+        &self,
+        item_id: String,
+        group: String,
+        role: Role,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .vault()?
+            .set_item_group_role(item_id_from(&item_id)?, &group, role.into())?)
+    }
+
+    /// Takes a group's copy of a login away (managers). Returns the group's name.
+    pub fn unshare_login_group(&self, item_id: String, group: String) -> Result<String, CoreError> {
+        Ok(self
+            .vault()?
+            .unshare_item_group(item_id_from(&item_id)?, &group)?)
     }
 }
 

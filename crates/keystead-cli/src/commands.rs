@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 pub use keystead_client::{
-    DeviceRow, EditOutcome, InviteInfo, ItemRow, MemberRow, SyncSummary, UserRow, Whoami,
-    generate_password,
+    DeviceRow, EditOutcome, GroupRow, GroupShareRow, InviteInfo, ItemRow, MemberRow, SyncSummary,
+    UserRow, Whoami, generate_password,
 };
 use keystead_client::{NewAccount, Vault};
 pub use keystead_core::api::Role;
@@ -117,8 +117,61 @@ pub fn share_folder(home: &Path, folder: &str, user: UserId, role: Role) -> Resu
     open(home)?.share_folder(folder, user, role)
 }
 
-pub fn folder_members(home: &Path, folder: &str) -> Result<Vec<MemberRow>> {
-    refreshed(home)?.folder_members(folder)
+/// Everyone in a folder and the groups it's shared with.
+pub fn folder_members(home: &Path, folder: &str) -> Result<(Vec<MemberRow>, Vec<GroupShareRow>)> {
+    refreshed(home)?.folder_sharing(folder)
+}
+
+/// Shares a folder with a group. Returns the group's name.
+pub fn share_folder_with_group(
+    home: &Path,
+    folder: &str,
+    group: &str,
+    role: Role,
+) -> Result<String> {
+    open(home)?.share_folder_with_group(folder, group, role)
+}
+
+pub fn set_folder_group_role(home: &Path, folder: &str, group: &str, role: Role) -> Result<()> {
+    refreshed(home)?.set_folder_group_role(folder, group, role)
+}
+
+/// Stops sharing a folder with a group; then the folder gets a new key.
+pub fn remove_group_from_folder(home: &Path, folder: &str, group: &str) -> Result<SyncSummary> {
+    refreshed(home)?.remove_group_from_folder(folder, group)
+}
+
+pub fn groups(home: &Path) -> Result<Vec<GroupRow>> {
+    Ok(refreshed(home)?.groups())
+}
+
+/// Makes a group (owner only) with the caller and these people in it.
+pub fn create_group(home: &Path, name: &str, members: &[UserId]) -> Result<()> {
+    open(home)?.create_group(name, members).map(|_| ())
+}
+
+/// Adds someone to a group. Returns their name.
+pub fn add_to_group(home: &Path, group: &str, user: UserId) -> Result<String> {
+    open(home)?.add_to_group(group, user)
+}
+
+/// Takes someone out of a group, or the caller; then the group gets a new key.
+pub fn remove_from_group(home: &Path, group: &str, user: UserId) -> Result<SyncSummary> {
+    refreshed(home)?.remove_from_group(group, user)
+}
+
+pub fn leave_group(home: &Path, group: &str) -> Result<SyncSummary> {
+    let mut vault = refreshed(home)?;
+    let me = vault.whoami().user_id;
+    vault.remove_from_group(group, me)
+}
+
+pub fn rename_group(home: &Path, group: &str, name: &str) -> Result<()> {
+    open(home)?.rename_group(group, name)
+}
+
+pub fn set_group_manager(home: &Path, group: &str, user: UserId, manager: bool) -> Result<()> {
+    open(home)?.set_group_manager(group, user, manager)
 }
 
 pub fn set_folder_role(home: &Path, folder: &str, user: UserId, role: Role) -> Result<()> {
@@ -170,6 +223,28 @@ pub fn unshare(home: &Path, name: &str, folder: Option<&str>, user: UserId) -> R
     vault.sync()?;
     let item_id = vault.find_item(name, folder)?;
     vault.unshare_item(item_id, user)
+}
+
+/// Shares one login with a group. Returns the group's name.
+pub fn share_with_group(
+    home: &Path,
+    name: &str,
+    folder: Option<&str>,
+    group: &str,
+    role: Role,
+) -> Result<String> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.share_item_with_group(item_id, group, role)
+}
+
+/// Takes a group's copy of a login away. Returns the group's name.
+pub fn unshare_group(home: &Path, name: &str, folder: Option<&str>, group: &str) -> Result<String> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.unshare_item_group(item_id, group)
 }
 
 pub fn list(home: &Path) -> Result<Vec<ItemRow>> {
@@ -247,7 +322,7 @@ pub fn warn_rejected(summary: &SyncSummary) {
         );
     }
     for problem in &summary.rekey_problems {
-        eprintln!("warning: couldn't give a folder its new key ({problem}); will retry");
+        eprintln!("warning: couldn't give a folder or group its new key ({problem}); will retry");
     }
 }
 

@@ -18,6 +18,8 @@ struct SheetContent: View {
             NewFolderSheet(model: model)
         case .share(let folder, let user):
             ShareSheet(model: model, folder: folder, user: user)
+        case .shareWithGroup(let group):
+            ShareSheet(model: model, folder: nil, user: nil, group: group)
         case .manageFolder(let folder):
             ManageFolderSheet(model: model, folder: folder)
         case .removeUser(let user):
@@ -32,6 +34,12 @@ struct SheetContent: View {
             RecoveryKitSheet(model: model, afterSetup: afterSetup)
         case .signOut:
             SignOutSheet(model: model) { model.sheet = .recoveryKit(afterSetup: false) }
+        case .newGroup:
+            NewGroupSheet(model: model)
+        case .addToGroup(let group):
+            AddToGroupSheet(model: model, group: group)
+        case .renameGroup(let group):
+            RenameGroupSheet(model: model, group: group)
         }
     }
 }
@@ -273,23 +281,28 @@ private struct DeleteLoginSheet: View {
     @State private var busy = false
     @State private var note: String?
 
+    /// Everyone and every group it's shared with directly, as they read in a sentence.
+    private var sharedWith: [String] {
+        item.sharedWith + item.sharedWithGroups.map { "everyone in \($0)" }
+    }
+
     /// Who loses the login, and that it's for good, in a sentence.
     private var consequence: String {
-        let people = ListFormatter.localizedString(byJoining: item.sharedWith)
+        let people = ListFormatter.localizedString(byJoining: sharedWith)
         if let folder = item.folder {
-            let who = item.sharedWith.isEmpty
+            let who = sharedWith.isEmpty
                 ? "everyone in \u{201C}\(folder)\u{201D}"
                 : "everyone in \u{201C}\(folder)\u{201D} and for \(people)"
             return "It's deleted for \(who), and can't be brought back."
         }
         if item.sharedWithMe {
-            let others = ([item.owner].compactMap { $0 } + item.sharedWith)
+            let others = ([item.owner].compactMap { $0 } + sharedWith)
             let who = others.isEmpty
                 ? "everyone it's shared with"
                 : ListFormatter.localizedString(byJoining: others)
             return "It's deleted for \(who) as well as for you, and can't be brought back."
         }
-        if item.sharedWith.isEmpty {
+        if sharedWith.isEmpty {
             return "Only you have this login. Once deleted, it can't be brought back."
         }
         return "It's deleted for you and for \(people), and can't be brought back."
@@ -341,48 +354,100 @@ private struct DeleteLoginSheet: View {
     }
 }
 
-/// Shares one login with an approved person, and shows who already has it directly.
+/// Who or what a folder or login is shared with: a person or a group.
+private enum Recipient: Hashable {
+    case person(Int64)
+    case group(String)
+}
+
+/// The people, then the groups, to pick from in a "With" picker.
+private struct RecipientOptions: View {
+    let people: [User]
+    let groups: [GroupSummary]
+
+    var body: some View {
+        if !people.isEmpty {
+            Section("People") {
+                ForEach(people) { Text($0.name).tag(Recipient?.some(.person($0.userId))) }
+            }
+        }
+        if !groups.isEmpty {
+            Section("Groups") {
+                ForEach(groups) { Text($0.name).tag(Recipient?.some(.group($0.id))) }
+            }
+        }
+    }
+}
+
+/// Shares one login with an approved person or a group, and shows who already has it
+/// directly.
 private struct ShareLoginSheet: View {
     let model: AppModel
     let item: ItemSummary
-    @State private var userId: Int64
+    @State private var recipient: Recipient?
     @State private var role: Role = .edit
-    @State private var people: [Person] = []
+    @State private var sharing = Sharing(people: [], groups: [])
     @State private var problem: String?
 
     init(model: AppModel, item: ItemSummary) {
         self.model = model
         self.item = item
-        _userId = State(initialValue: Self.candidates(for: item, in: model).first?.userId ?? 0)
+        let people = Self.people(for: item, in: model)
+        let groups = Self.groups(for: item, in: model)
+        _recipient = State(initialValue: people.first.map { .person($0.userId) }
+            ?? groups.first.map { .group($0.id) })
     }
 
     /// Approved people other than you who don't have this login directly yet.
-    private static func candidates(for item: ItemSummary, in model: AppModel) -> [User] {
+    private static func people(for item: ItemSummary, in model: AppModel) -> [User] {
         model.users.filter { user in
             user.approved && !user.removed && user.userId != model.identity?.userId
                 && user.name != item.owner && !item.sharedWith.contains(user.name)
         }
     }
 
-    private var candidates: [User] { Self.candidates(for: item, in: model) }
-    private var recipient: User? { candidates.first { $0.userId == userId } }
+    /// Groups this login isn't shared with yet.
+    private static func groups(for item: ItemSummary, in model: AppModel) -> [GroupSummary] {
+        model.groups.filter { !item.sharedWithGroups.contains($0.name) }
+    }
+
+    private var people: [User] { Self.people(for: item, in: model) }
+    private var groups: [GroupSummary] { Self.groups(for: item, in: model) }
     private var manages: Bool { item.role == .manage }
+
+    /// Whom the login would go to, by name, and whether it's a group.
+    private var chosen: (name: String, isGroup: Bool)? {
+        switch recipient {
+        case .person(let id): people.first { $0.userId == id }.map { ($0.name, false) }
+        case .group(let id): groups.first { $0.id == id }.map { ($0.name, true) }
+        case nil: nil
+        }
+    }
 
     var body: some View {
         SheetScaffold(
             title: manages ? "Share \u{201C}\(item.name)\u{201D}" : "Access to \u{201C}\(item.name)\u{201D}",
             actionTitle: manages ? "Share" : "Done",
-            canAct: !manages || recipient != nil,
+            canAct: !manages || chosen != nil,
             showsCancel: manages
         ) {
-            guard manages, let recipient else { return true }
-            try await model.share(login: item, with: recipient, role: role)
+            guard manages else { return true }
+            switch recipient {
+            case .person(let id):
+                guard let user = people.first(where: { $0.userId == id }) else { return false }
+                try await model.share(login: item, with: user, role: role)
+            case .group(let id):
+                guard let group = groups.first(where: { $0.id == id }) else { return false }
+                try await model.share(login: item, with: group, role: role)
+            case nil:
+                return false
+            }
             return true
         } content: {
             if manages {
-                if candidates.isEmpty {
+                if people.isEmpty && groups.isEmpty {
                     Text(model.users.contains { $0.approved && !$0.removed && $0.userId != model.identity?.userId }
-                        ? "Everyone approved can already open this login."
+                        ? "Everyone approved, and every group, can already open this login."
                         : "There's no one approved to share with yet. "
                             + (model.isOwner
                                 ? "Invite people from People, then approve them once they've joined."
@@ -390,15 +455,16 @@ private struct ShareLoginSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
                     Form {
-                        Picker("With", selection: $userId) {
-                            ForEach(candidates) { Text($0.name).tag($0.userId) }
+                        Picker("With", selection: $recipient) {
+                            RecipientOptions(people: people, groups: groups)
                         }
                         Picker("Access", selection: $role) {
                             ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
                         }
                     }
-                    if let recipient {
-                        Text("\(recipient.name) will see this login"
+                    if let chosen {
+                        Text((chosen.isGroup ? "Everyone in \(chosen.name)" : chosen.name)
+                            + " will see this login"
                             + (item.folder.map { ", not the rest of \u{201C}\($0)\u{201D}" } ?? "")
                             + ".")
                             .font(.caption)
@@ -410,16 +476,28 @@ private struct ShareLoginSheet: View {
                 Text("Only people who manage this login can share it.")
                     .foregroundStyle(.secondary)
             }
-            if !people.isEmpty {
+            if !sharing.people.isEmpty {
                 PeopleWithAccess(
-                    title: "Has it directly", people: people, canManage: manages, canLeave: false,
-                    isOwner: { $0.name == (item.owner ?? model.identity?.name) && $0.role == .manage && item.folder == nil },
+                    title: "Has it directly", people: sharing.people, canManage: manages, canLeave: false,
+                    isMaker: { $0.name == (item.owner ?? model.identity?.name) && $0.role == .manage && item.folder == nil },
                     setRole: { person, role in
                         try await model.setRole(role, for: person, on: item)
                         await reload()
                     },
                     remove: { person in
                         try await model.unshare(item, from: person)
+                        await reload()
+                    })
+            }
+            if !sharing.groups.isEmpty {
+                GroupsWithAccess(
+                    groups: sharing.groups, canManage: manages,
+                    setRole: { share, role in
+                        try await model.setRole(role, for: share, on: item)
+                        await reload()
+                    },
+                    remove: { share in
+                        try await model.unshare(item, from: share)
                         await reload()
                     })
             }
@@ -434,7 +512,7 @@ private struct ShareLoginSheet: View {
 
     private func reload() async {
         do {
-            people = try await model.people(of: item)
+            sharing = try await model.sharing(of: item)
             problem = nil
         } catch {
             problem = describe(error)
@@ -450,8 +528,8 @@ private struct PeopleWithAccess: View {
     let canManage: Bool
     /// Whether people who don't manage can take themselves off, as members leave a folder.
     var canLeave = true
-    /// Rows that can't be changed, like a login's owner.
-    var isOwner: (Person) -> Bool = { _ in false }
+    /// Who made a login outside folders: they always manage it, so their row can't change.
+    var isMaker: (Person) -> Bool = { _ in false }
     var setRole: (Person, Role) async throws -> Void
     var remove: (Person) async throws -> Void
     var removeTitle: (Person) -> String = { $0.isMe ? "Leave" : "Remove" }
@@ -466,9 +544,12 @@ private struct PeopleWithAccess: View {
                 HStack {
                     Text(person.isMe ? "\(person.name) (you)" : person.name)
                     Spacer()
-                    if isOwner(person) {
-                        Text("Owner")
+                    if isMaker(person) {
+                        Text("Made it")
                             .foregroundStyle(.secondary)
+                            .help(person.isMe
+                                ? "It's your login, so you always manage it."
+                                : "It's \(person.name)'s login, so they always manage it.")
                     } else if canManage {
                         Picker("", selection: Binding(
                             get: { person.role },
@@ -514,38 +595,114 @@ private struct PeopleWithAccess: View {
     }
 }
 
-/// Who is in a folder, with their roles. Managers change roles and remove people; anyone
-/// can leave. Removing someone gives the folder a new key.
+/// The groups a folder or login is shared with and their roles. Managers change roles and
+/// remove groups here; everyone else just reads it.
+private struct GroupsWithAccess: View {
+    let groups: [GroupShare]
+    let canManage: Bool
+    var setRole: (GroupShare, Role) async throws -> Void
+    var remove: (GroupShare) async throws -> Void
+    @State private var busy: String?
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(groups.count == 1 ? "1 group" : "\(groups.count) groups")
+                .font(.headline)
+            ForEach(groups) { share in
+                HStack {
+                    Label(share.isMine ? "\(share.name) (you're in it)" : share.name,
+                          systemImage: "person.3")
+                    Spacer()
+                    if canManage {
+                        Picker("", selection: Binding(
+                            get: { share.role },
+                            set: { role in run(share) { try await setRole(share, role) } }
+                        )) {
+                            ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        Button("Remove") { run(share) { try await remove(share) } }
+                    } else {
+                        Text(share.role.label)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(busy != nil)
+            }
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func run(_ share: GroupShare, _ action: @escaping () async throws -> Void) {
+        busy = share.groupId
+        Task {
+            do {
+                try await action()
+                error = nil
+            } catch let failure {
+                error = describe(failure)
+            }
+            busy = nil
+        }
+    }
+}
+
+/// Who is in a folder and the groups it's shared with, with their roles. Managers change
+/// roles and remove people and groups; anyone can leave. Removing someone gives the folder
+/// a new key.
 private struct ManageFolderSheet: View {
     let model: AppModel
     let folder: String
     @Environment(\.dismiss) private var dismiss
-    @State private var members: [Person] = []
+    @State private var sharing: Sharing?
     @State private var problem: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Access to \u{201C}\(folder)\u{201D}")
                 .font(.title3.weight(.semibold))
-            if !members.isEmpty {
-                PeopleWithAccess(
-                    title: "\(members.count) \(members.count == 1 ? "person" : "people")",
-                    people: members, canManage: model.manages(folder: folder),
-                    setRole: { person, role in
-                        try await model.setRole(role, for: person, in: folder)
-                        await reload()
-                    },
-                    remove: { person in
-                        try await model.remove(person, from: folder)
-                        if person.isMe { dismiss() } else { await reload() }
-                    })
+            if let sharing {
+                if !sharing.people.isEmpty {
+                    PeopleWithAccess(
+                        title: "\(sharing.people.count) \(sharing.people.count == 1 ? "person" : "people")",
+                        people: sharing.people, canManage: model.manages(folder: folder),
+                        setRole: { person, role in
+                            try await model.setRole(role, for: person, in: folder)
+                            await reload()
+                        },
+                        remove: { person in
+                            try await model.remove(person, from: folder)
+                            if person.isMe { dismiss() } else { await reload() }
+                        })
+                }
+                if !sharing.groups.isEmpty {
+                    GroupsWithAccess(
+                        groups: sharing.groups, canManage: model.manages(folder: folder),
+                        setRole: { share, role in
+                            try await model.setRole(role, for: share, in: folder)
+                            await reload()
+                        },
+                        remove: { share in
+                            try await model.remove(share, from: folder)
+                            await reload()
+                        })
+                }
             } else if problem == nil {
                 ProgressView().frame(maxWidth: .infinity)
             }
             Text(model.manages(folder: folder)
                 ? "Viewers can open and copy, editors can also change logins, and managers can "
-                    + "also share and remove people. Removing someone gives the folder a new key, "
-                    + "so they can't read what's saved afterwards."
+                    + "also share and remove people. A group's role is everyone's in it. Removing "
+                    + "someone gives the folder a new key, so they can't read what's saved afterwards."
                 : "Only the folder's managers change who has access.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -571,7 +728,7 @@ private struct ManageFolderSheet: View {
 
     private func reload() async {
         do {
-            members = try await model.members(of: folder)
+            sharing = try await model.sharing(of: folder)
             problem = nil
         } catch {
             problem = describe(error)
@@ -657,17 +814,19 @@ private struct NewFolderSheet: View {
 private struct ShareSheet: View {
     let model: AppModel
     @State private var folder: String
-    @State private var userId: Int64
+    @State private var recipient: Recipient?
     @State private var role: Role = .edit
 
-    init(model: AppModel, folder: String?, user: User?) {
+    init(model: AppModel, folder: String?, user: User?, group: GroupSummary? = nil) {
         self.model = model
         _folder = State(initialValue: folder ?? Self.folders(in: model).first ?? "")
-        _userId = State(initialValue: user?.userId ?? Self.candidates(in: model).first?.userId ?? 0)
+        let first: Recipient? = Self.people(in: model).first.map { .person($0.userId) }
+            ?? model.groups.first.map { .group($0.id) }
+        _recipient = State(initialValue: group.map { .group($0.id) } ?? user.map { .person($0.userId) } ?? first)
     }
 
     /// Approved people other than you who are still on the team.
-    private static func candidates(in model: AppModel) -> [User] {
+    private static func people(in model: AppModel) -> [User] {
         model.users.filter { $0.approved && !$0.removed && $0.userId != model.identity?.userId }
     }
 
@@ -676,19 +835,34 @@ private struct ShareSheet: View {
         model.folders.filter { model.manages(folder: $0) }
     }
 
-    private var recipient: User? { Self.candidates(in: model).first { $0.userId == userId } }
+    /// Whom the folder would go to, by name, and whether it's a group.
+    private var chosen: (name: String, isGroup: Bool)? {
+        switch recipient {
+        case .person(let id): Self.people(in: model).first { $0.userId == id }.map { ($0.name, false) }
+        case .group(let id): model.groups.first { $0.id == id }.map { ($0.name, true) }
+        case nil: nil
+        }
+    }
 
     var body: some View {
-        SheetScaffold(title: "Share a Folder", actionTitle: "Share", canAct: recipient != nil && !folder.isEmpty) {
-            guard let recipient else { return false }
-            try await model.share(folder: folder, with: recipient, role: role)
+        SheetScaffold(title: "Share a Folder", actionTitle: "Share", canAct: chosen != nil && !folder.isEmpty) {
+            switch recipient {
+            case .person(let id):
+                guard let user = Self.people(in: model).first(where: { $0.userId == id }) else { return false }
+                try await model.share(folder: folder, with: user, role: role)
+            case .group(let id):
+                guard let group = model.groups.first(where: { $0.id == id }) else { return false }
+                try await model.share(folder: folder, with: group, role: role)
+            case nil:
+                return false
+            }
             return true
         } content: {
             if Self.folders(in: model).isEmpty {
                 Text("You don't manage any folders, so you can't share one. A folder's managers "
-                    + "can share it with \(Self.candidates(in: model).first { $0.userId == userId }?.name ?? "people").")
+                    + "can share it with \(chosen?.name ?? "people").")
                     .fixedSize(horizontal: false, vertical: true)
-            } else if Self.candidates(in: model).isEmpty {
+            } else if Self.people(in: model).isEmpty && model.groups.isEmpty {
                 Text("There's no one approved to share with yet. "
                     + (model.isOwner
                         ? "Invite people from People, then approve them once they've joined."
@@ -699,19 +873,156 @@ private struct ShareSheet: View {
                     Picker("Folder", selection: $folder) {
                         ForEach(Self.folders(in: model), id: \.self) { Text($0).tag($0) }
                     }
-                    Picker("With", selection: $userId) {
-                        ForEach(Self.candidates(in: model)) { Text($0.name).tag($0.userId) }
+                    Picker("With", selection: $recipient) {
+                        RecipientOptions(people: Self.people(in: model), groups: model.groups)
                     }
                     Picker("Access", selection: $role) {
                         ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
                     }
                 }
-                if let recipient {
-                    Text("\(recipient.name) will see every login in \u{201C}\(folder)\u{201D}, "
-                        + "including ones added later.")
+                if let chosen {
+                    Text(chosen.isGroup
+                        ? "Everyone in \(chosen.name) will see every login in \u{201C}\(folder)\u{201D}, "
+                            + "including ones added later, and so will anyone who joins the group."
+                        : "\(chosen.name) will see every login in \u{201C}\(folder)\u{201D}, "
+                            + "including ones added later.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+        }
+    }
+}
+
+// MARK: - Groups
+
+private struct NewGroupSheet: View {
+    let model: AppModel
+    @State private var name = ""
+    @State private var chosen: Set<Int64> = []
+
+    private var exists: Bool { model.groups.contains { $0.name == name.trimmed } }
+
+    /// Approved people other than you who are still on the team.
+    private var people: [User] {
+        model.users.filter { $0.approved && !$0.removed && $0.userId != model.identity?.userId }
+    }
+
+    var body: some View {
+        SheetScaffold(title: "New Group", actionTitle: "Create", canAct: !name.trimmed.isEmpty && !exists) {
+            try await model.createGroup(named: name, with: people.map(\.userId).filter(chosen.contains))
+            return true
+        } content: {
+            Form {
+                TextField("Name", text: $name, prompt: Text("Engineering"))
+            }
+            if !people.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("In the group")
+                        .font(.headline)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(people) { user in
+                                Toggle(user.name, isOn: Binding(
+                                    get: { chosen.contains(user.userId) },
+                                    set: { on in
+                                        if on { chosen.insert(user.userId) } else { chosen.remove(user.userId) }
+                                    }))
+                                .toggleStyle(.checkbox)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 160)
+                }
+            }
+            Text(exists
+                ? "There's already a group with that name."
+                : "You're in it too, as its manager. Share folders and logins with the group, "
+                    + "and everyone in it gets them, including people added later.")
+                .font(.caption)
+                .foregroundStyle(exists ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct AddToGroupSheet: View {
+    let model: AppModel
+    let group: GroupSummary
+    @State private var userId: Int64
+
+    init(model: AppModel, group: GroupSummary) {
+        self.model = model
+        self.group = group
+        _userId = State(initialValue: Self.candidates(for: group, in: model).first?.userId ?? 0)
+    }
+
+    /// Approved people on the team who aren't in the group yet.
+    private static func candidates(for group: GroupSummary, in model: AppModel) -> [User] {
+        model.users.filter { user in
+            user.approved && !user.removed && !group.members.contains { $0.userId == user.userId }
+        }
+    }
+
+    private var candidates: [User] { Self.candidates(for: group, in: model) }
+    private var person: User? { candidates.first { $0.userId == userId } }
+
+    var body: some View {
+        SheetScaffold(title: "Add to \u{201C}\(group.name)\u{201D}", actionTitle: "Add", canAct: person != nil) {
+            guard let person else { return false }
+            try await model.add(person, to: group)
+            return true
+        } content: {
+            if candidates.isEmpty {
+                Text("Everyone approved is already in \(group.name).")
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Form {
+                    Picker("Person", selection: $userId) {
+                        ForEach(candidates) { Text($0.name).tag($0.userId) }
+                    }
+                }
+                if let person {
+                    Text("\(person.name) will get every folder and login shared with \(group.name).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+private struct RenameGroupSheet: View {
+    let model: AppModel
+    let group: GroupSummary
+    @State private var name: String
+
+    init(model: AppModel, group: GroupSummary) {
+        self.model = model
+        self.group = group
+        _name = State(initialValue: group.name)
+    }
+
+    private var exists: Bool { model.groups.contains { $0.name == name.trimmed && $0.id != group.id } }
+
+    var body: some View {
+        SheetScaffold(
+            title: "Rename \u{201C}\(group.name)\u{201D}", actionTitle: "Rename",
+            canAct: !name.trimmed.isEmpty && !exists && name.trimmed != group.name
+        ) {
+            try await model.rename(group, to: name)
+            return true
+        } content: {
+            Form {
+                TextField("Name", text: $name)
+            }
+            if exists {
+                Text("There's already a group with that name.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
     }

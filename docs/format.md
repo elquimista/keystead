@@ -4,6 +4,17 @@ This is the format the server, the CLI and the apps agree on. `crates/keystead-c
 its reference implementation; change the two together. The server stores and relays
 only the encrypted forms described here and never holds a key that can open them.
 
+## Who's who
+
+- The **team owner** (or just "the owner") is the server's first user, who claimed it with
+  the setup code. There's one per server. They invite and approve everyone (see
+  Directory), remove people from the team and make groups. Whoever runs the server isn't
+  a role: unless they're also the owner, they hold no keys.
+- An **item's owner** (its `owner` field) is the person who made an item outside folders.
+  Apps show it as "Shared by" and "Made it", so it's never confused with the team owner.
+- **Managers** run a group or a folder; folders and items give people and groups a
+  **role** (see Roles).
+
 ## Encoding
 
 - Messages are JSON over HTTPS, under `/v1`.
@@ -33,8 +44,10 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
 | Account encryption key | X25519, derived from the secret | Derived in memory at unlock |
 | Account signing key | Ed25519, derived from the secret | Derived in memory at unlock |
 | Account personal key | 32 bytes, derived from the secret | Derived in memory at unlock |
-| Folder key | 32 random bytes per folder, replaced after someone loses access | Wrapped for each member's account encryption key; each older key sealed with the next |
-| Item key | 32 random bytes per item version | With the item: sealed with its folder key or its owner's personal key, and wrapped for each person it's shared with |
+| Folder key | 32 random bytes per folder, replaced after someone loses access | Wrapped for each member's account encryption key and each group's key; each older key sealed with the next |
+| Item key | 32 random bytes per item version | With the item: sealed with its folder key or its owner's personal key, and wrapped for each person and group it's shared with |
+| Group secret | 32 random bytes per group, replaced after someone leaves | Wrapped for each member's account encryption key; each older secret sealed with the next |
+| Group keys | An X25519 key and a chain key, derived from the group secret | Derived in memory; the public key is in the group's signed entry |
 | Device key | Signs the device in to the server | Secure Enclave, TPM, or (CLI) a local file |
 | Recovery kit | The account secret as 24 words | On paper, with the user |
 
@@ -63,7 +76,7 @@ Every wrapped key says how it was wrapped:
 
 | Scheme | Construction | Used for |
 | --- | --- | --- |
-| `hpke-x25519-sha256-chacha20poly1305` | HPKE (RFC 9180) base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305 | Folder and item keys wrapped for account keys |
+| `hpke-x25519-sha256-chacha20poly1305` | HPKE (RFC 9180) base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305 | Folder and item keys wrapped for account or group keys; group secrets wrapped for account keys |
 | `hpke-p256-sha256-aes256gcm` | HPKE base mode: DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-256-GCM | The account secret wrapped for a macOS Secure Enclave key (Swift side) |
 
 Unknown schemes are rejected, never guessed. New platforms add new schemes; existing
@@ -74,6 +87,13 @@ folder id's 16 bytes, so a wrapped key can't be moved to another folder.
 
 **Item keys** shared with a person directly use `info = "keystead/item-key/v1"` and
 associated data = the item id's 16 bytes.
+
+Folder and item keys shared with a **group** are wrapped the same way, for the group's
+public key instead of a person's.
+
+**Group secrets** use `info = "keystead/group-secret/v1"` and associated data =
+`transcript("keystead/group-secret/v1", group id, generation)`, so a wrapped secret can't
+pass for another group's or another generation's.
 
 **The account secret on a Mac** is wrapped for the device's Secure Enclave key with
 `hpke-p256-sha256-aes256gcm`, `info = "keystead/account-secret/v1"` and no associated
@@ -161,10 +181,20 @@ Its key travels with it, in `keys`, once for each way in:
 | `owner` | The item is outside folders | XChaCha20-Poly1305 under the owner's personal key, associated data `transcript("keystead/item-key/personal/v1", item id, owner user id)` |
 | `people` | For each person it's shared with directly | `{"user_id", "wrapped_key"}`, the item key wrapped for their account key (see Wrapped keys) |
 
+| `groups` | For each group it's shared with directly (format 3) | `{"group_id", "generation", "wrapped_key"}`, the item key wrapped for that generation of the group's key |
+
 So folder members open an item through the folder, its owner through their personal key,
-and anyone it was shared with through their own copy. Sharing an item with someone is
-saving a new version with a copy for them. They get that item only, not the rest of its
-folder. A person gets at most one copy, and the owner none in `people`.
+and anyone it was shared with through their own copy or their group's. Sharing an item
+with someone or a group is saving a new version with a copy for them. They get that item
+only, not the rest of its folder. A person or group gets at most one copy, and the owner
+none in `people`.
+
+An item with copies for groups is **format 3**; one without is format 2, which apps from
+before groups can still open. The two differ only in the group copies and in signing
+them: format 3 signs `transcript("keystead/item-signature/v3", …)` with the same parts as
+below, plus, after the people, the number of groups (4 bytes) and per group: group id,
+generation (4 bytes), wrapped key scheme name, encapsulated key, ciphertext. An item goes
+back to format 2 when its last group copy is removed.
 
 ```json
 { "id": "…", "format": 2, "folder_id": "…", "version": 3, "author": 2, "deleted": false,
@@ -198,6 +228,7 @@ and `keys.folder`. Absent fields are left out.
   copies, so everyone who could open the item hears about it.
 - Clients must verify the signature against the author's approved directory entry,
   and that the author could open the item.
+- Saving gives every group its copy at the group's current generation (see Groups).
 
 ### Format 1
 
@@ -215,7 +246,7 @@ back to format 1.
 ## Directory
 
 The server lists every user's public keys, but a server that swapped in its own key
-could read everything shared with that user. So each entry carries the **org owner's
+could read everything shared with that user. So each entry carries the **team owner's
 signature**, given after the owner compares the user's fingerprint in person or on a
 call:
 
@@ -223,9 +254,70 @@ call:
 transcript("keystead/directory-entry/v1", user id, name, encryption key, signing key)
 ```
 
-The owner approves their own entry at setup. A client joining the org pins the owner's
+The owner approves their own entry at setup. A client joining the team pins the owner's
 keys (by fingerprint, from the invite) and shares only with entries whose signature
 verifies against them, and that aren't marked `"removed": true` (see Removing access).
+
+## Groups
+
+A group is people shared with as one. Sharing a folder or item with a group is one copy
+of its key, wrapped for the group's key, however many people are in it; adding someone to
+the group is one copy of the group's secret for them, and they get everything shared with
+it. Groups don't contain groups.
+
+**Deriving group keys.** HKDF-SHA256 with no salt, input = the group secret:
+
+- `info = "keystead/group/encryption/v1"` gives 32 bytes, fed to HPKE `DeriveKeyPair`
+  for DHKEM(X25519, HKDF-SHA256): the key folder and item keys are wrapped for.
+- `info = "keystead/group/chain/v1"` gives the chain key, an XChaCha20-Poly1305 key that
+  seals the previous secret.
+
+**Entries.** Whoever shares with a group needs its real public key, so a group's public
+facts form a signed entry, with a new revision for each change:
+
+```json
+{ "group_id": "…", "revision": 2, "name": "Engineering", "generation": 1,
+  "encryption": "…", "managers": [1, 4], "signer": 1, "signature": "…" }
+```
+
+`managers` are user ids in ascending order. The signer's account signing key signs:
+
+```
+transcript("keystead/group-entry/v1", group id, revision (4 bytes), name,
+           generation (4 bytes), encryption public key, number of managers (4 bytes),
+           then each manager's user id, signer)
+```
+
+Clients check every revision, oldest first, before using a group's key: revision 1 is at
+generation 1 and signed by the owner; each later revision is the next number, signed by
+the owner or by a manager named in the revision before it; and its key is either the same
+at the same generation, or a new one at the next generation. Each signer must be in the
+approved directory. A member also checks that the secret they were given derives the
+latest revision's key.
+
+The owner makes groups, and is the first member and manager of each one they make.
+Managers add people, but only managers who are in the group, since that hands over its
+secret; the owner and managers in the group remove people, rename it and change its
+managers. A manager who has left the group stops being one at its next revision, and the
+server stops taking their changes at once.
+
+**New secrets.** When someone leaves, the group needs a new secret, the next generation:
+a manager in it makes one, wraps it for exactly the remaining members, signs the next
+revision with the new key, and seals the previous secret with the new chain key:
+
+```
+link = XChaCha20-Poly1305 under the new chain key, of the previous secret, with associated
+       data transcript("keystead/group-key-chain/v1", group id, new generation)
+```
+
+Members holding the newest secret open every older one through the chain, so whatever
+was shared with older generations still opens; whoever left never gets a newer one. Each
+sync tells a group's managers in it when it needs a new secret (`group_rekey_needed`).
+
+Sharing a folder with a group names both the folder key's generation and the group's,
+and both must be current. `Groups` (from `GET /v1/groups`) lists every group with its
+`entries`, its `members` and whether it `needs_rekey`. `Members` also lists the `groups` a folder or item is shared
+with, with their roles.
 
 ## API
 
@@ -236,7 +328,7 @@ codes (400, 401, 403, 404, 409).
 | Method and path | Request | Response | Who |
 | --- | --- | --- | --- |
 | `GET /v1/health` | | `Health` | Anyone |
-| `POST /v1/setup` | `SetupRequest` | `Enrolled` | First admin, with the code the server printed |
+| `POST /v1/setup` | `SetupRequest` | `Enrolled` | Whoever runs the server, with the code it printed |
 | `POST /v1/sign-in/challenge` | `ChallengeRequest` | `Challenge` | Any device |
 | `POST /v1/sign-in` | `SignInRequest` | `Session` | Any device |
 | `POST /v1/invites` | `InviteRequest` | `Invite` | Owner |
@@ -255,14 +347,24 @@ codes (400, 401, 403, 404, 409).
 | `PUT /v1/folders/{id}/members/{user}` | `RoleRequest` | 204 | Folder managers |
 | `DELETE /v1/folders/{id}/members/{user}` | | 204 | Folder managers, or the member themselves |
 | `POST /v1/folders/{id}/rekey` | `RekeyRequest` | 204 | Folder managers |
+| `POST /v1/folders/{id}/groups` | `AddFolderGroupRequest` | 204 | Folder managers |
+| `PUT /v1/folders/{id}/groups/{group}` | `RoleRequest` | 204 | Folder managers |
+| `DELETE /v1/folders/{id}/groups/{group}` | | 204 | Folder managers |
+| `POST /v1/groups` | `CreateGroupRequest` | 201 | Owner |
+| `GET /v1/groups` | | `Groups` | Members |
+| `PUT /v1/groups/{id}` | `UpdateGroupRequest` | 204 | Owner, and the group's managers in it |
+| `POST /v1/groups/{id}/members` | `AddGroupMemberRequest` | 204 | The group's managers in it (the owner too, if in it) |
+| `DELETE /v1/groups/{id}/members/{user}` | | 204 | Owner and the group's managers in it, or the member themselves |
+| `POST /v1/groups/{id}/rekey` | `GroupRekeyRequest` | 204 | The group's managers in it (the owner too, if in it) |
 | `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Editors and managers of the item (see Roles) |
 | `GET /v1/items/{id}/people` | | `Members` | Anyone who can open the item |
 | `PUT /v1/items/{id}/people/{user}` | `RoleRequest` | 204 | Managers of the item |
+| `PUT /v1/items/{id}/groups/{group}` | `RoleRequest` | 204 | Managers of the item |
 | `GET /v1/sync?cursor=N&limit=M` | | `SyncPage` | Members |
 
 `Health` is `{"status", "version", "item_format"}`. `item_format` is the newest item
 format the server stores; servers older than 0.2.0 leave it out and store only format 1,
-so clients check it before saving.
+so clients check it before saving. Servers with groups (0.4.0 and later) say 3.
 
 When saving an item, the server checks that the path and body ids match, the session's
 user is the author and the version is `base_version + 1` (or 1 for a new item). The
@@ -270,9 +372,12 @@ author must be an editor or manager of the current version (see Roles); a new it
 be in a folder where the author edits or manages, or be the author's own. Adding anyone
 to `people`, or dropping anyone, takes a manager, except that anyone who can save may
 drop people the owner removed from the team. The item can't change folder, owner or go
-back a format, and everyone newly in `people` must be approved and not removed.
-`PutItemRequest.roles` gives the roles of people new to `people`. If another version was
-saved first, it answers 409 with that version.
+back to format 1, and everyone newly in `people` must be approved and not removed. Adding
+or dropping a group also takes a manager; a group new to the item gets its copy at the
+group's current generation, and no copy may name a generation the group hasn't reached.
+`PutItemRequest.roles` gives the roles of people new to `people`, and `group_roles` those
+of groups new to `groups`. If another version was saved first, it answers 409 with that
+version.
 
 ### Roles
 
@@ -284,9 +389,10 @@ Everyone who can open a folder or an item has a role there:
 | `edit` | Also save new versions: change and delete items |
 | `manage` | Also share, change roles, remove people, and give a folder a new key |
 
-A folder's creator manages it, and so does an item's owner. Someone with access both
-through a folder and directly gets the higher role. A folder always keeps at least one
-manager. Members and shares from before roles existed are managers, since everyone could
+A folder's creator manages it, and so does an item's owner. A folder or item shared with
+a group gives the group a role, which is everyone's in it. Someone with access more than
+one way (through a folder, directly, through groups) gets the highest role. A folder
+always keeps at least one manager, a person or a group. Members and shares from before roles existed are managers, since everyone could
 do everything then. Roles are kept and enforced by the server; reading depends only on the
 keys someone holds.
 
@@ -295,8 +401,9 @@ keys someone holds.
 A manager removes someone from a folder (`DELETE …/members/{user}`), or a member leaves.
 Their access ends at once, their feed gets a `left` entry, and the folder is marked as
 needing a new key. A manager's client then **rekeys** it: it makes a new folder key,
-wraps it for exactly the remaining members, seals the folder info with it, and seals the
-previous key with it:
+wraps it for exactly the remaining members and the groups it's shared with (each at the
+group's current generation), seals the folder info with it, and seals the previous key
+with it:
 
 ```
 link = XChaCha20-Poly1305 under the new key, of the previous key, with associated data
@@ -311,8 +418,9 @@ the current one. Each sync tells managers which of their folders need a new key
 the one to do it.
 
 Clients give an item a **new item key every time they save it**, with fresh copies for
-its folder (under the folder's current key), its owner and its people, so what's saved
-after someone lost access is out of their reach. The exception is an item outside
+its folder (under the folder's current key), its owner, its people and its groups (under
+each group's current key), so what's saved after someone lost access is out of their
+reach. The exception is an item outside
 folders saved by someone other than its owner: only the owner can seal the owner's copy,
 so the key stays until the owner saves it.
 
@@ -320,9 +428,19 @@ Taking someone's copy of an item away is a new version without it; their feed ge
 `left_item` entry, and their devices drop the item unless one of their folders still has
 it.
 
+**Leaving a group.** The owner or a manager takes someone out of a group, or a member
+leaves. Whatever only the group gave them ends at once: their feed gets `left_group`, then
+`left` and `left_item` entries for what they lost. The group is marked for a new secret,
+and each folder they lost for a new key. A manager in the group rekeys it first (see
+Groups); a folder shared with a group waiting for its new secret isn't in anyone's
+`rekey_needed`, and the server refuses its rekey, because the folder's new key would go to
+the group's old one. Stopping sharing a folder with a group works like removing each of
+its members who has no other way in. Someone who keeps a folder another way gets its
+current key again (`rekeyed`), as their copy may have been the group's.
+
 **Removing someone from the team** (`DELETE /v1/users/{id}`, owner only) ends their
-sessions and removes their devices, takes them out of every folder (marking each for a
-new key) and every item shared with them. Their directory entry stays, with `"removed":
+sessions and removes their devices, takes them out of every group and folder (marking
+each for a new key) and every item shared with them. Their directory entry stays, with `"removed":
 true`, so what they signed still verifies; nobody can share with them again, and their
 account can't be recovered. A folder left without a manager gets one: whoever has been
 in it longest. Clients drop removed people's copies from items as they save them.
@@ -332,26 +450,34 @@ Passwords someone has already seen can't be taken back; apps list the ones to ch
 consistent snapshot:
 
 - `item`: the latest version of each changed item the user can open (in their folders,
-  their own, or shared with them directly). An item shared directly arrives this way:
-  sharing saved a new version, with a new change number.
-- `joined`: the folder key wrapped for the user, with its `generation` and `chain`, plus
-  the folder's info and items.
+  their own, or shared with them or their groups directly). An item shared directly
+  arrives this way: sharing saved a new version, with a new change number. So does an
+  item reached through a group joined after its latest version, at the join's number.
+- `joined`: the folder key wrapped for the user, or for a group they're in
+  (`via_group`: `{"group_id", "generation"}`), with its `generation` and `chain`, plus the
+  folder's info and items.
 - `left`: drop a folder, keeping its items that were also shared with the user directly.
-- `rekeyed`: a folder the user is in has a new key: the new one wrapped for them, its
-  generation, the whole chain and the info sealed with it.
+- `rekeyed`: a folder the user can open has a new key: the new one wrapped for them or
+  their group (`via_group`), its generation, the whole chain and the info sealed with it.
 - `left_item`: the user lost direct access to an item.
+- `group`: the user joined a group, or one they're in changed: its `entries`, its current
+  secret wrapped for them with its `generation`, and the `chain` to older ones. It comes
+  before anything that needs the group's keys.
+- `left_group`: forget a group's keys.
 
 The last page also carries the user's `roles` (in each folder, and on each item shared
-with them directly), and every page `rekey_needed`. The prototype in
+with them or their groups directly, the highest of the ways in), and every page
+`rekey_needed` and `group_rekey_needed`. The prototype in
 `prototypes/change-feed` shows why each item arrives exactly once.
 
 ## Not in this format yet
 
-- Adding a second device by approving it from an existing one, and recovery by admins.
+- Adding a second device by approving it from an existing one, and recovery that the team owner approves.
   (A recovery kit can already add a device.)
 - Signed membership changes. Roles and memberships are enforced by the server; a
   server that lied could let someone save who shouldn't, though every version stays
-  signed by its author.
-- Group keys.
+  signed by its author. A group's managers and key are signed; who is in it isn't.
+- Deleting a group, and groups inside groups (on purpose: no loops, and access stays
+  easy to follow).
 - Moving an item to another folder.
 - Paginating a large folder that arrives with a join.

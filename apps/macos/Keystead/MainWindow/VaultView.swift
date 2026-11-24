@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The unlocked vault: folders and people on the left, then a list, then the details.
+/// The unlocked vault: folders, people and groups on the left, then a list, then the details.
 struct VaultView: View {
     @Bindable var model: AppModel
     @State private var search = ""
@@ -13,6 +13,8 @@ struct VaultView: View {
             switch model.section ?? .allLogins {
             case .people:
                 PeopleList(model: model, selection: $model.selectedUserID)
+            case .groups:
+                GroupList(model: model, selection: $model.selectedGroupID)
             case let section:
                 LoginList(model: model, section: section, search: $search, selection: $model.selectedItemID)
             }
@@ -22,6 +24,14 @@ struct VaultView: View {
                     PersonDetail(model: model, user: user)
                 } else {
                     Text("Select a person")
+                        .foregroundStyle(.secondary)
+                }
+            } else if model.section == .groups {
+                if let group = model.groups.first(where: { $0.id == model.selectedGroupID }) {
+                    GroupDetail(model: model, group: group)
+                        .id(group.id)
+                } else {
+                    Text(model.groups.isEmpty ? "" : "Select a group")
                         .foregroundStyle(.secondary)
                 }
             } else if let item = model.items.first(where: { $0.id == model.selectedItemID }) {
@@ -106,6 +116,8 @@ private struct Sidebar: View {
                 Label("People", systemImage: "person.2")
                     .badge(model.isOwner ? model.users.filter { !$0.approved }.count : 0)
                     .tag(AppModel.Section.people)
+                Label("Groups", systemImage: "person.3")
+                    .tag(AppModel.Section.groups)
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -145,7 +157,7 @@ private struct LoginList: View {
         switch section {
         case .folder(let folder): folder
         case .sharedWithMe: "Shared with Me"
-        case .allLogins, .people: "All Logins"
+        case .allLogins, .people, .groups: "All Logins"
         }
     }
 
@@ -341,13 +353,13 @@ private struct LoginDetail: View {
                     LabeledContent("Folder", value: item.folder ?? "None")
                 }
                 if let owner = item.owner {
-                    LabeledContent("Owner", value: owner)
+                    LabeledContent("Shared by", value: owner)
                 }
                 if item.folder == nil && item.owner == nil && !item.sharedWithMe {
                     LabeledContent(
                         "Shared with",
-                        value: item.sharedWith.isEmpty ? "No one yet" : sharedWith)
-                } else if !item.sharedWith.isEmpty {
+                        value: item.sharedWithAll.isEmpty ? "No one yet" : sharedWith)
+                } else if !item.sharedWithAll.isEmpty {
                     LabeledContent("Also shared with", value: sharedWith)
                 }
                 if item.role != .manage {
@@ -384,8 +396,10 @@ private struct LoginDetail: View {
         }
     }
 
+    /// People by name, then groups, marked as groups.
     private var sharedWith: String {
-        ListFormatter.localizedString(byJoining: item.sharedWith)
+        ListFormatter.localizedString(
+            byJoining: item.sharedWith + item.sharedWithGroups.map { "\($0) (group)" })
     }
 
     /// Shows or hides the password or the notes, decrypting both the first time.
@@ -539,6 +553,184 @@ private struct PersonDetail: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - Groups
+
+private struct GroupList: View {
+    let model: AppModel
+    @Binding var selection: GroupSummary.ID?
+
+    var body: some View {
+        List(selection: $selection) {
+            ForEach(model.groups) { group in
+                HStack(spacing: 8) {
+                    Image(systemName: "person.3")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(group.name)
+                        Text(summary(of: group))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            if model.groups.isEmpty {
+                // An ordinary row, not a bottom inset, as in People.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(model.isOwner
+                        ? "Make a group for a team or a role, like Engineering or Support, then "
+                            + "share folders and logins with everyone in it at once. People added "
+                            + "to the group later get them too."
+                        : "No groups yet. The owner makes them.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    if model.isOwner {
+                        Button("New Group…") { model.sheet = .newGroup }
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+        }
+        .navigationTitle("Groups")
+        .toolbar {
+            if model.isOwner {
+                ToolbarItem {
+                    Button {
+                        model.sheet = .newGroup
+                    } label: {
+                        Label("New Group", systemImage: "plus")
+                    }
+                    .help("Make a group")
+                }
+            }
+        }
+    }
+
+    private func summary(of group: GroupSummary) -> String {
+        let count = group.members.count == 1 ? "1 person" : "\(group.members.count) people"
+        if group.members.contains(where: { $0.isMe && $0.isManager }) {
+            return "\(count) · you manage it"
+        }
+        return group.isMember ? "\(count) · you're in it" : count
+    }
+}
+
+private struct GroupDetail: View {
+    let model: AppModel
+    let group: GroupSummary
+    @State private var leaving = false
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(group.members) { member in
+                    HStack {
+                        Text(member.isMe ? "\(member.name) (you)" : member.name)
+                        if member.isManager {
+                            Text("Manager")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if group.canManage {
+                            Menu {
+                                Button(member.isManager ? "Stop Managing the Group" : "Make Manager") {
+                                    run { try await model.setManager(member, of: group, to: !member.isManager) }
+                                }
+                                if !member.isMe {
+                                    Button("Remove from Group") {
+                                        run { try await model.remove(member, from: group) }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("Manage \(member.name)")
+                        }
+                    }
+                }
+                if group.members.isEmpty {
+                    Text("No one is in this group.")
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(group.name)
+                        .font(.title2.weight(.semibold))
+                    Text(group.members.count == 1 ? "1 person" : "\(group.members.count) people")
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 4)
+            }
+            Section {
+                Text("Folders and logins shared with \(group.name) reach everyone in it, "
+                    + "including people added later. Taking someone out gives the group, and the "
+                    + "folders shared with it, new keys, so they can't read what's saved afterwards.")
+                    .fixedSize(horizontal: false, vertical: true)
+                if group.canManage && !group.canAdd {
+                    Text("Only managers who are in the group can add people, as that hands them "
+                        + "its key.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack {
+                    if group.canAdd {
+                        Button("Add Person…") { model.sheet = .addToGroup(group) }
+                    }
+                    Button("Share a Folder…") { model.sheet = .shareWithGroup(group) }
+                        .disabled(!model.folders.contains { model.manages(folder: $0) })
+                    if group.canManage {
+                        Button("Rename…") { model.sheet = .renameGroup(group) }
+                    }
+                    Spacer()
+                    if busy {
+                        ProgressView().controlSize(.small)
+                    }
+                    if group.isMember {
+                        Button("Leave…") { leaving = true }
+                    }
+                }
+            }
+            if let error {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(busy)
+        .confirmationDialog("Leave \u{201C}\(group.name)\u{201D}?", isPresented: $leaving) {
+            Button("Leave", role: .destructive) {
+                if let me = group.members.first(where: \.isMe) {
+                    run { try await model.remove(me, from: group) }
+                }
+            }
+        } message: {
+            Text("You'll lose the folders and logins shared with it, unless you have them "
+                + "another way.")
+        }
+    }
+
+    private func run(_ action: @escaping () async throws -> Void) {
+        busy = true
+        Task {
+            do {
+                try await action()
+                error = nil
+            } catch let failure {
+                error = describe(failure)
+            }
+            busy = false
+        }
     }
 }
 

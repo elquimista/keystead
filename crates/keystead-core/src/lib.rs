@@ -6,6 +6,7 @@
 pub mod api;
 pub mod directory;
 pub mod encoding;
+pub mod groups;
 pub mod ids;
 pub mod items;
 pub mod keys;
@@ -31,6 +32,8 @@ pub enum Error {
     Encoding(serde_json::Error),
     /// Recovery kit words that don't make up an account secret, and why.
     RecoveryWords(String),
+    /// A group's signed entries or keys don't check out, and why.
+    InvalidGroup(String),
 }
 
 impl fmt::Display for Error {
@@ -46,6 +49,7 @@ impl fmt::Display for Error {
             ),
             Self::Encoding(error) => write!(f, "invalid plaintext: {error}"),
             Self::RecoveryWords(reason) => f.write_str(reason),
+            Self::InvalidGroup(reason) => write!(f, "this group can't be trusted: {reason}"),
         }
     }
 }

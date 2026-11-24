@@ -23,6 +23,7 @@ use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
+use crate::groups::{leave_group, parse_group};
 use crate::vault::{leave, leave_item, parse_folder};
 use crate::{ApiError, AppState, USER_COLUMNS, UserRow, entry_from_row, user_entry};
 
@@ -77,7 +78,7 @@ impl FromRequestParts<AppState> for Auth {
     }
 }
 
-/// `POST /v1/setup`: the first admin claims the server and becomes user 1, the owner.
+/// `POST /v1/setup`: whoever runs the server claims it and becomes user 1, the team owner.
 pub(crate) async fn setup(
     State(state): State<AppState>,
     Json(request): Json<SetupRequest>,
@@ -472,8 +473,8 @@ pub(crate) async fn directory(
 }
 
 /// `DELETE /v1/users/{user_id}` (owner only): removes someone from the team. Their devices
-/// stop working at once, they leave every folder and lose every login shared with them,
-/// and each folder they were in is marked for a new key. Their directory entry stays,
+/// stop working at once, they leave every group and folder and lose every login shared
+/// with them, and each group and folder they were in is marked for a new key. Their directory entry stays,
 /// marked removed, so what they signed before still verifies.
 pub(crate) async fn remove_user(
     State(state): State<AppState>,
@@ -500,6 +501,15 @@ pub(crate) async fn remove_user(
         .bind(user.0)
         .execute(&mut *tx)
         .await?;
+
+    let groups: Vec<String> =
+        sqlx::query_scalar("SELECT group_id FROM group_members WHERE user_id = ?")
+            .bind(user.0)
+            .fetch_all(&mut *tx)
+            .await?;
+    for group_id in groups {
+        leave_group(&mut tx, user, parse_group(&group_id)?).await?;
+    }
 
     let folders: Vec<String> =
         sqlx::query_scalar("SELECT folder_id FROM members WHERE user_id = ?")
@@ -607,7 +617,7 @@ async fn device_key(
         .transpose()
 }
 
-fn check_name(name: &str) -> Result<(), ApiError> {
+pub(crate) fn check_name(name: &str) -> Result<(), ApiError> {
     if name.trim().is_empty() || name.chars().count() > MAX_NAME_LENGTH {
         return Err(ApiError::BadRequest(format!(
             "name must be 1 to {MAX_NAME_LENGTH} characters"

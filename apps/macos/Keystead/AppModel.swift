@@ -26,6 +26,7 @@ final class AppModel {
         case sharedWithMe
         case folder(String)
         case people
+        case groups
     }
 
     /// The sheet the main window shows, if any.
@@ -36,6 +37,8 @@ final class AppModel {
         case shareLogin(ItemSummary)
         case newFolder
         case share(folder: String?, user: User?)
+        /// Shares one of your folders with a group, from the group's page.
+        case shareWithGroup(GroupSummary)
         /// Who is in a folder, with their roles; managers change them here.
         case manageFolder(String)
         /// The owner removes someone from the team.
@@ -47,6 +50,9 @@ final class AppModel {
         /// The recovery kit; right after setup it first explains why it matters.
         case recoveryKit(afterSetup: Bool)
         case signOut
+        case newGroup
+        case addToGroup(GroupSummary)
+        case renameGroup(GroupSummary)
 
         var id: String {
             switch self {
@@ -56,6 +62,7 @@ final class AppModel {
             case .shareLogin(let item): "share-login-\(item.id)"
             case .newFolder: "new-folder"
             case .share(let folder, let user): "share-\(folder ?? "")-\(user?.userId ?? 0)"
+            case .shareWithGroup(let group): "share-with-group-\(group.id)"
             case .manageFolder(let folder): "manage-\(folder)"
             case .removeUser(let user): "remove-user-\(user.userId)"
             case .invite: "invite"
@@ -63,6 +70,9 @@ final class AppModel {
             case .fingerprint: "fingerprint"
             case .recoveryKit: "recovery-kit"
             case .signOut: "sign-out"
+            case .newGroup: "new-group"
+            case .addToGroup(let group): "add-to-group-\(group.id)"
+            case .renameGroup(let group): "rename-group-\(group.id)"
             }
         }
     }
@@ -74,6 +84,8 @@ final class AppModel {
     /// Your role in each folder, by name.
     private(set) var folderRoles: [String: Role] = [:]
     private(set) var users: [User] = []
+    /// The team's groups, by name.
+    private(set) var groups: [GroupSummary] = []
     /// This account's devices, this Mac included.
     private(set) var devices: [AccountDevice] = []
     /// Why the device list couldn't be loaded, such as a server older than 0.2.0.
@@ -87,6 +99,7 @@ final class AppModel {
     /// The login or person selected in the main window's list.
     var selectedItemID: ItemSummary.ID?
     var selectedUserID: User.ID?
+    var selectedGroupID: GroupSummary.ID?
     /// The menu bar panel's search.
     var search = ""
 
@@ -113,7 +126,7 @@ final class AppModel {
             switch section {
             case .folder(let folder): guard item.folder == folder else { return false }
             case .sharedWithMe: guard item.sharedWithMe else { return false }
-            case .allLogins, .people: break
+            case .allLogins, .people, .groups: break
             }
             let text = "\(item.name) \(item.username) \(item.url) \(item.folder ?? "") \(item.owner ?? "")"
                 .lowercased()
@@ -310,7 +323,8 @@ final class AppModel {
             if result.rejected > 0 {
                 message = "Ignored \(result.rejected) item(s) not signed by an approved user."
             } else if let problem = result.rekeyProblems.first {
-                message = "Couldn't give a folder its new key (\(problem)). The next sync tries again."
+                message = "Couldn't give a folder or group its new key (\(problem)). "
+                    + "The next sync tries again."
             } else {
                 message = nil
             }
@@ -444,15 +458,44 @@ final class AppModel {
         await reloadLocal()
     }
 
+    /// Shares a folder with a group: everyone in it gets the folder.
+    func share(folder: String, with group: GroupSummary, role: Role) async throws {
+        let name = group.name
+        _ = try await perform {
+            try $0.shareFolderWithGroup(folder: folder, group: name, role: role)
+        }
+    }
+
+    /// Shares one login with a group, without the rest of its folder.
+    func share(login item: ItemSummary, with group: GroupSummary, role: Role) async throws {
+        let id = item.id
+        let name = group.name
+        _ = try await perform { try $0.shareLoginWithGroup(itemId: id, group: name, role: role) }
+        await reloadLocal()
+    }
+
     /// Whether you manage a folder: share it, change roles, remove people.
     func manages(folder: String) -> Bool { folderRoles[folder] == .manage }
 
-    /// Everyone in a folder, with their roles.
-    func members(of folder: String) async throws -> [Person] {
+    /// Everyone in a folder and the groups it's shared with, with their roles.
+    func sharing(of folder: String) async throws -> Sharing {
         #if DEBUG
-        if isDemo { return Self.demoMembers(folder) }
+        if isDemo { return Self.demoSharing(folder) }
         #endif
-        return try await perform { try $0.folderMembers(folder: folder) }
+        return try await perform { try $0.folderSharing(folder: folder) }
+    }
+
+    func setRole(_ role: Role, for share: GroupShare, in folder: String) async throws {
+        let name = share.name
+        try await perform { try $0.setFolderGroupRole(folder: folder, group: name, role: role) }
+    }
+
+    /// Stops sharing a folder with a group; the folder then gets a new key.
+    func remove(_ share: GroupShare, from folder: String) async throws {
+        let name = share.name
+        let result = try await perform { try $0.removeGroupFromFolder(folder: folder, group: name) }
+        note(result)
+        await reloadLocal()
     }
 
     func setRole(_ role: Role, for person: Person, in folder: String) async throws {
@@ -469,13 +512,28 @@ final class AppModel {
         await reloadLocal()
     }
 
-    /// Who has a login directly: its owner and everyone it's shared with.
-    func people(of item: ItemSummary) async throws -> [Person] {
+    /// Who has a login directly, its owner and everyone it's shared with, and the groups
+    /// it's shared with.
+    func sharing(of item: ItemSummary) async throws -> Sharing {
         #if DEBUG
-        if isDemo { return Self.demoPeople(item) }
+        if isDemo { return Self.demoSharing(item) }
         #endif
         let id = item.id
-        return try await perform { try $0.loginPeople(itemId: id) }
+        return try await perform { try $0.loginSharing(itemId: id) }
+    }
+
+    func setRole(_ role: Role, for share: GroupShare, on item: ItemSummary) async throws {
+        let id = item.id
+        let name = share.name
+        try await perform { try $0.setLoginGroupRole(itemId: id, group: name, role: role) }
+    }
+
+    /// Takes a group's copy of a login away.
+    func unshare(_ item: ItemSummary, from share: GroupShare) async throws {
+        let id = item.id
+        let name = share.name
+        _ = try await perform { try $0.unshareLoginGroup(itemId: id, group: name) }
+        await reloadLocal()
     }
 
     func setRole(_ role: Role, for person: Person, on item: ItemSummary) async throws {
@@ -488,6 +546,53 @@ final class AppModel {
         let id = item.id
         _ = try await perform { try $0.unshareLogin(itemId: id, userId: person.userId) }
         await reloadLocal()
+    }
+
+    // MARK: - Groups
+
+    /// Makes a group (owner only) with you, as its manager, and these people in it.
+    func createGroup(named name: String, with members: [Int64]) async throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await perform { try $0.createGroup(name: name, memberIds: members) }
+        await reloadLocal()
+        selectedGroupID = groups.first { $0.name == name }?.id
+    }
+
+    /// Adds someone to a group: they get everything shared with it.
+    func add(_ user: User, to group: GroupSummary) async throws {
+        let name = group.name
+        _ = try await perform { try $0.addToGroup(group: name, userId: user.userId) }
+        await refresh()
+    }
+
+    /// Takes someone out of a group, or you, to leave it. The group, and folders shared
+    /// with it, then get new keys.
+    func remove(_ member: GroupMember, from group: GroupSummary) async throws {
+        let name = group.name
+        let result = try await perform { try $0.removeFromGroup(group: name, userId: member.userId) }
+        await refresh()
+        note(result)
+    }
+
+    func setManager(_ member: GroupMember, of group: GroupSummary, to manager: Bool) async throws {
+        let name = group.name
+        try await perform { try $0.setGroupManager(group: name, userId: member.userId, manager: manager) }
+        await reloadLocal()
+    }
+
+    func rename(_ group: GroupSummary, to name: String) async throws {
+        let old = group.name
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await perform { try $0.renameGroup(group: old, name: name) }
+        await reloadLocal()
+    }
+
+    /// Says when a removal's new keys couldn't be made here.
+    private func note(_ result: SyncResult) {
+        if let problem = result.rekeyProblems.first {
+            message = "Couldn't give a folder or group its new key (\(problem)). "
+                + "The next sync tries again."
+        }
     }
 
     /// Removes someone from the team (owner only).
@@ -585,6 +690,7 @@ final class AppModel {
     private func reloadLocal() async {
         do {
             items = try await perform { try $0.items() }
+            groups = try await perform { try $0.groups() }.sorted { $0.name < $1.name }
             let summaries = try await perform { try $0.folderSummaries() }
             folders = summaries.map(\.name).sorted()
             folderRoles = Dictionary(summaries.map { ($0.name, $0.role) }, uniquingKeysWith: { a, _ in a })
@@ -640,39 +746,70 @@ extension AppModel {
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000001", folder: "Production",
                     name: "AWS root", username: "root@example.com", url: "https://aws.amazon.com",
-                    owner: nil, sharedWith: ["Mo"], sharedWithMe: false, role: .manage),
+                    owner: nil, sharedWith: ["Mo"], sharedWithGroups: [], sharedWithMe: false,
+                    role: .manage),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000002", folder: "Staging",
                     name: "Database", username: "admin", url: "",
-                    owner: nil, sharedWith: [], sharedWithMe: false, role: .view),
+                    owner: nil, sharedWith: [], sharedWithGroups: [], sharedWithMe: false,
+                    role: .view),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000003", folder: nil,
                     name: "Bank", username: "olivia@example.com", url: "https://bank.example.com",
-                    owner: nil, sharedWith: [], sharedWithMe: false, role: .manage),
+                    owner: nil, sharedWith: [], sharedWithGroups: ["On-call"], sharedWithMe: false,
+                    role: .manage),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000004", folder: nil,
                     name: "Domain registrar", username: "ops@example.com", url: "",
-                    owner: "Mo", sharedWith: [], sharedWithMe: true, role: .edit),
+                    owner: "Mo", sharedWith: [], sharedWithGroups: [], sharedWithMe: true,
+                    role: .edit),
+            ]
+            model.groups = [
+                GroupSummary(
+                    id: "00000000-0000-4000-8000-0000000000a1", name: "Engineering",
+                    members: [
+                        GroupMember(userId: 1, name: "Olivia", isManager: true, isMe: true),
+                        GroupMember(userId: 2, name: "Mo", isManager: false, isMe: false),
+                    ],
+                    isMember: true, canManage: true, canAdd: true),
+                GroupSummary(
+                    id: "00000000-0000-4000-8000-0000000000a2", name: "On-call",
+                    members: [GroupMember(userId: 2, name: "Mo", isManager: true, isMe: false)],
+                    isMember: false, canManage: true, canAdd: false),
             ]
         }
         return model
     }
 
-    static func demoMembers(_ folder: String) -> [Person] {
+    static func demoSharing(_ folder: String) -> Sharing {
         folder == "Production"
-            ? [Person(userId: 1, name: "Olivia", role: .manage, isMe: true),
-               Person(userId: 2, name: "Mo", role: .edit, isMe: false)]
-            : [Person(userId: 2, name: "Mo", role: .manage, isMe: false),
-               Person(userId: 1, name: "Olivia", role: .view, isMe: true)]
+            ? Sharing(
+                people: [Person(userId: 1, name: "Olivia", role: .manage, isMe: true),
+                         Person(userId: 2, name: "Mo", role: .edit, isMe: false)],
+                groups: [GroupShare(
+                    groupId: "00000000-0000-4000-8000-0000000000a1", name: "Engineering",
+                    role: .edit, isMine: true)])
+            : Sharing(
+                people: [Person(userId: 2, name: "Mo", role: .manage, isMe: false),
+                         Person(userId: 1, name: "Olivia", role: .view, isMe: true)],
+                groups: [])
     }
 
-    static func demoPeople(_ item: ItemSummary) -> [Person] {
+    static func demoSharing(_ item: ItemSummary) -> Sharing {
         switch item.name {
-        case "AWS root": [Person(userId: 2, name: "Mo", role: .edit, isMe: false)]
+        case "AWS root":
+            Sharing(people: [Person(userId: 2, name: "Mo", role: .edit, isMe: false)], groups: [])
         case "Domain registrar":
-            [Person(userId: 2, name: "Mo", role: .manage, isMe: false),
-             Person(userId: 1, name: "Olivia", role: .edit, isMe: true)]
-        default: [Person(userId: 1, name: "Olivia", role: .manage, isMe: true)]
+            Sharing(
+                people: [Person(userId: 2, name: "Mo", role: .manage, isMe: false),
+                         Person(userId: 1, name: "Olivia", role: .edit, isMe: true)],
+                groups: [])
+        default:
+            Sharing(
+                people: [Person(userId: 1, name: "Olivia", role: .manage, isMe: true)],
+                groups: [GroupShare(
+                    groupId: "00000000-0000-4000-8000-0000000000a2", name: "On-call",
+                    role: .view, isMine: false)])
         }
     }
 
@@ -708,9 +845,24 @@ extension ItemSummary: Identifiable {
         if let folder { return folder }
         if let owner { return "From \(owner)" }
         if sharedWithMe { return "Shared with you" }
-        if sharedWith.isEmpty { return "Only you" }
-        return "Shared with \(ListFormatter.localizedString(byJoining: sharedWith))"
+        if sharedWithAll.isEmpty { return "Only you" }
+        return "Shared with \(ListFormatter.localizedString(byJoining: sharedWithAll))"
     }
+
+    /// Everyone and every group it's shared with directly, people first.
+    var sharedWithAll: [String] {
+        sharedWith + sharedWithGroups
+    }
+}
+
+extension GroupSummary: Identifiable {}
+
+extension GroupMember: Identifiable {
+    public var id: Int64 { userId }
+}
+
+extension GroupShare: Identifiable {
+    public var id: String { groupId }
 }
 
 extension User: Identifiable {

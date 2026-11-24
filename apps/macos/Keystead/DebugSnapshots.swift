@@ -73,6 +73,23 @@ enum DebugSnapshots {
                     model.section = .sharedWithMe
                     model.selectedItemID = model.items[3].id
                 }),
+                // Groups: Olivia manages Engineering and is in it; On-call she can manage as
+                // the owner but isn't in. Bank is shared with On-call.
+                ("6e1-groups", {
+                    model.section = .groups
+                    model.selectedGroupID = model.groups.first?.id
+                }),
+                ("6e2-group-not-in", { model.selectedGroupID = model.groups.last?.id }),
+                ("6e3-new-group", { model.sheet = .newGroup }),
+                ("6e4-closed", { model.sheet = nil }),
+                ("6e5-share-with-group", { model.sheet = .shareWithGroup(model.groups[0]) }),
+                ("6e6-closed", { model.sheet = nil }),
+                ("6e7-bank-shared-with-group", {
+                    model.section = .allLogins
+                    model.selectedItemID = model.items[2].id
+                    model.sheet = .shareLogin(model.items[2])
+                }),
+                ("6e8-closed", { model.sheet = nil }),
                 ("6f-quick-search", { QuickSearch.shared?.show(query: "a") }),
                 // The down arrow, as the keyboard sends it: the second match is picked.
                 ("6f2-quick-search-down", { pressKey(keyCode: 125) }),

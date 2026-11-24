@@ -1,4 +1,4 @@
-//! Keystead server: stores and relays encrypted data for one organization.
+//! Keystead server: stores and relays encrypted data for one team.
 //!
 //! It never holds a key that can open what it stores. It checks who may do what, keeps
 //! the change feed in order and relays ciphertexts; clients do all encryption and verify
@@ -6,6 +6,7 @@
 
 mod accounts;
 mod error;
+mod groups;
 mod vault;
 
 use std::collections::HashMap;
@@ -82,6 +83,77 @@ const MIGRATIONS: &[&str] = &[
          item_id TEXT NOT NULL
      );
      CREATE INDEX item_leave_log_user ON item_leave_log (user_id, seq);",
+    // 4 (0.4.0): groups, sharing folders and items with them, and who can open what
+    // whichever way, kept up to date from the rest (`vault::reconcile`). Before groups,
+    // that was exactly the folder members and the people items were shared with.
+    "CREATE TABLE team_groups (
+         id TEXT PRIMARY KEY,
+         generation INTEGER NOT NULL,
+         needs_rekey INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE TABLE group_entries (
+         group_id TEXT NOT NULL REFERENCES team_groups (id),
+         revision INTEGER NOT NULL,
+         body TEXT NOT NULL,
+         PRIMARY KEY (group_id, revision)
+     ) WITHOUT ROWID;
+     CREATE TABLE group_members (
+         user_id INTEGER NOT NULL REFERENCES users (id),
+         group_id TEXT NOT NULL REFERENCES team_groups (id),
+         wrapped_secret TEXT NOT NULL,
+         PRIMARY KEY (user_id, group_id)
+     ) WITHOUT ROWID;
+     CREATE INDEX group_members_group ON group_members (group_id);
+     CREATE TABLE group_keys (
+         group_id TEXT NOT NULL REFERENCES team_groups (id),
+         generation INTEGER NOT NULL,
+         previous TEXT NOT NULL,
+         PRIMARY KEY (group_id, generation)
+     ) WITHOUT ROWID;
+     CREATE TABLE group_log (
+         seq INTEGER PRIMARY KEY,
+         user_id INTEGER NOT NULL,
+         group_id TEXT NOT NULL,
+         joined INTEGER NOT NULL
+     );
+     CREATE INDEX group_log_user ON group_log (user_id, seq);
+     CREATE TABLE folder_groups (
+         folder_id TEXT NOT NULL REFERENCES folders (id),
+         group_id TEXT NOT NULL REFERENCES team_groups (id),
+         role TEXT NOT NULL,
+         group_generation INTEGER NOT NULL,
+         wrapped_key TEXT NOT NULL,
+         PRIMARY KEY (folder_id, group_id)
+     ) WITHOUT ROWID;
+     CREATE INDEX folder_groups_group ON folder_groups (group_id);
+     CREATE TABLE item_groups (
+         item_id TEXT NOT NULL REFERENCES items (id),
+         group_id TEXT NOT NULL REFERENCES team_groups (id),
+         role TEXT NOT NULL,
+         PRIMARY KEY (item_id, group_id)
+     ) WITHOUT ROWID;
+     CREATE INDEX item_groups_group ON item_groups (group_id);
+     CREATE TABLE access (
+         user_id INTEGER NOT NULL,
+         folder_id TEXT NOT NULL,
+         joined_seq INTEGER NOT NULL,
+         PRIMARY KEY (user_id, folder_id)
+     ) WITHOUT ROWID;
+     CREATE INDEX access_folder ON access (folder_id);
+     INSERT INTO access (user_id, folder_id, joined_seq)
+         SELECT user_id, folder_id, joined_seq FROM members;
+     CREATE TABLE item_reach (
+         user_id INTEGER NOT NULL,
+         item_id TEXT NOT NULL,
+         PRIMARY KEY (user_id, item_id)
+     ) WITHOUT ROWID;
+     INSERT INTO item_reach (user_id, item_id) SELECT user_id, item_id FROM item_access;
+     CREATE TABLE item_join_log (
+         seq INTEGER PRIMARY KEY,
+         user_id INTEGER NOT NULL,
+         item_id TEXT NOT NULL
+     );
+     CREATE INDEX item_join_log_user ON item_join_log (user_id, seq);",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -97,7 +169,7 @@ pub struct AppState {
 
 impl AppState {
     /// Opens (or creates) the database. On a new server this also creates the one-time
-    /// setup code that the first admin uses to claim it.
+    /// setup code that whoever runs it uses to claim it.
     pub async fn open(path: &Path) -> Result<Self, sqlx::Error> {
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -136,7 +208,7 @@ impl AppState {
         })
     }
 
-    /// The setup code, until the first admin has used it.
+    /// The setup code, until someone has used it.
     pub async fn pending_setup_code(&self) -> Result<Option<String>, sqlx::Error> {
         sqlx::query_scalar("SELECT value FROM settings WHERE name = 'setup_code'")
             .fetch_optional(&self.readers)
@@ -170,11 +242,34 @@ pub fn router(state: AppState) -> Router {
             put(vault::set_member_role).delete(vault::remove_member),
         )
         .route("/v1/folders/{folder_id}/rekey", post(vault::rekey))
+        .route(
+            "/v1/folders/{folder_id}/groups",
+            post(vault::add_folder_group),
+        )
+        .route(
+            "/v1/folders/{folder_id}/groups/{group_id}",
+            put(vault::set_folder_group_role).delete(vault::remove_folder_group),
+        )
+        .route("/v1/groups", post(groups::create_group).get(groups::groups))
+        .route("/v1/groups/{group_id}", put(groups::update_group))
+        .route(
+            "/v1/groups/{group_id}/members",
+            post(groups::add_group_member),
+        )
+        .route(
+            "/v1/groups/{group_id}/members/{user_id}",
+            delete(groups::remove_group_member),
+        )
+        .route("/v1/groups/{group_id}/rekey", post(groups::rekey_group))
         .route("/v1/items/{item_id}", put(vault::put_item))
         .route("/v1/items/{item_id}/people", get(vault::item_people))
         .route(
             "/v1/items/{item_id}/people/{user_id}",
             put(vault::set_item_role),
+        )
+        .route(
+            "/v1/items/{item_id}/groups/{group_id}",
+            put(vault::set_item_group_role),
         )
         .route("/v1/sync", get(vault::sync))
         .with_state(state)

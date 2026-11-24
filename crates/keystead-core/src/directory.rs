@@ -2,7 +2,7 @@
 //!
 //! The server stores the directory but can't be trusted with it: a server that swapped
 //! in its own key could read everything shared with that user. So each entry carries the
-//! org owner's signature, given after the owner checks the user's fingerprint in person
+//! team owner's signature, given after the owner checks the user's fingerprint in person
 //! or on a call, and apps only share with entries whose signature verifies.
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ pub struct DirectoryEntry {
 }
 
 impl DirectoryEntry {
-    /// Signs the entry as the org owner. The owner approves their own entry at setup.
+    /// Signs the entry as the team owner. The owner approves their own entry at setup.
     pub fn approve(&mut self, owner: &AccountKeys) {
         self.approval = Some(owner.sign(&self.approval_message()));
     }

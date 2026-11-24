@@ -20,7 +20,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::Error;
 use crate::encoding::{Bytes, Key32, transcript};
-use crate::ids::{DeviceId, FolderId, ItemId};
+use crate::ids::{DeviceId, FolderId, GroupId, ItemId};
 
 type Kem = X25519HkdfSha256;
 type KemPrivateKey = <Kem as hpke::Kem>::PrivateKey;
@@ -32,6 +32,9 @@ const ACCOUNT_SIGNING_INFO: &[u8] = b"keystead/account/signing/v1";
 const ACCOUNT_PERSONAL_INFO: &[u8] = b"keystead/account/personal/v1";
 const FOLDER_KEY_INFO: &[u8] = b"keystead/folder-key/v1";
 const ITEM_KEY_INFO: &[u8] = b"keystead/item-key/v1";
+const GROUP_SECRET_INFO: &[u8] = b"keystead/group-secret/v1";
+const GROUP_ENCRYPTION_INFO: &[u8] = b"keystead/group/encryption/v1";
+const GROUP_CHAIN_INFO: &[u8] = b"keystead/group/chain/v1";
 
 /// The 32 random bytes every account key comes from. Devices store it wrapped by their
 /// hardware key; it never reaches the server unwrapped.
@@ -179,24 +182,168 @@ impl AccountKeys {
             .map(ItemKey)
     }
 
+    /// Opens a group's secret, wrapped for this account as one of its members.
+    pub fn unwrap_group_secret(
+        &self,
+        wrapped: &WrappedKey,
+        group: GroupId,
+        generation: u32,
+    ) -> Result<GroupSecret, Error> {
+        self.unwrap(
+            wrapped,
+            GROUP_SECRET_INFO,
+            &group_secret_aad(group, generation),
+        )
+        .map(GroupSecret)
+    }
+
     fn unwrap(&self, wrapped: &WrappedKey, info: &[u8], aad: &[u8]) -> Result<[u8; 32], Error> {
-        if wrapped.scheme != WrapScheme::HpkeX25519Sha256ChaCha20Poly1305 {
-            return Err(Error::UnsupportedScheme(wrapped.scheme));
+        hpke_unwrap(&self.encryption, wrapped, info, aad)
+    }
+}
+
+fn hpke_unwrap(
+    private: &KemPrivateKey,
+    wrapped: &WrappedKey,
+    info: &[u8],
+    aad: &[u8],
+) -> Result<[u8; 32], Error> {
+    if wrapped.scheme != WrapScheme::HpkeX25519Sha256ChaCha20Poly1305 {
+        return Err(Error::UnsupportedScheme(wrapped.scheme));
+    }
+    let encapped =
+        EncappedKey::from_bytes(wrapped.encapsulated_key.as_slice()).map_err(|_| Error::Decrypt)?;
+    let plaintext = Zeroizing::new(
+        hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, Kem>(
+            &OpModeR::Base,
+            private,
+            &encapped,
+            info,
+            wrapped.ciphertext.as_slice(),
+            aad,
+        )
+        .map_err(|_| Error::Decrypt)?,
+    );
+    plaintext.as_slice().try_into().map_err(|_| Error::Decrypt)
+}
+
+fn hpke_wrap(
+    recipient: &Key32,
+    key: &[u8; 32],
+    info: &[u8],
+    aad: &[u8],
+) -> Result<WrappedKey, Error> {
+    let recipient = KemPublicKey::from_bytes(&recipient.0).map_err(|_| Error::InvalidKey)?;
+    let (encapped, ciphertext) = hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
+        &OpModeS::Base,
+        &recipient,
+        info,
+        key,
+        aad,
+        &mut OsRng,
+    )
+    .map_err(|_| Error::InvalidKey)?;
+    Ok(WrappedKey {
+        scheme: WrapScheme::HpkeX25519Sha256ChaCha20Poly1305,
+        encapsulated_key: Bytes(encapped.to_bytes().to_vec()),
+        ciphertext: Bytes(ciphertext),
+    })
+}
+
+fn group_secret_aad(group: GroupId, generation: u32) -> Vec<u8> {
+    transcript(
+        "keystead/group-secret/v1",
+        &[group.as_bytes(), &generation.to_be_bytes()],
+    )
+}
+
+/// The 32 random bytes a group's keys come from. Each member holds it, wrapped for their
+/// account key; it changes when someone leaves the group.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct GroupSecret([u8; 32]);
+
+impl GroupSecret {
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+/// A group's keys, derived from its secret with HKDF-SHA256 like an account's: an X25519
+/// key that folder and item keys shared with the group are wrapped to, and a symmetric key
+/// that seals the group's previous secret into its chain.
+pub struct GroupKeys {
+    encryption: KemPrivateKey,
+    public: Key32,
+    chain: Zeroizing<[u8; 32]>,
+}
+
+impl GroupKeys {
+    pub fn derive(secret: &GroupSecret) -> Self {
+        let hkdf = Hkdf::<Sha256>::new(None, &secret.0);
+        let expand = |info: &[u8]| {
+            let mut out = Zeroizing::new([0u8; 32]);
+            hkdf.expand(info, &mut *out)
+                .expect("32 bytes is a valid HKDF output length");
+            out
+        };
+        let (encryption, public) = Kem::derive_keypair(&*expand(GROUP_ENCRYPTION_INFO));
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&public.to_bytes());
+        Self {
+            encryption,
+            public: Key32(key),
+            chain: expand(GROUP_CHAIN_INFO),
         }
-        let encapped = EncappedKey::from_bytes(wrapped.encapsulated_key.as_slice())
-            .map_err(|_| Error::Decrypt)?;
-        let plaintext = Zeroizing::new(
-            hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, Kem>(
-                &OpModeR::Base,
-                &self.encryption,
-                &encapped,
-                info,
-                wrapped.ciphertext.as_slice(),
-                aad,
-            )
-            .map_err(|_| Error::Decrypt)?,
-        );
-        plaintext.as_slice().try_into().map_err(|_| Error::Decrypt)
+    }
+
+    /// The public key folder and item keys are wrapped to; the owner signs it into the
+    /// group's entry.
+    pub fn public(&self) -> Key32 {
+        self.public
+    }
+
+    pub fn unwrap_folder_key(
+        &self,
+        wrapped: &WrappedKey,
+        folder: FolderId,
+    ) -> Result<FolderKey, Error> {
+        hpke_unwrap(
+            &self.encryption,
+            wrapped,
+            FOLDER_KEY_INFO,
+            folder.as_bytes(),
+        )
+        .map(FolderKey)
+    }
+
+    pub fn unwrap_item_key(&self, wrapped: &WrappedKey, item: ItemId) -> Result<ItemKey, Error> {
+        hpke_unwrap(&self.encryption, wrapped, ITEM_KEY_INFO, item.as_bytes()).map(ItemKey)
+    }
+
+    pub(crate) fn chain_cipher(&self) -> XChaCha20Poly1305 {
+        XChaCha20Poly1305::new(Key::from_slice(&*self.chain))
+    }
+}
+
+impl Key32 {
+    /// Wraps a folder key for the group whose public key this is.
+    pub fn wrap_folder_key(&self, key: &FolderKey, folder: FolderId) -> Result<WrappedKey, Error> {
+        hpke_wrap(self, &key.0, FOLDER_KEY_INFO, folder.as_bytes())
+    }
+
+    /// Wraps an item key for the group whose public key this is.
+    pub fn wrap_item_key(&self, key: &ItemKey, item: ItemId) -> Result<WrappedKey, Error> {
+        hpke_wrap(self, &key.0, ITEM_KEY_INFO, item.as_bytes())
     }
 }
 
@@ -223,24 +370,22 @@ impl AccountPublicKeys {
         self.wrap(&key.0, ITEM_KEY_INFO, item_id.as_bytes())
     }
 
+    /// Wraps a group's secret for this account, as one of its members.
+    pub fn wrap_group_secret(
+        &self,
+        secret: &GroupSecret,
+        group: GroupId,
+        generation: u32,
+    ) -> Result<WrappedKey, Error> {
+        self.wrap(
+            &secret.0,
+            GROUP_SECRET_INFO,
+            &group_secret_aad(group, generation),
+        )
+    }
+
     fn wrap(&self, key: &[u8; 32], info: &[u8], aad: &[u8]) -> Result<WrappedKey, Error> {
-        let recipient =
-            KemPublicKey::from_bytes(&self.encryption.0).map_err(|_| Error::InvalidKey)?;
-        let (encapped, ciphertext) =
-            hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
-                &OpModeS::Base,
-                &recipient,
-                info,
-                key,
-                aad,
-                &mut OsRng,
-            )
-            .map_err(|_| Error::InvalidKey)?;
-        Ok(WrappedKey {
-            scheme: WrapScheme::HpkeX25519Sha256ChaCha20Poly1305,
-            encapsulated_key: Bytes(encapped.to_bytes().to_vec()),
-            ciphertext: Bytes(ciphertext),
-        })
+        hpke_wrap(&self.encryption, key, info, aad)
     }
 
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), Error> {

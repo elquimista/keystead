@@ -118,6 +118,9 @@ private struct AppCommands: Commands {
             Button("People") { model.section = .people }
                 .keyboardShortcut("3")
                 .disabled(model.phase != .unlocked)
+            Button("Groups") { model.section = .groups }
+                .keyboardShortcut("4")
+                .disabled(model.phase != .unlocked)
             Divider()
         }
         CommandMenu("Vault") {

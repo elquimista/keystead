@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Claim a new server with its setup code and become the owner
+    /// Claim a new server with its setup code and become your team's owner
     Setup {
         server: String,
         setup_code: String,
@@ -75,6 +75,9 @@ enum Command {
     /// Create, share and list folders
     #[command(subcommand)]
     Folder(FolderCommand),
+    /// Groups of people that folders and logins can be shared with as one
+    #[command(subcommand)]
+    Group(GroupCommand),
     /// Add a login: to a folder, or without one as your own until you share it
     Add {
         name: String,
@@ -88,19 +91,26 @@ enum Command {
         #[arg(long)]
         generate: bool,
     },
-    /// Share one login with an approved user, without the rest of its folder
+    /// Share one login with an approved user or a group, without the rest of its folder
     Share {
         name: String,
-        user_id: i64,
+        #[arg(required_unless_present = "group")]
+        user_id: Option<i64>,
+        /// Share with this group instead of one person
+        #[arg(long, conflicts_with = "user_id")]
+        group: Option<String>,
         #[arg(long)]
         folder: Option<String>,
         #[arg(long, value_enum, default_value_t = RoleArg::Edit)]
         role: RoleArg,
     },
-    /// Take away someone's copy of a login (managers)
+    /// Take away someone's or a group's copy of a login (managers)
     Unshare {
         name: String,
-        user_id: i64,
+        #[arg(required_unless_present = "group")]
+        user_id: Option<i64>,
+        #[arg(long, conflicts_with = "user_id")]
+        group: Option<String>,
         #[arg(long)]
         folder: Option<String>,
     },
@@ -167,14 +177,18 @@ enum DevicesCommand {
 enum FolderCommand {
     /// Create a folder
     Create { name: String },
-    /// Share a folder with an approved user (managers)
+    /// Share a folder with an approved user or a group (managers)
     Share {
         folder: String,
-        user_id: i64,
+        #[arg(required_unless_present = "group")]
+        user_id: Option<i64>,
+        /// Share with this group instead of one person
+        #[arg(long, conflicts_with = "user_id")]
+        group: Option<String>,
         #[arg(long, value_enum, default_value_t = RoleArg::Edit)]
         role: RoleArg,
     },
-    /// List who is in a folder, with their roles
+    /// List who is in a folder and the groups it's shared with, with their roles
     Members { folder: String },
     /// Change someone's role in a folder (managers)
     Role {
@@ -183,12 +197,49 @@ enum FolderCommand {
         #[arg(value_enum)]
         role: RoleArg,
     },
-    /// Take someone out of a folder; it then gets a new key (managers)
-    Remove { folder: String, user_id: i64 },
+    /// Change a group's role in a folder (managers)
+    GroupRole {
+        folder: String,
+        group: String,
+        #[arg(value_enum)]
+        role: RoleArg,
+    },
+    /// Take someone or a group out of a folder; it then gets a new key (managers)
+    Remove {
+        folder: String,
+        #[arg(required_unless_present = "group")]
+        user_id: Option<i64>,
+        #[arg(long, conflicts_with = "user_id")]
+        group: Option<String>,
+    },
     /// Leave a folder
     Leave { folder: String },
     /// List your folders
     List,
+}
+
+#[derive(Subcommand)]
+enum GroupCommand {
+    /// List the team's groups and who is in them
+    List,
+    /// Make a group with you and these people in it, and you as its manager (owner only)
+    Create { name: String, user_ids: Vec<i64> },
+    /// Add someone to a group: they get everything shared with it (its managers)
+    Add { group: String, user_id: i64 },
+    /// Take someone out of a group; it then gets a new key (owner and its managers)
+    Remove { group: String, user_id: i64 },
+    /// Leave a group
+    Leave { group: String },
+    /// Rename a group (owner and its managers)
+    Rename { group: String, name: String },
+    /// Make someone in a group one of its managers (owner and its managers)
+    Manager {
+        group: String,
+        user_id: i64,
+        /// Stop them being a manager instead
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 /// What someone may do with a folder or a login.
@@ -231,7 +282,7 @@ fn run(cli: Cli) -> Result<()> {
             name,
         } => {
             let me = commands::setup(&home, &server, &setup_code, &name)?;
-            println!("You're now the owner of {}.", me.server);
+            println!("You're now your team's owner on {}.", me.server);
             println!("Your fingerprint: {}", me.fingerprint);
         }
         Command::Invite { name } => {
@@ -385,13 +436,23 @@ fn run(cli: Cli) -> Result<()> {
         Command::Folder(FolderCommand::Share {
             folder,
             user_id,
+            group,
             role,
         }) => {
-            let name = commands::share_folder(&home, &folder, UserId(user_id), role.into())?;
+            let name = match (user_id, group) {
+                (Some(user_id), _) => {
+                    commands::share_folder(&home, &folder, UserId(user_id), role.into())?
+                }
+                (None, Some(group)) => {
+                    commands::share_folder_with_group(&home, &folder, &group, role.into())?
+                }
+                (None, None) => unreachable!("clap requires one"),
+            };
             println!("Shared {folder} with {name}.");
         }
         Command::Folder(FolderCommand::Members { folder }) => {
-            let rows = commands::folder_members(&home, &folder)?
+            let (members, groups) = commands::folder_members(&home, &folder)?;
+            let mut rows: Vec<Vec<String>> = members
                 .into_iter()
                 .map(|member| {
                     let name = if member.me {
@@ -406,7 +467,23 @@ fn run(cli: Cli) -> Result<()> {
                     ]
                 })
                 .collect();
+            rows.extend(groups.into_iter().map(|group| {
+                let mine = if group.mine { ", you're in it" } else { "" };
+                vec![
+                    "-".to_owned(),
+                    format!("{} (group{mine})", group.name),
+                    group.role.name().to_owned(),
+                ]
+            }));
             print_table(&["ID", "NAME", "ROLE"], rows);
+        }
+        Command::Folder(FolderCommand::GroupRole {
+            folder,
+            group,
+            role,
+        }) => {
+            commands::set_folder_group_role(&home, &folder, &group, role.into())?;
+            println!("Changed {group}'s role in {folder}.");
         }
         Command::Folder(FolderCommand::Role {
             folder,
@@ -416,9 +493,85 @@ fn run(cli: Cli) -> Result<()> {
             commands::set_folder_role(&home, &folder, UserId(user_id), role.into())?;
             println!("Changed their role in {folder}.");
         }
-        Command::Folder(FolderCommand::Remove { folder, user_id }) => {
-            commands::remove_from_folder(&home, &folder, UserId(user_id))?;
-            println!("Removed them from {folder}, and gave it a new key.");
+        Command::Folder(FolderCommand::Remove {
+            folder,
+            user_id,
+            group,
+        }) => match (user_id, group) {
+            (Some(user_id), _) => {
+                commands::remove_from_folder(&home, &folder, UserId(user_id))?;
+                println!("Removed them from {folder}, and gave it a new key.");
+            }
+            (None, Some(group)) => {
+                let summary = commands::remove_group_from_folder(&home, &folder, &group)?;
+                commands::warn_rejected(&summary);
+                println!("Removed {group} from {folder}.");
+            }
+            (None, None) => unreachable!("clap requires one"),
+        },
+        Command::Group(GroupCommand::List) => {
+            let rows = commands::groups(&home)?
+                .into_iter()
+                .map(|group| {
+                    let members: Vec<String> = group
+                        .members
+                        .iter()
+                        .map(|member| {
+                            let mut name = format!("{} ({})", member.name, member.user_id);
+                            if member.manager {
+                                name.push('*');
+                            }
+                            name
+                        })
+                        .collect();
+                    let you = if group.can_manage {
+                        "manage"
+                    } else if group.member {
+                        "member"
+                    } else {
+                        "-"
+                    };
+                    vec![group.name, you.to_owned(), members.join(", ")]
+                })
+                .collect();
+            print_table(&["GROUP", "YOU", "MEMBERS (* MANAGES)"], rows);
+        }
+        Command::Group(GroupCommand::Create { name, user_ids }) => {
+            let members: Vec<UserId> = user_ids.into_iter().map(UserId).collect();
+            commands::create_group(&home, &name, &members)?;
+            println!("Created group {name}. You're its manager.");
+        }
+        Command::Group(GroupCommand::Add { group, user_id }) => {
+            let name = commands::add_to_group(&home, &group, UserId(user_id))?;
+            println!("Added {name} to {group}.");
+        }
+        Command::Group(GroupCommand::Remove { group, user_id }) => {
+            let summary = commands::remove_from_group(&home, &group, UserId(user_id))?;
+            commands::warn_rejected(&summary);
+            println!("Removed them from {group}.");
+            if summary.rekeyed == 0 {
+                println!("One of its managers' apps gives it a new key when it next syncs.");
+            }
+        }
+        Command::Group(GroupCommand::Leave { group }) => {
+            commands::leave_group(&home, &group)?;
+            println!("Left {group}.");
+        }
+        Command::Group(GroupCommand::Rename { group, name }) => {
+            commands::rename_group(&home, &group, &name)?;
+            println!("Renamed {group} to {name}.");
+        }
+        Command::Group(GroupCommand::Manager {
+            group,
+            user_id,
+            remove,
+        }) => {
+            commands::set_group_manager(&home, &group, UserId(user_id), !remove)?;
+            if remove {
+                println!("They no longer manage {group}.");
+            } else {
+                println!("They now manage {group}.");
+            }
         }
         Command::Folder(FolderCommand::Leave { folder }) => {
             commands::leave_folder(&home, &folder)?;
@@ -455,24 +608,44 @@ fn run(cli: Cli) -> Result<()> {
         Command::Share {
             name,
             user_id,
+            group,
             folder,
             role,
         } => {
-            let who = commands::share(
-                &home,
-                &name,
-                folder.as_deref(),
-                UserId(user_id),
-                role.into(),
-            )?;
+            let who = match (user_id, group) {
+                (Some(user_id), _) => commands::share(
+                    &home,
+                    &name,
+                    folder.as_deref(),
+                    UserId(user_id),
+                    role.into(),
+                )?,
+                (None, Some(group)) => commands::share_with_group(
+                    &home,
+                    &name,
+                    folder.as_deref(),
+                    &group,
+                    role.into(),
+                )?,
+                (None, None) => unreachable!("clap requires one"),
+            };
             println!("Shared {name} with {who}.");
         }
         Command::Unshare {
             name,
             user_id,
+            group,
             folder,
         } => {
-            let who = commands::unshare(&home, &name, folder.as_deref(), UserId(user_id))?;
+            let who = match (user_id, group) {
+                (Some(user_id), _) => {
+                    commands::unshare(&home, &name, folder.as_deref(), UserId(user_id))?
+                }
+                (None, Some(group)) => {
+                    commands::unshare_group(&home, &name, folder.as_deref(), &group)?
+                }
+                (None, None) => unreachable!("clap requires one"),
+            };
             println!("{who} no longer has {name}.");
         }
         Command::RemoveUser { user_id, yes } => {
@@ -609,8 +782,14 @@ fn shared(item: &commands::ItemRow) -> String {
         None if item.shared_with_me => parts.push("with you".to_owned()),
         None => {}
     }
-    if !item.shared_with.is_empty() {
-        parts.push(format!("with {}", item.shared_with.join(", ")));
+    let mut with = item.shared_with.clone();
+    with.extend(
+        item.shared_with_groups
+            .iter()
+            .map(|group| format!("{group} (group)")),
+    );
+    if !with.is_empty() {
+        parts.push(format!("with {}", with.join(", ")));
     }
     parts.join("; ")
 }

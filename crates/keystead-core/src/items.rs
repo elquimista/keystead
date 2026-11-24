@@ -3,13 +3,15 @@
 //! Each item version has two encrypted parts: the overview (searchable fields, decrypted
 //! at unlock) and the details (password and notes, decrypted only when used). Both are
 //! encrypted with the item's own key, which travels with the item sealed for each way in:
-//! its folder's key, its owner's personal key, and a copy wrapped for each person it's
-//! shared with directly. Every ciphertext is bound to its item, version and part, and the
-//! author signs the whole version, key copies included, so nothing can be swapped,
-//! replayed or altered unnoticed.
+//! its folder's key, its owner's personal key, and a copy wrapped for each person and
+//! group it's shared with directly. Every ciphertext is bound to its item, version and
+//! part, and the author signs the whole version, key copies included, so nothing can be
+//! swapped, replayed or altered unnoticed.
 //!
 //! Items saved by Keystead 0.1 are format 1: encrypted with their folder key directly,
-//! with no key of their own. They still open, and become format 2 when next saved.
+//! with no key of their own. They still open, and become format 2 when next saved. Format 3
+//! is format 2 with copies for groups; items not shared with a group stay format 2, so
+//! older apps keep opening them.
 
 use std::fmt;
 
@@ -21,7 +23,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::Error;
 use crate::encoding::{Bytes, transcript};
-use crate::ids::{FolderId, ItemId, UserId};
+use crate::groups::GroupKeyring;
+use crate::ids::{FolderId, GroupId, ItemId, UserId};
 use crate::keys::{AccountKeys, AccountPublicKeys, FolderKey, ItemKey, WrappedKey};
 
 impl FolderKey {
@@ -62,8 +65,9 @@ fn chain_aad(folder: FolderId, generation: u32) -> Vec<u8> {
     )
 }
 
-/// The item format this build writes.
-pub const ITEM_FORMAT: u8 = 2;
+/// The newest item format this build writes: 3 for items shared with a group, 2 for the
+/// rest.
+pub const ITEM_FORMAT: u8 = 3;
 
 /// The searchable fields of an item.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,11 +114,22 @@ pub struct ItemKeys {
     /// Wrapped for each person the item is shared with directly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub people: Vec<PersonKey>,
+    /// Wrapped for each group the item is shared with directly (format 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupKeyCopy>,
 }
 
 impl ItemKeys {
     pub fn is_empty(&self) -> bool {
-        self.folder.is_none() && self.owner.is_none() && self.people.is_empty()
+        self.folder.is_none()
+            && self.owner.is_none()
+            && self.people.is_empty()
+            && self.groups.is_empty()
+    }
+
+    /// The format an item with these copies is written in.
+    fn format(&self) -> u8 {
+        if self.groups.is_empty() { 2 } else { 3 }
     }
 }
 
@@ -125,11 +140,20 @@ pub struct PersonKey {
     pub wrapped_key: WrappedKey,
 }
 
+/// An item key wrapped for one generation of a group's key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupKeyCopy {
+    pub group_id: GroupId,
+    pub generation: u32,
+    pub wrapped_key: WrappedKey,
+}
+
 /// One version of an item, as stored on the server and sent between devices.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedItem {
     pub id: ItemId,
-    /// 2 for items with their own key. Keystead 0.1's items have no `format`: they're 1.
+    /// 2 for items with their own key, 3 if they're also shared with a group. Keystead
+    /// 0.1's items have no `format`: they're 1.
     #[serde(default = "format_1", skip_serializing_if = "is_format_1")]
     pub format: u8,
     /// The folder the item is in, if any. Every format 1 item is in one.
@@ -143,7 +167,7 @@ pub struct EncryptedItem {
     pub author: UserId,
     /// A deleted item keeps a signed version with empty parts.
     pub deleted: bool,
-    /// Format 2: the item's key, sealed for everyone who can open it.
+    /// Format 2 and 3: the item's key, sealed for everyone who can open it.
     #[serde(default, skip_serializing_if = "ItemKeys::is_empty")]
     pub keys: ItemKeys,
     pub overview: Sealed,
@@ -182,7 +206,7 @@ impl EncryptedItem {
         overview: &Overview,
         details: &Details,
     ) -> Result<Self, Error> {
-        Self::seal_format(ITEM_FORMAT, at, key, keys, author_keys, overview, details)
+        Self::seal_format(keys.format(), at, key, keys, author_keys, overview, details)
     }
 
     /// Encrypts and signs a format 1 version, as Keystead 0.1 did: with the folder key
@@ -228,7 +252,7 @@ impl EncryptedItem {
     /// A signed marker that the item was deleted in this version. It keeps the key copies,
     /// so everyone who could open the item hears about it.
     pub fn tombstone(at: ItemVersion, keys: ItemKeys, author_keys: &AccountKeys) -> Self {
-        let mut item = Self::unsigned(ITEM_FORMAT, at, keys);
+        let mut item = Self::unsigned(keys.format(), at, keys);
         item.deleted = true;
         item.signature = author_keys.sign(&item.signed_message());
         item
@@ -265,11 +289,22 @@ impl EncryptedItem {
         account: &AccountKeys,
         me: UserId,
     ) -> Result<ItemKey, Error> {
+        self.unlock_with(folder_key, account, me, &GroupKeyring::default())
+    }
+
+    /// Like [`unlock`](Self::unlock), and also through a copy for a group `me` is in.
+    pub fn unlock_with(
+        &self,
+        folder_key: Option<&FolderKey>,
+        account: &AccountKeys,
+        me: UserId,
+        groups: &GroupKeyring,
+    ) -> Result<ItemKey, Error> {
         match self.format {
             1 => folder_key
                 .map(FolderKey::format_1_item_key)
                 .ok_or(Error::Decrypt),
-            2 => {
+            2 | 3 => {
                 if let (Some(folder_id), Some(sealed), Some(folder_key)) =
                     (self.folder_id, &self.keys.folder, folder_key)
                 {
@@ -284,12 +319,20 @@ impl EncryptedItem {
                         return Ok(key);
                     }
                 }
+                if let Some(person) = self.keys.people.iter().find(|person| person.user_id == me) {
+                    if let Ok(key) = account.unwrap_item_key(&person.wrapped_key, self.id) {
+                        return Ok(key);
+                    }
+                }
                 self.keys
-                    .people
+                    .groups
                     .iter()
-                    .find(|person| person.user_id == me)
+                    .filter_map(|copy| {
+                        let keys = groups.get(copy.group_id, copy.generation)?;
+                        keys.unwrap_item_key(&copy.wrapped_key, self.id).ok()
+                    })
+                    .next()
                     .ok_or(Error::Decrypt)
-                    .and_then(|person| account.unwrap_item_key(&person.wrapped_key, self.id))
             }
             other => Err(Error::UnsupportedFormat(other)),
         }
@@ -310,9 +353,15 @@ impl EncryptedItem {
     }
 
     /// Whether `user` can open the item without being in its folder: as its owner, or
-    /// because it was shared with them directly.
-    pub fn reaches_directly(&self, user: UserId) -> bool {
-        self.owner == Some(user) || self.keys.people.iter().any(|person| person.user_id == user)
+    /// because it was shared with them or a group they're in (`groups`) directly.
+    pub fn reaches_directly(&self, user: UserId, groups: &GroupKeyring) -> bool {
+        self.owner == Some(user)
+            || self.keys.people.iter().any(|person| person.user_id == user)
+            || self
+                .keys
+                .groups
+                .iter()
+                .any(|copy| groups.contains(copy.group_id))
     }
 
     fn part_aad(&self, part: &str) -> Vec<u8> {
@@ -376,12 +425,28 @@ impl EncryptedItem {
             parts.push(person.wrapped_key.encapsulated_key.0.clone());
             parts.push(person.wrapped_key.ciphertext.0.clone());
         }
+        // Format 3 adds the group copies; format 2 has none, and signs as it always did.
+        if self.format >= 3 {
+            parts.push((self.keys.groups.len() as u32).to_be_bytes().to_vec());
+            for copy in &self.keys.groups {
+                parts.push(copy.group_id.as_bytes().to_vec());
+                parts.push(copy.generation.to_be_bytes().to_vec());
+                parts.push(copy.wrapped_key.scheme.name().as_bytes().to_vec());
+                parts.push(copy.wrapped_key.encapsulated_key.0.clone());
+                parts.push(copy.wrapped_key.ciphertext.0.clone());
+            }
+        }
         for sealed in [&self.overview, &self.details] {
             parts.push(sealed.nonce.0.clone());
             parts.push(sealed.ciphertext.0.clone());
         }
         let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-        transcript("keystead/item-signature/v2", &parts)
+        let domain = if self.format >= 3 {
+            "keystead/item-signature/v3"
+        } else {
+            "keystead/item-signature/v2"
+        };
+        transcript(domain, &parts)
     }
 }
 
@@ -463,7 +528,7 @@ fn open_key(cipher: &XChaCha20Poly1305, aad: &[u8], sealed: &Sealed) -> Result<I
     Ok(ItemKey::from_bytes(bytes))
 }
 
-fn seal_part(cipher: &XChaCha20Poly1305, aad: &[u8], plaintext: &[u8]) -> Sealed {
+pub(crate) fn seal_part(cipher: &XChaCha20Poly1305, aad: &[u8], plaintext: &[u8]) -> Sealed {
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(
@@ -480,7 +545,11 @@ fn seal_part(cipher: &XChaCha20Poly1305, aad: &[u8], plaintext: &[u8]) -> Sealed
     }
 }
 
-fn open_part(cipher: &XChaCha20Poly1305, aad: &[u8], sealed: &Sealed) -> Result<Vec<u8>, Error> {
+pub(crate) fn open_part(
+    cipher: &XChaCha20Poly1305,
+    aad: &[u8],
+    sealed: &Sealed,
+) -> Result<Vec<u8>, Error> {
     if sealed.nonce.as_slice().len() != 24 {
         return Err(Error::Decrypt);
     }
@@ -599,8 +668,9 @@ mod tests {
         assert!(!opens(&item, None, &f.bob, BOB));
         // Bob claiming to be Alice still lacks her personal key.
         assert!(!opens(&item, None, &f.bob, ALICE));
-        assert!(item.reaches_directly(ALICE));
-        assert!(!item.reaches_directly(BOB));
+        let none = GroupKeyring::default();
+        assert!(item.reaches_directly(ALICE, &none));
+        assert!(!item.reaches_directly(BOB, &none));
     }
 
     #[test]
@@ -609,7 +679,7 @@ mod tests {
         let (item, _) = seal(&f, false, true);
         assert!(opens(&item, None, &f.bob, BOB));
         assert!(opens(&item, None, &f.alice, ALICE));
-        assert!(item.reaches_directly(BOB));
+        assert!(item.reaches_directly(BOB, &GroupKeyring::default()));
 
         let stranger = AccountKeys::derive(&AccountSecret::generate());
         assert!(!opens(&item, None, &stranger, UserId(3)));
@@ -704,13 +774,69 @@ mod tests {
     }
 
     #[test]
+    fn an_item_shared_with_a_group_is_format_3_and_opens_for_its_members() {
+        use crate::groups::GroupEntry;
+        use crate::keys::{GroupKeys, GroupSecret};
+
+        let f = fixture();
+        let group = GroupId::random();
+        let secret = GroupSecret::generate();
+        let group_keys = GroupKeys::derive(&secret);
+        let mut entry = GroupEntry::first(group, "Support", &group_keys, vec![ALICE]);
+        entry.sign(ALICE, &f.alice);
+
+        let id = ItemId::random();
+        let key = ItemKey::generate();
+        let keys = ItemKeys {
+            owner: Some(key.seal_for_owner(id, ALICE, &f.alice)),
+            groups: vec![GroupKeyCopy {
+                group_id: group,
+                generation: 1,
+                wrapped_key: group_keys.public().wrap_item_key(&key, id).unwrap(),
+            }],
+            ..ItemKeys::default()
+        };
+        let at = ItemVersion {
+            id,
+            folder_id: None,
+            owner: Some(ALICE),
+            version: 1,
+            author: ALICE,
+        };
+        let item = EncryptedItem::seal(at, &key, keys, &f.alice, &f.overview, &f.details).unwrap();
+        assert_eq!(item.format, 3);
+        assert!(item.verify(&f.alice.public()).is_ok());
+
+        // Bob is in the group, so his keyring has its keys.
+        let mut keyring = GroupKeyring::default();
+        keyring.add(&entry, secret, &[]).unwrap();
+        let opened = item.unlock_with(None, &f.bob, BOB, &keyring).unwrap();
+        assert_eq!(item.open_details(&opened).unwrap(), f.details);
+        assert!(item.reaches_directly(BOB, &keyring));
+        assert!(item.unlock(None, &f.bob, BOB).is_err());
+        assert!(!item.reaches_directly(BOB, &GroupKeyring::default()));
+
+        // The group copies are signed.
+        let mut dropped = item.clone();
+        dropped.keys.groups.clear();
+        assert!(dropped.verify(&f.alice.public()).is_err());
+        let mut bumped = item.clone();
+        bumped.keys.groups[0].generation = 2;
+        assert!(bumped.verify(&f.alice.public()).is_err());
+
+        // Without groups it's format 2 again.
+        let (plain, _) = seal(&f, false, true);
+        assert_eq!(plain.format, 2);
+    }
+
+    #[test]
     fn unknown_formats_are_reported() {
         let f = fixture();
         let (mut item, _) = seal(&f, true, false);
-        item.format = 3;
+        item.format = 4;
         assert!(matches!(
             item.unlock(Some(&f.folder_key), &f.bob, BOB),
-            Err(Error::UnsupportedFormat(3))
+            Err(Error::UnsupportedFormat(4))
         ));
     }
 
@@ -728,7 +854,7 @@ mod tests {
         let tombstone = EncryptedItem::tombstone(at, item.keys.clone(), &f.bob);
         assert!(tombstone.deleted);
         assert!(tombstone.verify(&f.bob.public()).is_ok());
-        assert!(tombstone.reaches_directly(BOB));
+        assert!(tombstone.reaches_directly(BOB, &GroupKeyring::default()));
 
         let mut undeleted = tombstone.clone();
         undeleted.deleted = false;

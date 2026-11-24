@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::directory::DirectoryEntry;
 use crate::encoding::Bytes;
-use crate::ids::{DeviceId, FolderId, ItemId, UserId};
+use crate::groups::GroupEntry;
+use crate::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use crate::items::{EncryptedItem, Sealed};
 use crate::keys::{AccountPublicKeys, DevicePublicKey, WrappedKey};
 
@@ -63,7 +64,7 @@ fn item_format_1() -> u8 {
     1
 }
 
-/// `POST /v1/setup`: the first admin claims a new server with the code it printed.
+/// `POST /v1/setup`: whoever runs a new server claims it with the code it printed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SetupRequest {
     pub setup_code: String,
@@ -223,10 +224,20 @@ pub struct Member {
     pub role: Role,
 }
 
+/// A group that can open a folder or a login, and its role there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupShare {
+    pub group_id: GroupId,
+    pub role: Role,
+}
+
 /// `GET /v1/folders/{folder_id}/members` and `GET /v1/items/{item_id}/people`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Members {
     pub members: Vec<Member>,
+    /// Groups it's shared with. Servers before 0.4.0 don't have groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupShare>,
 }
 
 /// `PUT /v1/folders/{folder_id}/members/{user_id}` and
@@ -236,8 +247,9 @@ pub struct RoleRequest {
     pub role: Role,
 }
 
-/// One link of a folder's key chain: the key of `generation - 1`, sealed with the key of
-/// `generation`. Holding the newest key opens every older one, and so every item.
+/// One link of a folder's or group's key chain: the key of `generation - 1`, sealed with
+/// the key of `generation`. Holding the newest key opens every older one, and so every
+/// item.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyLink {
     pub generation: u32,
@@ -251,6 +263,14 @@ pub struct MemberKey {
     pub wrapped_key: WrappedKey,
 }
 
+/// A folder key wrapped for one generation of a group's key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupFolderKey {
+    pub group_id: GroupId,
+    pub group_generation: u32,
+    pub wrapped_key: WrappedKey,
+}
+
 /// `POST /v1/folders/{folder_id}/rekey` (managers): gives the folder a new key, after
 /// someone lost access to it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -259,6 +279,9 @@ pub struct RekeyRequest {
     pub generation: u32,
     /// The new key, wrapped for every current member and nobody else.
     pub wrapped_keys: Vec<MemberKey>,
+    /// And for every group the folder is shared with, at the group's current key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_keys: Vec<GroupFolderKey>,
     /// The previous key, sealed with the new one.
     pub previous: Sealed,
     /// The folder's info, sealed with the new key.
@@ -276,6 +299,85 @@ pub struct PutItemRequest {
     /// Roles for the people this version gives a key copy to for the first time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<Member>,
+    /// Roles for the groups this version gives a key copy to for the first time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_roles: Vec<GroupShare>,
+}
+
+/// `POST /v1/folders/{folder_id}/groups` (folder managers): shares a folder with a group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AddFolderGroupRequest {
+    pub group_id: GroupId,
+    /// The folder's current key, wrapped for the group's current key.
+    pub wrapped_key: WrappedKey,
+    pub group_generation: u32,
+    pub role: Role,
+    /// The generation of the folder key that was wrapped.
+    pub generation: u32,
+}
+
+/// A group's secret wrapped for one of its members.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupMemberKey {
+    pub user_id: UserId,
+    pub wrapped_secret: WrappedKey,
+}
+
+/// `POST /v1/groups` (owner): makes a group, with the owner's signed first entry and its
+/// secret wrapped for each first member, the owner among them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateGroupRequest {
+    pub entry: GroupEntry,
+    pub members: Vec<GroupMemberKey>,
+}
+
+/// `GET /v1/groups`: every group on the team, so anyone can share with them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Groups {
+    pub groups: Vec<GroupInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupInfo {
+    /// Every revision of the group's entry, oldest first; apps check them all.
+    pub entries: Vec<GroupEntry>,
+    pub members: Vec<UserId>,
+    /// Someone left, and the group is waiting for a manager's app to give it a new key.
+    #[serde(default)]
+    pub needs_rekey: bool,
+}
+
+/// `POST /v1/groups/{group_id}/members` (managers in the group): adds someone, with the
+/// group's current secret wrapped for them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AddGroupMemberRequest {
+    pub user_id: UserId,
+    pub generation: u32,
+    pub wrapped_secret: WrappedKey,
+}
+
+/// `PUT /v1/groups/{group_id}` (owner and managers): the next revision of the group's
+/// entry with the same key, to rename it or change its managers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateGroupRequest {
+    pub entry: GroupEntry,
+}
+
+/// `POST /v1/groups/{group_id}/rekey` (managers in the group): a new secret after someone
+/// left: the next entry with its key, the secret wrapped for every current member, and
+/// the previous secret sealed under the new one.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupRekeyRequest {
+    pub entry: GroupEntry,
+    pub members: Vec<GroupMemberKey>,
+    pub previous: Sealed,
+}
+
+/// Which group key a folder key was wrapped for, when it reaches someone through a group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViaGroup {
+    pub group_id: GroupId,
+    pub generation: u32,
 }
 
 /// The `409 Conflict` body: someone saved first, and this is their version.
@@ -298,9 +400,14 @@ pub struct SyncPage {
     /// This user's roles, on the last page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<Roles>,
+    /// Groups this user manages that need a new key, because someone left. Folders shared
+    /// with them wait for it, and aren't in `rekey_needed` until then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_rekey_needed: Vec<GroupId>,
 }
 
-/// A user's role in each folder they're in and on each login shared with them directly.
+/// A user's role in each folder they're in and on each login shared with them directly,
+/// the highest of the ways they reach it: themselves or through a group.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roles {
     pub folders: Vec<FolderRole>,
@@ -326,9 +433,9 @@ pub enum SyncEntry {
     /// The latest version of an item in one of the user's folders, or one they own or
     /// that was shared with them directly.
     Item { seq: i64, item: EncryptedItem },
-    /// The user joined a folder. Carries the folder key wrapped for them (its current
-    /// generation, and the chain to older ones), the folder's info, and its items up to
-    /// the page's cursor.
+    /// The user joined a folder, themselves or through a group. Carries the folder key
+    /// wrapped for them or the group (its current generation, and the chain to older
+    /// ones), the folder's info, and its items up to the page's cursor.
     Joined {
         seq: i64,
         folder_id: FolderId,
@@ -338,6 +445,9 @@ pub enum SyncEntry {
         generation: u32,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chain: Vec<KeyLink>,
+        /// Set when `wrapped_key` is wrapped for a group's key, not the user's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via_group: Option<ViaGroup>,
         items: Vec<EncryptedItem>,
     },
     /// The user lost access to a folder; drop its local copy.
@@ -351,9 +461,24 @@ pub enum SyncEntry {
         wrapped_key: WrappedKey,
         generation: u32,
         chain: Vec<KeyLink>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via_group: Option<ViaGroup>,
     },
     /// The user lost direct access to a login; drop it unless a folder still gives it.
     LeftItem { seq: i64, item_id: ItemId },
+    /// The user joined a group, or one they're in changed: its entries, its current
+    /// secret wrapped for them, and the chain to older secrets. Comes before anything
+    /// that needs the group's key.
+    Group {
+        seq: i64,
+        group_id: GroupId,
+        entries: Vec<GroupEntry>,
+        generation: u32,
+        wrapped_secret: WrappedKey,
+        chain: Vec<KeyLink>,
+    },
+    /// The user left a group; forget its keys.
+    LeftGroup { seq: i64, group_id: GroupId },
 }
 
 impl SyncEntry {
@@ -363,7 +488,9 @@ impl SyncEntry {
             | Self::Joined { seq, .. }
             | Self::Left { seq, .. }
             | Self::Rekeyed { seq, .. }
-            | Self::LeftItem { seq, .. } => *seq,
+            | Self::LeftItem { seq, .. }
+            | Self::Group { seq, .. }
+            | Self::LeftGroup { seq, .. } => *seq,
         }
     }
 }

@@ -10,6 +10,7 @@ use keystead_client::http::Client;
 use keystead_client::{DeviceSigner, EditOutcome, NewAccount, Vault, join, recover, setup};
 use keystead_core::api::{PutItemRequest, Role};
 use keystead_core::encoding::Bytes;
+use keystead_core::groups::GroupKeyring;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
 use keystead_core::items::{Details, EncryptedItem, ItemVersion, Overview};
 use keystead_core::keys::{
@@ -480,8 +481,12 @@ fn one_login_from_a_folder_can_be_shared_alone() {
 
     // A login saved by Keystead 0.1, in the old format, straight through the API.
     let keys = AccountKeys::derive(&alice_secret);
-    let folder_id = alice.profile().find_folder(&keys, "Production").unwrap();
-    let folder_key = alice.profile().folder_key(&keys, folder_id).unwrap();
+    let none = GroupKeyring::default();
+    let folder_id = alice
+        .profile()
+        .find_folder(&keys, &none, "Production")
+        .unwrap();
+    let folder_key = alice.profile().folder_key(&keys, &none, folder_id).unwrap();
     let (overview, details) = login("AWS root", "aws-pass");
     let old = EncryptedItem::seal_format_1(
         ItemVersion {
@@ -508,6 +513,7 @@ fn one_login_from_a_folder_can_be_shared_alone() {
                 base_version: None,
                 item: old.clone(),
                 roles: Vec::new(),
+                group_roles: Vec::new(),
             },
         )
         .unwrap();
@@ -569,6 +575,7 @@ fn one_login_from_a_folder_can_be_shared_alone() {
                 base_version: None,
                 item: legacy.clone(),
                 roles: Vec::new(),
+                group_roles: Vec::new(),
             },
         )
         .unwrap();
@@ -638,7 +645,10 @@ fn someone_removed_from_a_folder_cant_read_what_is_saved_afterwards() {
     let folder_id = alice.profile().items[&database].folder_id.unwrap();
     // What Bob holds before he's removed: the folder's key, and his account keys.
     let bob_keys = AccountKeys::derive(&bob_secret);
-    let bobs_old_key = bob.profile().folder_key(&bob_keys, folder_id).unwrap();
+    let bobs_old_key = bob
+        .profile()
+        .folder_key(&bob_keys, &GroupKeyring::default(), folder_id)
+        .unwrap();
 
     // Carol, a viewer, can read but not change, share or remove.
     assert_eq!(carol.list().unwrap()[0].role, Role::View);
@@ -752,4 +762,122 @@ fn roles_on_a_login_and_removing_someone_from_the_team() {
     alice.edit(bank, "after-bob").unwrap();
     let saved = &alice.profile().items[&bank];
     assert!(saved.keys.people.is_empty());
+}
+
+#[test]
+fn groups_share_folders_and_logins_and_lose_access_when_someone_leaves() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let carol_identity = carol.whoami();
+    let carol_id = carol_identity.user_id;
+    alice
+        .approve(carol_id, &carol_identity.fingerprint)
+        .unwrap();
+
+    // Only the owner makes groups, each with its own name.
+    assert!(bob.create_group("Ops", &[]).is_err());
+    let group_id = alice.create_group("Ops", &[bob_id]).unwrap();
+    assert!(alice.create_group("Ops", &[]).is_err());
+
+    // A folder and a login shared with the group reach Bob, with the group's roles.
+    alice.create_folder("Production").unwrap();
+    let (overview, details) = login("Database", "db-pass");
+    let database = alice.add(Some("Production"), overview, details).unwrap();
+    let folder_id = alice.profile().items[&database].folder_id.unwrap();
+    alice
+        .share_folder_with_group("Production", "Ops", Role::Edit)
+        .unwrap();
+    let (overview, details) = login("Pager", "pager-pass");
+    let pager = alice.add(None, overview, details).unwrap();
+    alice
+        .share_item_with_group(pager, "Ops", Role::View)
+        .unwrap();
+    assert_eq!(alice.profile().items[&pager].format, 3);
+    bob.sync().unwrap();
+    assert_eq!(bob.open_item(database).unwrap().1.password, "db-pass");
+    assert_eq!(bob.open_item(pager).unwrap().1.password, "pager-pass");
+    let rows = bob.list().unwrap();
+    let row = |id: ItemId| rows.iter().find(|row| row.id == id).unwrap();
+    assert_eq!(row(database).role, Role::Edit);
+    assert_eq!(row(pager).role, Role::View);
+    assert_eq!(row(pager).shared_with_groups, ["Ops"]);
+    assert!(matches!(
+        bob.edit(database, "db-2").unwrap(),
+        EditOutcome::Saved { .. }
+    ));
+    assert!(bob.edit(pager, "mine").is_err());
+    let groups = bob.groups();
+    assert_eq!(groups[0].name, "Ops");
+    assert!(groups[0].member && !groups[0].can_manage);
+    let (_, shares) = alice.folder_sharing("Production").unwrap();
+    assert_eq!(
+        shares
+            .iter()
+            .map(|share| (share.name.as_str(), share.role))
+            .collect::<Vec<_>>(),
+        [("Ops", Role::Edit)]
+    );
+
+    // Only managers add people. Carol, added later, gets what the group already had.
+    assert!(bob.add_to_group("Ops", carol_id).is_err());
+    alice.add_to_group("Ops", carol_id).unwrap();
+    carol.sync().unwrap();
+    assert_eq!(carol.open_item(database).unwrap().1.password, "db-2");
+    assert_eq!(carol.open_item(pager).unwrap().1.password, "pager-pass");
+
+    // Alice takes Bob out. His devices drop what the group gave him, and Alice's app gives
+    // the group and then the folder new keys.
+    let summary = alice.remove_from_group("Ops", bob_id).unwrap();
+    assert_eq!(summary.rekeyed, 2, "{:?}", summary.rekey_problems);
+    assert_eq!(alice.profile().groups[&group_id].generation, 2);
+    assert_eq!(alice.profile().folders[&folder_id].generation, 1);
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap().is_empty());
+    assert!(!bob.groups()[0].member);
+
+    // Carol still opens everything: the login's copy for the group's first key through
+    // the group's chain, and what's saved from now on with the new keys.
+    carol.sync().unwrap();
+    assert_eq!(carol.profile().groups[&group_id].generation, 2);
+    assert_eq!(carol.open_item(pager).unwrap().1.password, "pager-pass");
+    alice.edit(database, "db-3").unwrap();
+    alice.edit(pager, "pager-2").unwrap();
+    carol.sync().unwrap();
+    assert_eq!(carol.open_item(database).unwrap().1.password, "db-3");
+    assert_eq!(carol.open_item(pager).unwrap().1.password, "pager-2");
+    assert_eq!(alice.profile().items[&pager].keys.groups[0].generation, 2);
+
+    // Carol joins the folder herself too. When the group stops having it, she keeps it,
+    // and gets its key again as her own.
+    alice
+        .share_folder("Production", carol_id, Role::View)
+        .unwrap();
+    carol.sync().unwrap();
+    assert!(carol.profile().folders[&folder_id].via_group.is_some());
+    alice.remove_group_from_folder("Production", "Ops").unwrap();
+    carol.sync().unwrap();
+    assert!(carol.profile().folders[&folder_id].via_group.is_none());
+    assert_eq!(carol.open_item(database).unwrap().1.password, "db-3");
+
+    // Carol leaves the group herself: the login shared with it goes, her folder stays.
+    carol.remove_from_group("Ops", carol_id).unwrap();
+    let names: Vec<String> = carol
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(names, ["Database"]);
+    assert!(carol.profile().groups.is_empty());
+
+    // Renaming and managers: Alice makes the group's new name stick for everyone.
+    alice.rename_group("Ops", "Operations").unwrap();
+    bob.sync().unwrap();
+    assert_eq!(bob.groups()[0].name, "Operations");
 }
