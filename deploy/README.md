@@ -176,6 +176,13 @@ keep working, but they don't tell the server when they save a new password, so a
 changed in one stays on the list until someone chooses to keep it; update the apps too.
 Apps from 0.5.0 work with older servers and just show no list.
 
+**Updating to 0.6.0.** One-time codes: a login can keep a site's one-time code setup, and
+apps show the current code. A login with a code is saved in a new format that apps before
+0.6.0 can't open, so they don't lose the code by saving the login without it. But an app
+before 0.6.0 can't list any logins once it syncs one with a code, so update every app and
+the CLI before anyone adds a code. Nothing changes until someone does. Apps from 0.6.0 work
+with older servers, but say the server needs updating before saving a code.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
