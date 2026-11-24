@@ -163,6 +163,12 @@ becomes a manager, so nothing changes until someone changes it. Update every app
 CLI along with the server: once someone is removed from anything, apps older than 0.3.0
 can't sync with that server any more.
 
+**Updating to 0.4.0.** Groups: the owner makes them, and folders and logins can be shared
+with a group as with a person. Nothing changes until someone makes a group. Update every
+app and the CLI before anyone does: apps older than 0.4.0 can't sync once their user is in
+a group, and can't open logins shared with one. Apps from 0.4.0 still work with a 0.3.0
+server, but can't use groups until the server is updated.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
