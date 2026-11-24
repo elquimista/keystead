@@ -73,8 +73,13 @@ account back on a new Mac with a Recovery Kit.
 - **Shared client:** the `keystead-client` library does sign-in, sync, sharing and
   signature checks. The account keys stay inside Rust and never reach Swift.
 - **Copying passwords:** copied passwords stay on this Mac (no Universal Clipboard), are
-  marked concealed for clipboard managers, and are cleared after 30 seconds if still on
-  the clipboard.
+  marked concealed for clipboard managers, and after 30 seconds, if still on the clipboard,
+  give way to what was there before you copied (kept in memory only). Copying several in a
+  row brings back what was there before the first, never an earlier password; another
+  app's secret is cleared, not put back; locking because you're away just clears. On
+  macOS 26 and later, reading the clipboard can make macOS ask, so Keystead only puts
+  things back if it may paste from other apps without asking (System Settings › Privacy &
+  Security); otherwise it just clears, as before.
 - **Debug builds** are a separate app, "Keystead Dev" (`….Keystead.dev`), with their own
   data and an orange icon. Development never touches a real vault, and the two are easy
   to tell apart.
