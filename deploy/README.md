@@ -199,6 +199,12 @@ needs updating if it's older.
 clipboard gets back what was on it before. The server is the same as 0.8.0, so updating it
 is optional.
 
+**Updating to 0.9.0.** Recently deleted: the server keeps a deleted login's earlier
+versions for 30 days, so apps from 0.9.0 can bring it back, then forgets them. Logins
+deleted before the update can't come back. The database keeps a little more for a while.
+Older apps keep working without Recently Deleted, and apps from 0.9.0 work with older
+servers, saying that deleted logins can't come back.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
