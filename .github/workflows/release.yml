@@ -1,0 +1,152 @@
+name: Release
+
+# Pushing a version tag (v0.1.0) publishes the server image to the GitHub Container
+# Registry as ghcr.io/<owner>/keystead-server, for linux/amd64 and linux/arm64, tagged
+# 0.1.0, 0.1 and latest. The tag must match the version in Cargo.toml, and all of CI must
+# pass on the tagged commit first.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches the version in Cargo.toml
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::The tag is $GITHUB_REF_NAME but Cargo.toml says $VERSION; tag v$VERSION instead."
+            exit 1
+          fi
+
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  # Each platform builds natively on its own runner (emulating ARM to compile Rust is very
+  # slow), checks the image starts and reports healthy, then pushes it by digest only.
+  build:
+    needs: [version, ci]
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Name the image
+        run: |
+          # Registry names must be lowercase.
+          OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/$OWNER/keystead-server" >> "$GITHUB_ENV"
+          echo "PLATFORM_PAIR=${MATRIX_PLATFORM//\//-}" >> "$GITHUB_ENV"
+        env:
+          MATRIX_PLATFORM: ${{ matrix.platform }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          load: true
+          tags: keystead-server:test
+      - name: Start it and wait until healthy
+        run: |
+          docker run -d --name keystead -p 127.0.0.1:8080:8080 keystead-server:test
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' keystead)" = healthy ] && break
+            sleep 2
+          done
+          docker logs keystead
+          curl --fail http://127.0.0.1:8080/v1/health
+      - id: push
+        name: Push by digest
+        # The same build again, so it comes from the builder's cache.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Keep the digest for the merge job
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Joins the per-platform images into one multi-platform image under the version tags.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Name the image
+        run: |
+          OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/$OWNER/keystead-server" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # 0.1.0, 0.1 and latest; 1, 2 and so on once there's a 1.0. Pre-releases
+          # (v0.2.0-rc.1) get only their own tag.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+      - name: Create the multi-platform image and tag it
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          # "-t <tag>" for each version tag, and each platform's image by its digest.
+          mapfile -t tags < <(jq -r '.tags[] | ("-t", .)' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          sources=()
+          for digest in *; do
+            sources+=("$IMAGE@sha256:$digest")
+          done
+          docker buildx imagetools create "${tags[@]}" \
+            --annotation "index:org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --annotation "index:org.opencontainers.image.description=The Keystead server" \
+            "${sources[@]}"
+      - name: Show what was published
+        run: docker buildx imagetools inspect "$IMAGE:$DOCKER_METADATA_OUTPUT_VERSION"

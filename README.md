@@ -54,8 +54,9 @@ docker compose logs server        # shows the one-time setup code on first start
 docker compose down               # stop; add -v to also delete the data
 ```
 
-To run it for your team on a server with a domain name and HTTPS, see
-[`deploy/README.md`](deploy/README.md).
+Each release publishes the image as `ghcr.io/elquimista/keystead-server` (see
+[Releasing](#releasing)). To run it for your team on a server with a domain name and HTTPS,
+see [`deploy/README.md`](deploy/README.md).
 
 The API is specified in [`docs/format.md`](docs/format.md).
 
@@ -105,6 +106,28 @@ If you installed rustup with Homebrew, `cargo` isn't on your PATH by default. Ad
 ```sh
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 ```
+
+## Releasing
+
+Pushing a version tag publishes the server image to the GitHub Container Registry, for
+`linux/amd64` and `linux/arm64`. The tag must match the version in `Cargo.toml`, and all of
+CI must pass on the tagged commit first. For example, for 0.2.0:
+
+1. Set `version = "0.2.0"` in the root `Cargo.toml`, and commit.
+2. Tag and push:
+
+   ```sh
+   git tag v0.2.0
+   git push origin main v0.2.0
+   ```
+
+The [release workflow](.github/workflows/release.yml) then publishes
+`ghcr.io/elquimista/keystead-server` tagged `0.2.0`, `0.2` and `latest`. Pre-releases such
+as `v0.3.0-rc.1` get only their own tag.
+
+After the first release, GitHub may list the image as private: on the repository's
+**Packages** entry, open **Package settings** and change the visibility to public, so
+servers can pull it without logging in.
 
 ## License
 

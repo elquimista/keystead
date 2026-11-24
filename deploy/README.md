@@ -22,9 +22,9 @@ copy of your passwords until those exist.
 
 ## What you need
 
-- A Linux server with nginx installed. These steps use Ubuntu or Debian; other
-  distributions work the same with their own paths. 1 CPU and 2 GB of memory are plenty;
-  the first build compiles the server and needs about 2 GB (add swap on a 1 GB server).
+- A Linux server with nginx installed, on x86-64 or ARM. These steps use Ubuntu or
+  Debian; other distributions work the same with their own paths. 1 CPU and 1 GB of
+  memory are plenty.
 - [Docker Engine](https://docs.docker.com/engine/install/) with the Compose plugin.
 - A domain on Cloudflare, and a name in it for Keystead, such as `keys.example.com`.
   Choose the one you'll keep: every Mac stores the address when it joins, and there's no
@@ -32,11 +32,14 @@ copy of your passwords until those exist.
 
 ## 1. Start the Keystead server
 
+The server runs as the image published from each release, `ghcr.io/elquimista/keystead-server`.
+`deploy/.env` pins which release:
+
 ```sh
 git clone https://github.com/elquimista/keystead.git
 cd keystead/deploy
-cp .env.example .env           # change KEYSTEAD_PORT if 8080 is already taken
-docker compose up -d --build   # the first build takes a few minutes
+cp .env.example .env           # check KEYSTEAD_VERSION; change KEYSTEAD_PORT if 8080 is taken
+docker compose up -d
 curl http://127.0.0.1:8080/v1/health
 ```
 
@@ -131,14 +134,20 @@ person or on a call. Then share folders with them.
 
 ## Updating
 
+Releases are listed under the repository's
+[tags](https://github.com/elquimista/keystead/tags). To move to one:
+
 ```sh
 cd keystead
-git pull
+git pull                       # picks up any changes to these deploy files
 cd deploy
-docker compose up -d --build
+nano .env                      # set KEYSTEAD_VERSION to the new release, such as 0.2.0
+docker compose pull
+docker compose up -d
 ```
 
-The data stays in its volume across updates.
+The data stays in its volume across updates. To go back, set the previous version and run
+the same two commands.
 
 ## Backups
 
@@ -169,6 +178,11 @@ Macs that synced after the backup was made keep their newer copies, but the serv
 know about changes made since. Have people re-add anything they changed.
 
 ## Good to know
+
+- **Building the image yourself** instead of using a published one, from the repository's
+  root: `docker build -t ghcr.io/elquimista/keystead-server:local .`, then set
+  `KEYSTEAD_VERSION=local` in `deploy/.env` and run `docker compose up -d`. The build
+  compiles the server and needs about 2 GB of memory.
 
 - `docker compose logs -f server` follows the server's log. It logs no passwords or other
   secrets; the server never sees them.

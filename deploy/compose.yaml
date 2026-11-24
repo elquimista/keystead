@@ -1,8 +1,9 @@
-# The Keystead server for a deployment behind nginx on the same machine. It listens only
-# on the machine's own 127.0.0.1, so nothing but nginx can reach it. See deploy/README.md.
+# The Keystead server for a deployment behind nginx on the same machine. It runs the
+# image published from this repository's release tags, and listens only on the machine's
+# own 127.0.0.1, so nothing but nginx can reach it. See deploy/README.md.
 #
-#   cp .env.example .env     # change KEYSTEAD_PORT if 8080 is taken
-#   docker compose up -d --build
+#   cp .env.example .env     # pin KEYSTEAD_VERSION; change KEYSTEAD_PORT if 8080 is taken
+#   docker compose up -d
 
 # A fixed project name, so the data volume is always keystead_keystead-data, whatever the
 # checkout's folder is called.
@@ -10,8 +11,7 @@ name: keystead
 
 services:
   server:
-    build: ..
-    image: keystead-server:latest
+    image: ghcr.io/elquimista/keystead-server:${KEYSTEAD_VERSION:-latest}
     ports:
       - "127.0.0.1:${KEYSTEAD_PORT:-8080}:8080"
     volumes:
