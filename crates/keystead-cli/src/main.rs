@@ -68,10 +68,11 @@ enum Command {
     /// Create, share and list folders
     #[command(subcommand)]
     Folder(FolderCommand),
-    /// Add a login to a folder
+    /// Add a login: to a folder, or without one as your own until you share it
     Add {
-        folder: String,
         name: String,
+        #[arg(long)]
+        folder: Option<String>,
         #[arg(long)]
         username: Option<String>,
         #[arg(long)]
@@ -79,6 +80,13 @@ enum Command {
         /// Generate a random password instead of asking for one
         #[arg(long)]
         generate: bool,
+    },
+    /// Share one login with an approved user, without the rest of its folder
+    Share {
+        name: String,
+        user_id: i64,
+        #[arg(long)]
+        folder: Option<String>,
     },
     /// List logins
     Ls,
@@ -260,8 +268,8 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Add {
-            folder,
             name,
+            folder,
             username,
             url,
             generate,
@@ -276,15 +284,35 @@ fn run(cli: Cli) -> Result<()> {
                 url: url.unwrap_or_default(),
                 tags: Vec::new(),
             };
-            commands::add(&home, &folder, overview, details)?;
-            println!("Added {name} to {folder}.");
+            commands::add(&home, folder.as_deref(), overview, details)?;
+            match folder {
+                Some(folder) => println!("Added {name} to {folder}."),
+                None => println!("Added {name}. Only you can see it until you share it."),
+            }
+        }
+        Command::Share {
+            name,
+            user_id,
+            folder,
+        } => {
+            let who = commands::share(&home, &name, folder.as_deref(), UserId(user_id))?;
+            println!("Shared {name} with {who}.");
         }
         Command::Ls => {
             let rows = commands::list(&home)?
                 .into_iter()
-                .map(|item| vec![item.folder, item.name, item.username, item.url])
+                .map(|item| {
+                    let shared = shared(&item);
+                    vec![
+                        item.folder.unwrap_or_else(|| "-".into()),
+                        item.name,
+                        item.username,
+                        item.url,
+                        shared,
+                    ]
+                })
                 .collect();
-            print_table(&["FOLDER", "NAME", "USERNAME", "URL"], rows);
+            print_table(&["FOLDER", "NAME", "USERNAME", "URL", "SHARED"], rows);
         }
         Command::Show { name, folder } => {
             let (_, details) = commands::show(&home, &name, folder.as_deref())?;
@@ -324,6 +352,20 @@ fn password(generate: bool) -> Result<String> {
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line)?;
     Ok(line.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+/// How a login is shared outside its folder: "from Ana", "with you", "with Bob, Carol".
+fn shared(item: &commands::ItemRow) -> String {
+    let mut parts = Vec::new();
+    match &item.owner {
+        Some(owner) => parts.push(format!("from {owner}")),
+        None if item.shared_with_me => parts.push("with you".to_owned()),
+        None => {}
+    }
+    if !item.shared_with.is_empty() {
+        parts.push(format!("with {}", item.shared_with.join(", ")));
+    }
+    parts.join("; ")
 }
 
 /// A Unix timestamp as a UTC date, like 2026-11-23.

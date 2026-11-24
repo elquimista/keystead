@@ -11,6 +11,21 @@ use crate::ids::{DeviceId, FolderId, UserId};
 use crate::items::{EncryptedItem, Sealed};
 use crate::keys::{AccountPublicKeys, DevicePublicKey, WrappedKey};
 
+/// `GET /v1/health`: answered without signing in.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Health {
+    pub status: String,
+    pub version: String,
+    /// The newest item format the server stores. Servers older than 0.2.0 don't say,
+    /// and only store format 1.
+    #[serde(default = "item_format_1")]
+    pub item_format: u8,
+}
+
+fn item_format_1() -> u8 {
+    1
+}
+
 /// `POST /v1/setup`: the first admin claims a new server with the code it printed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SetupRequest {
@@ -161,7 +176,8 @@ pub struct AddMemberRequest {
 
 /// `PUT /v1/items/{item_id}`: saves a new version. `base_version` is the version the
 /// edit started from, or `None` for a new item. A stale base gets `409 Conflict` with
-/// a [`Conflict`] body.
+/// a [`Conflict`] body. Sharing an item directly is saving a version whose key copies
+/// include the new person.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PutItemRequest {
     pub base_version: Option<u64>,
@@ -188,7 +204,8 @@ pub struct SyncPage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SyncEntry {
-    /// The latest version of an item in one of the user's folders.
+    /// The latest version of an item in one of the user's folders, or one they own or
+    /// that was shared with them directly.
     Item { seq: i64, item: EncryptedItem },
     /// The user joined a folder. Carries the folder key wrapped for them, the folder's
     /// info, and its items up to the page's cursor.

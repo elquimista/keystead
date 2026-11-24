@@ -15,12 +15,12 @@ use std::time::Duration;
 
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use keystead_core::api::Health;
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::encoding::Key32;
 use keystead_core::ids::{FolderId, UserId};
 use keystead_core::keys::AccountPublicKeys;
 use rand::Rng;
-use serde_json::{Value, json};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePool, SqlitePoolOptions,
     SqliteSynchronous,
@@ -37,6 +37,25 @@ const MIGRATIONS: &[&str] = &[
     // 1 (0.2.0): device names, and when each device was added.
     "ALTER TABLE devices ADD COLUMN name TEXT NOT NULL DEFAULT '';
      ALTER TABLE devices ADD COLUMN added_at INTEGER;",
+    // 2 (0.2.0): items outside folders (SQLite can't drop NOT NULL, so the table is
+    // rebuilt), and who can open an item without being in its folder.
+    "CREATE TABLE items_new (
+         id TEXT PRIMARY KEY,
+         folder_id TEXT REFERENCES folders (id),
+         version INTEGER NOT NULL,
+         seq INTEGER NOT NULL,
+         body TEXT NOT NULL
+     );
+     INSERT INTO items_new (id, folder_id, version, seq, body)
+         SELECT id, folder_id, version, seq, body FROM items;
+     DROP TABLE items;
+     ALTER TABLE items_new RENAME TO items;
+     CREATE INDEX items_folder_seq ON items (folder_id, seq);
+     CREATE TABLE item_access (
+         user_id INTEGER NOT NULL REFERENCES users (id),
+         item_id TEXT NOT NULL REFERENCES items (id),
+         PRIMARY KEY (user_id, item_id)
+     ) WITHOUT ROWID;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -120,8 +139,12 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok", "version": keystead_core::VERSION }))
+async fn health() -> Json<Health> {
+    Json(Health {
+        status: "ok".into(),
+        version: keystead_core::VERSION.into(),
+        item_format: keystead_core::items::ITEM_FORMAT,
+    })
 }
 
 /// Twelve characters in three groups, from an alphabet without look-alikes (about 60 bits).

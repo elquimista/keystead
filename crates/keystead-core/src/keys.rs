@@ -1,9 +1,9 @@
-//! Account, folder and device keys.
+//! Account, folder, item and device keys.
 //!
 //! A user's account keys come from one 32-byte secret, which each device keeps wrapped
-//! by its own hardware key. Folder keys are wrapped for each member's account key, and
-//! every wrapped key names the scheme that wrapped it, so each platform can use what its
-//! hardware supports.
+//! by its own hardware key. Folder keys are wrapped for each member's account key; item
+//! keys for each person an item is shared with directly. Every wrapped key names the
+//! scheme that wrapped it, so each platform can use what its hardware supports.
 
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -20,7 +20,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::Error;
 use crate::encoding::{Bytes, Key32, transcript};
-use crate::ids::{DeviceId, FolderId};
+use crate::ids::{DeviceId, FolderId, ItemId};
 
 type Kem = X25519HkdfSha256;
 type KemPrivateKey = <Kem as hpke::Kem>::PrivateKey;
@@ -29,7 +29,9 @@ type EncappedKey = <Kem as hpke::Kem>::EncappedKey;
 
 const ACCOUNT_ENCRYPTION_INFO: &[u8] = b"keystead/account/encryption/v1";
 const ACCOUNT_SIGNING_INFO: &[u8] = b"keystead/account/signing/v1";
+const ACCOUNT_PERSONAL_INFO: &[u8] = b"keystead/account/personal/v1";
 const FOLDER_KEY_INFO: &[u8] = b"keystead/folder-key/v1";
+const ITEM_KEY_INFO: &[u8] = b"keystead/item-key/v1";
 
 /// The 32 random bytes every account key comes from. Devices store it wrapped by their
 /// hardware key; it never reaches the server unwrapped.
@@ -99,31 +101,42 @@ impl AccountSecret {
     }
 }
 
-/// A user's private keys: one for opening folder keys, one for signing.
+/// A user's private keys: one for opening wrapped keys, one for signing, and a symmetric
+/// personal key for items outside folders.
 pub struct AccountKeys {
     encryption: KemPrivateKey,
     encryption_public: KemPublicKey,
     signing: SigningKey,
+    personal: Zeroizing<[u8; 32]>,
 }
 
 impl AccountKeys {
-    /// Derives both keys from the secret with HKDF-SHA256, using a different `info` for
+    /// Derives every key from the secret with HKDF-SHA256, using a different `info` for
     /// each, so the same secret always gives the same keys.
     pub fn derive(secret: &AccountSecret) -> Self {
         let hkdf = Hkdf::<Sha256>::new(None, &secret.0);
-        let mut encryption_seed = Zeroizing::new([0u8; 32]);
-        hkdf.expand(ACCOUNT_ENCRYPTION_INFO, &mut *encryption_seed)
-            .expect("32 bytes is a valid HKDF output length");
-        let mut signing_seed = Zeroizing::new([0u8; 32]);
-        hkdf.expand(ACCOUNT_SIGNING_INFO, &mut *signing_seed)
-            .expect("32 bytes is a valid HKDF output length");
+        let expand = |info: &[u8]| {
+            let mut out = Zeroizing::new([0u8; 32]);
+            hkdf.expand(info, &mut *out)
+                .expect("32 bytes is a valid HKDF output length");
+            out
+        };
+        let encryption_seed = expand(ACCOUNT_ENCRYPTION_INFO);
+        let signing_seed = expand(ACCOUNT_SIGNING_INFO);
 
         let (encryption, encryption_public) = Kem::derive_keypair(&*encryption_seed);
         Self {
             encryption,
             encryption_public,
             signing: SigningKey::from_bytes(&signing_seed),
+            personal: expand(ACCOUNT_PERSONAL_INFO),
         }
+    }
+
+    /// The personal key's cipher. Only this account can make it, so what it seals opens
+    /// for this account alone.
+    pub(crate) fn personal_cipher(&self) -> XChaCha20Poly1305 {
+        XChaCha20Poly1305::new(Key::from_slice(&*self.personal))
     }
 
     pub fn public(&self) -> AccountPublicKeys {
@@ -144,6 +157,17 @@ impl AccountKeys {
         wrapped: &WrappedKey,
         folder_id: FolderId,
     ) -> Result<FolderKey, Error> {
+        self.unwrap(wrapped, FOLDER_KEY_INFO, folder_id.as_bytes())
+            .map(FolderKey)
+    }
+
+    /// Opens an item key that was shared with this account directly.
+    pub fn unwrap_item_key(&self, wrapped: &WrappedKey, item_id: ItemId) -> Result<ItemKey, Error> {
+        self.unwrap(wrapped, ITEM_KEY_INFO, item_id.as_bytes())
+            .map(ItemKey)
+    }
+
+    fn unwrap(&self, wrapped: &WrappedKey, info: &[u8], aad: &[u8]) -> Result<[u8; 32], Error> {
         if wrapped.scheme != WrapScheme::HpkeX25519Sha256ChaCha20Poly1305 {
             return Err(Error::UnsupportedScheme(wrapped.scheme));
         }
@@ -154,17 +178,13 @@ impl AccountKeys {
                 &OpModeR::Base,
                 &self.encryption,
                 &encapped,
-                FOLDER_KEY_INFO,
+                info,
                 wrapped.ciphertext.as_slice(),
-                folder_id.as_bytes(),
+                aad,
             )
             .map_err(|_| Error::Decrypt)?,
         );
-        let bytes: [u8; 32] = plaintext
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::Decrypt)?;
-        Ok(FolderKey(bytes))
+        plaintext.as_slice().try_into().map_err(|_| Error::Decrypt)
     }
 }
 
@@ -183,15 +203,24 @@ impl AccountPublicKeys {
         key: &FolderKey,
         folder_id: FolderId,
     ) -> Result<WrappedKey, Error> {
+        self.wrap(&key.0, FOLDER_KEY_INFO, folder_id.as_bytes())
+    }
+
+    /// Wraps an item key for this account, to share the item with it directly.
+    pub fn wrap_item_key(&self, key: &ItemKey, item_id: ItemId) -> Result<WrappedKey, Error> {
+        self.wrap(&key.0, ITEM_KEY_INFO, item_id.as_bytes())
+    }
+
+    fn wrap(&self, key: &[u8; 32], info: &[u8], aad: &[u8]) -> Result<WrappedKey, Error> {
         let recipient =
             KemPublicKey::from_bytes(&self.encryption.0).map_err(|_| Error::InvalidKey)?;
         let (encapped, ciphertext) =
             hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
                 &OpModeS::Base,
                 &recipient,
-                FOLDER_KEY_INFO,
-                &key.0,
-                folder_id.as_bytes(),
+                info,
+                key,
+                aad,
                 &mut OsRng,
             )
             .map_err(|_| Error::InvalidKey)?;
@@ -225,7 +254,8 @@ impl AccountPublicKeys {
     }
 }
 
-/// The symmetric key that encrypts every item in one folder.
+/// The symmetric key of one folder. It seals the folder's info and the keys of the items
+/// in it. (Format 1 items were encrypted with it directly.)
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct FolderKey([u8; 32]);
 
@@ -234,6 +264,36 @@ impl FolderKey {
         let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
         Self(bytes)
+    }
+
+    pub(crate) fn cipher(&self) -> XChaCha20Poly1305 {
+        XChaCha20Poly1305::new(Key::from_slice(&self.0))
+    }
+
+    /// The key a format 1 item's parts were encrypted with: the folder key itself.
+    pub(crate) fn format_1_item_key(&self) -> ItemKey {
+        ItemKey(self.0)
+    }
+}
+
+/// The symmetric key that encrypts one item. It reaches people through the item's folder
+/// key, its owner's personal key, or a copy wrapped for each person it's shared with.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct ItemKey([u8; 32]);
+
+impl ItemKey {
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 
     pub(crate) fn cipher(&self) -> XChaCha20Poly1305 {
@@ -252,6 +312,16 @@ pub enum WrapScheme {
     /// by macOS to wrap the account secret to a Secure Enclave key; handled in Swift.
     #[serde(rename = "hpke-p256-sha256-aes256gcm")]
     HpkeP256Sha256Aes256Gcm,
+}
+
+impl WrapScheme {
+    /// The scheme's name, as it appears in JSON.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::HpkeX25519Sha256ChaCha20Poly1305 => "hpke-x25519-sha256-chacha20poly1305",
+            Self::HpkeP256Sha256Aes256Gcm => "hpke-p256-sha256-aes256gcm",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +437,8 @@ impl SoftwareDeviceKey {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
 
     #[test]
@@ -476,10 +548,35 @@ mod tests {
     }
 
     #[test]
+    fn an_item_key_opens_only_for_its_recipient_and_item() {
+        let alice = AccountKeys::derive(&AccountSecret::generate());
+        let bob = AccountKeys::derive(&AccountSecret::generate());
+        let item = ItemId::random();
+        let key = ItemKey::generate();
+        let wrapped = bob.public().wrap_item_key(&key, item).unwrap();
+
+        assert_eq!(bob.unwrap_item_key(&wrapped, item).unwrap().0, key.0);
+        assert!(alice.unwrap_item_key(&wrapped, item).is_err());
+        assert!(bob.unwrap_item_key(&wrapped, ItemId::random()).is_err());
+        // A wrapped item key isn't a wrapped folder key, even with the same id bytes.
+        let folder = FolderId::from_str(&item.to_string()).unwrap();
+        assert!(bob.unwrap_folder_key(&wrapped, folder).is_err());
+    }
+
+    #[test]
     fn wrap_schemes_have_stable_names() {
+        for scheme in [
+            WrapScheme::HpkeX25519Sha256ChaCha20Poly1305,
+            WrapScheme::HpkeP256Sha256Aes256Gcm,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&scheme).unwrap(),
+                format!("\"{}\"", scheme.name())
+            );
+        }
         assert_eq!(
-            serde_json::to_string(&WrapScheme::HpkeX25519Sha256ChaCha20Poly1305).unwrap(),
-            "\"hpke-x25519-sha256-chacha20poly1305\""
+            WrapScheme::HpkeX25519Sha256ChaCha20Poly1305.name(),
+            "hpke-x25519-sha256-chacha20poly1305"
         );
         assert!(serde_json::from_str::<WrapScheme>("\"rot13\"").is_err());
     }

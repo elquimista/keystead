@@ -106,8 +106,17 @@ pub fn folders(home: &Path) -> Result<Vec<String>> {
     refreshed(home)?.folders()
 }
 
-pub fn add(home: &Path, folder: &str, overview: Overview, details: Details) -> Result<()> {
+/// Adds a login to a folder, or with no folder as the caller's own.
+pub fn add(home: &Path, folder: Option<&str>, overview: Overview, details: Details) -> Result<()> {
     open(home)?.add(folder, overview, details).map(|_| ())
+}
+
+/// Shares one login with an approved user. Returns their name.
+pub fn share(home: &Path, name: &str, folder: Option<&str>, user: UserId) -> Result<String> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.share_item(item_id, user)
 }
 
 pub fn list(home: &Path) -> Result<Vec<ItemRow>> {

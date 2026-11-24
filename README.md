@@ -81,12 +81,19 @@ keystead join http://127.0.0.1:8080 <token> --owner <Alice's fingerprint>
 keystead approve 2 --fingerprint <Bob's fingerprint>
 keystead folder create Production
 keystead folder share Production 2
-keystead add Production "AWS root" --username root@example.com
+keystead add "AWS root" --folder Production --username root@example.com
+
+# Alice: a login of her own, then share just that one with Bob
+keystead add Bank
+keystead share Bank 2
 
 # Bob
 keystead ls
 keystead show "AWS root"
 ```
+
+A login added without `--folder` is yours alone until you share it. `keystead share`
+shares one login, from a folder or not, without the rest of its folder.
 
 Each account has a recovery kit: its secret as 24 words, to bring it back on a new device.
 

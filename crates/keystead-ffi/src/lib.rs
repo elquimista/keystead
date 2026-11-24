@@ -143,14 +143,23 @@ pub enum PasswordChange {
     },
 }
 
-/// An item's searchable fields. The password stays encrypted until asked for.
+/// An item's searchable fields, and who it's shared with. The password stays encrypted
+/// until asked for.
 #[derive(uniffi::Record)]
 pub struct ItemSummary {
     pub id: String,
-    pub folder: String,
+    /// Its folder, if it's in one of yours. Without one, it's yours alone or was shared
+    /// with you directly.
+    pub folder: Option<String>,
     pub name: String,
     pub username: String,
     pub url: String,
+    /// Whose it is, for a login outside folders that isn't yours.
+    pub owner: Option<String>,
+    /// Everyone it's shared with directly, except you.
+    pub shared_with: Vec<String>,
+    /// You can open it only because it was shared with you directly.
+    pub shared_with_me: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -336,6 +345,9 @@ impl Vault {
                 name: row.name,
                 username: row.username,
                 url: row.url,
+                owner: row.owner,
+                shared_with: row.shared_with,
+                shared_with_me: row.shared_with_me,
             })
             .collect())
     }
@@ -402,9 +414,10 @@ impl Vault {
         Ok(self.vault()?.folders()?)
     }
 
+    /// Adds a login to a folder, or with no folder as yours alone until you share it.
     pub fn add_login(
         &self,
-        folder: String,
+        folder: Option<String>,
         name: String,
         username: String,
         url: String,
@@ -420,8 +433,16 @@ impl Vault {
             password,
             notes: String::new(),
         };
-        self.vault()?.add(&folder, overview, details)?;
+        self.vault()?.add(folder.as_deref(), overview, details)?;
         Ok(())
+    }
+
+    /// Shares one login with an approved user, without the rest of its folder. Returns
+    /// their name.
+    pub fn share_login(&self, item_id: String, user_id: i64) -> Result<String, CoreError> {
+        Ok(self
+            .vault()?
+            .share_item(item_id_from(&item_id)?, UserId(user_id))?)
     }
 }
 

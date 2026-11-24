@@ -160,7 +160,7 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     owner.create_folder("Production".into()).unwrap();
     owner
         .add_login(
-            "Production".into(),
+            Some("Production".into()),
             "AWS root".into(),
             "root@example.com".into(),
             "https://aws.amazon.com".into(),
@@ -190,6 +190,41 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     assert!(matches!(change, PasswordChange::Saved { version: 2 }));
     owner.sync().unwrap();
     assert_eq!(owner.password(items[0].id.clone()).unwrap(), "rotated");
+
+    // A login of the owner's own, outside folders, reaches the member once shared.
+    owner
+        .add_login(
+            None,
+            "Bank".into(),
+            String::new(),
+            String::new(),
+            "own".into(),
+        )
+        .unwrap();
+    let bank = owner
+        .items()
+        .unwrap()
+        .into_iter()
+        .find(|item| item.name == "Bank")
+        .unwrap();
+    assert_eq!(bank.folder, None);
+    assert!(bank.shared_with.is_empty() && !bank.shared_with_me);
+    member.sync().unwrap();
+    assert_eq!(member.items().unwrap().len(), 1);
+    assert_eq!(
+        owner.share_login(bank.id.clone(), them.user_id).unwrap(),
+        "Mo"
+    );
+    member.sync().unwrap();
+    let shared = member
+        .items()
+        .unwrap()
+        .into_iter()
+        .find(|item| item.name == "Bank")
+        .unwrap();
+    assert!(shared.shared_with_me);
+    assert_eq!(shared.owner.as_deref(), Some("Olivia"));
+    assert_eq!(member.password(shared.id).unwrap(), "own");
 }
 
 #[test]
@@ -210,7 +245,7 @@ fn an_owner_recovers_on_a_new_mac_from_the_kit() {
     owner.create_folder("Production".into()).unwrap();
     owner
         .add_login(
-            "Production".into(),
+            Some("Production".into()),
             "AWS root".into(),
             String::new(),
             String::new(),

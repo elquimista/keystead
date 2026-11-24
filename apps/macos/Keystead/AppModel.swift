@@ -19,9 +19,11 @@ final class AppModel {
         case unlocked
     }
 
-    /// What the main window shows, chosen in its sidebar or the Go menu.
+    /// What the main window shows, chosen in its sidebar or the View menu.
     enum Section: Hashable {
         case allLogins
+        /// Logins shared with you one by one, outside your folders.
+        case sharedWithMe
         case folder(String)
         case people
     }
@@ -30,6 +32,7 @@ final class AppModel {
     enum Sheet: Identifiable {
         case addLogin(folder: String?)
         case changePassword(ItemSummary)
+        case shareLogin(ItemSummary)
         case newFolder
         case share(folder: String?, user: User?)
         case invite
@@ -43,6 +46,7 @@ final class AppModel {
             switch self {
             case .addLogin(let folder): "add-\(folder ?? "")"
             case .changePassword(let item): "change-\(item.id)"
+            case .shareLogin(let item): "share-login-\(item.id)"
             case .newFolder: "new-folder"
             case .share(let folder, let user): "share-\(folder ?? "")-\(user?.userId ?? 0)"
             case .invite: "invite"
@@ -89,15 +93,24 @@ final class AppModel {
 
     var isOwner: Bool { identity?.isOwner ?? false }
 
-    /// Logins matching every word of `query` in name, username, URL or folder.
-    func items(matching query: String, in folder: String? = nil) -> [ItemSummary] {
+    /// Logins in `section` matching every word of `query` in name, username, URL, folder or
+    /// who shared them.
+    func items(matching query: String, in section: Section = .allLogins) -> [ItemSummary] {
         let words = query.lowercased().split(whereSeparator: \.isWhitespace)
         return items.filter { item in
-            guard folder == nil || item.folder == folder else { return false }
-            let text = "\(item.name) \(item.username) \(item.url) \(item.folder)".lowercased()
+            switch section {
+            case .folder(let folder): guard item.folder == folder else { return false }
+            case .sharedWithMe: guard item.sharedWithMe else { return false }
+            case .allLogins, .people: break
+            }
+            let text = "\(item.name) \(item.username) \(item.url) \(item.folder ?? "") \(item.owner ?? "")"
+                .lowercased()
             return words.allSatisfy { text.contains($0) }
         }
     }
+
+    /// Whether any login was shared with you one by one, so the sidebar shows them.
+    var hasSharedWithMe: Bool { items.contains(where: \.sharedWithMe) }
 
     var filteredItems: [ItemSummary] { items(matching: search) }
 
@@ -322,7 +335,8 @@ final class AppModel {
 
     // MARK: - Changing things (each throws, so the sheet that asked can show why)
 
-    func addLogin(folder: String, name: String, username: String, url: String, password: String)
+    /// Adds a login to `folder`, or with none as yours alone until you share it.
+    func addLogin(folder: String?, name: String, username: String, url: String, password: String)
         async throws
     {
         try await perform {
@@ -352,6 +366,13 @@ final class AppModel {
 
     func share(folder: String, with user: User) async throws {
         _ = try await perform { try $0.shareFolder(folder: folder, userId: user.userId) }
+    }
+
+    /// Shares one login with an approved person, without the rest of its folder.
+    func share(login item: ItemSummary, with user: User) async throws {
+        let id = item.id
+        _ = try await perform { try $0.shareLogin(itemId: id, userId: user.userId) }
+        await reloadLocal()
     }
 
     /// Creates a single-use invite (owner only).
@@ -449,10 +470,20 @@ extension AppModel {
             model.items = [
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000001", folder: "Production",
-                    name: "AWS root", username: "root@example.com", url: "https://aws.amazon.com"),
+                    name: "AWS root", username: "root@example.com", url: "https://aws.amazon.com",
+                    owner: nil, sharedWith: ["Mo"], sharedWithMe: false),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000002", folder: "Staging",
-                    name: "Database", username: "admin", url: ""),
+                    name: "Database", username: "admin", url: "",
+                    owner: nil, sharedWith: [], sharedWithMe: false),
+                ItemSummary(
+                    id: "00000000-0000-4000-8000-000000000003", folder: nil,
+                    name: "Bank", username: "olivia@example.com", url: "https://bank.example.com",
+                    owner: nil, sharedWith: [], sharedWithMe: false),
+                ItemSummary(
+                    id: "00000000-0000-4000-8000-000000000004", folder: nil,
+                    name: "Domain registrar", username: "ops@example.com", url: "",
+                    owner: "Mo", sharedWith: [], sharedWithMe: true),
             ]
         }
         return model
@@ -483,7 +514,17 @@ struct RecoveryKit {
     }
 }
 
-extension ItemSummary: Identifiable {}
+extension ItemSummary: Identifiable {
+    /// Where a login lives, in a few words: its folder, who shared it with you, or that it's
+    /// yours alone.
+    var place: String {
+        if let folder { return folder }
+        if let owner { return "From \(owner)" }
+        if sharedWithMe { return "Shared with you" }
+        if sharedWith.isEmpty { return "Only you" }
+        return "Shared with \(ListFormatter.localizedString(byJoining: sharedWith))"
+    }
+}
 
 extension User: Identifiable {
     public var id: Int64 { userId }

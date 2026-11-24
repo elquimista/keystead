@@ -1,4 +1,4 @@
-# Keystead data format, version 1 (draft)
+# Keystead data format (draft)
 
 This is the format the server, the CLI and the apps agree on. `crates/keystead-core` is
 its reference implementation; change the two together. The server stores and relays
@@ -17,9 +17,9 @@ only the encrypted forms described here and never holds a key that can open them
 
 Everything signed, and all associated data for encryption, is built as a *transcript*:
 a domain string followed by fields, each prefixed with its length as a 4-byte
-big-endian number. The prefixes mean different splits of the same bytes never collide,
-and the domain strings (all ending in `/v1`) mean a signature for one purpose can't be
-reused for another.
+big-endian number. The prefixes mean different splits of the same bytes never collide
+(an absent field is an empty one), and the domain strings (each ending in a version like
+`/v1`) mean a signature for one purpose can't be reused for another.
 
 ```
 transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ len(f2) ‖ f2 ‖ …
@@ -32,7 +32,9 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
 | Account secret | 32 random bytes per user | On each device, wrapped by that device's hardware key |
 | Account encryption key | X25519, derived from the secret | Derived in memory at unlock |
 | Account signing key | Ed25519, derived from the secret | Derived in memory at unlock |
+| Account personal key | 32 bytes, derived from the secret | Derived in memory at unlock |
 | Folder key | 32 random bytes per folder | Wrapped for each member's account encryption key |
+| Item key | 32 random bytes per item | With the item: sealed with its folder key or its owner's personal key, and wrapped for each person it's shared with |
 | Device key | Signs the device in to the server | Secure Enclave, TPM, or (CLI) a local file |
 | Recovery kit | The account secret as 24 words | On paper, with the user |
 
@@ -41,6 +43,9 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
 - `info = "keystead/account/encryption/v1"` gives 32 bytes, fed to HPKE `DeriveKeyPair`
   for DHKEM(X25519, HKDF-SHA256).
 - `info = "keystead/account/signing/v1"` gives the 32-byte Ed25519 seed.
+- `info = "keystead/account/personal/v1"` gives the personal key, an XChaCha20-Poly1305
+  key only this account can make. It seals the keys of the account's own items outside
+  folders, so opening those costs no public-key operation.
 
 **Fingerprint.** `SHA-256("keystead/fingerprint/v1" ‖ encryption public key ‖ signing
 public key)`, first 10 bytes, written as five groups of four hex digits
@@ -58,7 +63,7 @@ Every wrapped key says how it was wrapped:
 
 | Scheme | Construction | Used for |
 | --- | --- | --- |
-| `hpke-x25519-sha256-chacha20poly1305` | HPKE (RFC 9180) base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305 | Folder keys wrapped for account keys |
+| `hpke-x25519-sha256-chacha20poly1305` | HPKE (RFC 9180) base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305 | Folder and item keys wrapped for account keys |
 | `hpke-p256-sha256-aes256gcm` | HPKE base mode: DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-256-GCM | The account secret wrapped for a macOS Secure Enclave key (Swift side) |
 
 Unknown schemes are rejected, never guessed. New platforms add new schemes; existing
@@ -66,6 +71,9 @@ data stays readable.
 
 **Folder keys** use `info = "keystead/folder-key/v1"` and associated data = the
 folder id's 16 bytes, so a wrapped key can't be moved to another folder.
+
+**Item keys** shared with a person directly use `info = "keystead/item-key/v1"` and
+associated data = the item id's 16 bytes.
 
 **The account secret on a Mac** is wrapped for the device's Secure Enclave key with
 `hpke-p256-sha256-aes256gcm`, `info = "keystead/account-secret/v1"` and no associated
@@ -124,37 +132,76 @@ An item version has two encrypted parts:
 - **Overview** (decrypted at unlock, searchable): `{"name", "username", "url", "tags"}`.
 - **Details** (decrypted only when used): `{"password", "notes"}`.
 
-Each part is its JSON encoding, encrypted with **XChaCha20-Poly1305** under the folder
-key, with a fresh random 24-byte nonce and associated data:
+Each part is its JSON encoding, encrypted with **XChaCha20-Poly1305** under the item's
+own key, with a fresh random 24-byte nonce and associated data:
 
 ```
-transcript("keystead/item/v1", item id, folder id, version, "overview" | "details")
+transcript("keystead/item/v2", item id, version, "overview" | "details")
 ```
 
-So a part can't be swapped with the other part, moved to another item or folder, or
-replayed as a different version.
+So a part can't be swapped with the other part, moved to another item, or replayed as a
+different version.
+
+### Who can open an item
+
+An item is either **in a folder** or **outside folders**, owned by the user who made it.
+Its key travels with it, in `keys`, once for each way in:
+
+| Copy | When | How |
+| --- | --- | --- |
+| `folder` | The item is in a folder | XChaCha20-Poly1305 under the folder key, associated data `transcript("keystead/item-key/folder/v1", item id, folder id)` |
+| `owner` | The item is outside folders | XChaCha20-Poly1305 under the owner's personal key, associated data `transcript("keystead/item-key/personal/v1", item id, owner user id)` |
+| `people` | For each person it's shared with directly | `{"user_id", "wrapped_key"}`, the item key wrapped for their account key (see Wrapped keys) |
+
+So folder members open an item through the folder, its owner through their personal key,
+and anyone it was shared with through their own copy. Sharing an item with someone is
+saving a new version with a copy for them. They get that item only, not the rest of its
+folder. A person gets at most one copy, and the owner none in `people`.
 
 ```json
-{ "id": "…", "folder_id": "…", "version": 3, "author": 2, "deleted": false,
+{ "id": "…", "format": 2, "folder_id": "…", "version": 3, "author": 2, "deleted": false,
+  "keys": { "folder": { "nonce": "…", "ciphertext": "…" },
+            "people": [ { "user_id": 4, "wrapped_key": { … } } ] },
   "overview": { "nonce": "…", "ciphertext": "…" },
   "details":  { "nonce": "…", "ciphertext": "…" },
   "signature": "…" }
 ```
 
-- `version` starts at 1 and goes up by exactly one per saved change.
-- `author` is the user who saved this version. Their **account signing key** signs:
+An item outside folders has `"owner": <user id>` and `keys.owner` instead of `folder_id`
+and `keys.folder`. Absent fields are left out.
+
+- `version` starts at 1 and goes up by exactly one per saved change. An item never moves
+  to another folder or owner.
+- `author` is the user who saved this version. Their **account signing key** signs the
+  whole version, key copies included, so the server can't add anyone:
 
   ```
-  transcript("keystead/item-signature/v1", item id, folder id, version, author,
-             deleted (1 byte), overview nonce, overview ciphertext,
-             details nonce, details ciphertext)
+  transcript("keystead/item-signature/v2", format (1 byte), item id, folder id or empty,
+             owner or empty, version, author, deleted (1 byte),
+             has folder copy (1 byte), its nonce, its ciphertext,
+             has owner copy (1 byte), its nonce, its ciphertext,
+             number of people (4 bytes),
+             then per person: user id, wrapped key scheme name, encapsulated key, ciphertext,
+             overview nonce, overview ciphertext, details nonce, details ciphertext)
   ```
 
-- A deletion is a signed version with `"deleted": true` and empty parts.
+  An absent copy has empty nonce and ciphertext fields.
+- A deletion is a signed version with `"deleted": true`, empty parts and the same key
+  copies, so everyone who could open the item hears about it.
 - Clients must verify the signature against the author's approved directory entry,
-  and that the author was a member of the folder.
+  and that the author could open the item.
 
-**Folder info** (`{"name"}`) is encrypted the same way with associated data
+### Format 1
+
+Items saved by Keystead 0.1 have no `format` field, no `owner` and no `keys`: they are
+format 1. Their parts are encrypted with the **folder key itself**, with associated data
+`transcript("keystead/item/v1", item id, folder id, version, part)`, and signed as
+`transcript("keystead/item-signature/v1", item id, folder id, version, author, deleted,
+overview nonce, overview ciphertext, details nonce, details ciphertext)`. Clients still
+open them, and save the next version as format 2 with a new item key. An item never goes
+back to format 1.
+
+**Folder info** (`{"name"}`) is encrypted with the folder key, with associated data
 `transcript("keystead/folder-info/v1", folder id)`.
 
 ## Directory
@@ -174,12 +221,13 @@ verifies against them.
 
 ## API
 
-All requests except setup, sign-in, accepting an invite and recovery need
+All requests except health, setup, sign-in, accepting an invite and recovery need
 `Authorization: Bearer <token>`. Errors return `{"error": "…"}` with the usual status
 codes (400, 401, 403, 404, 409).
 
 | Method and path | Request | Response | Who |
 | --- | --- | --- | --- |
+| `GET /v1/health` | | `Health` | Anyone |
 | `POST /v1/setup` | `SetupRequest` | `Enrolled` | First admin, with the code the server printed |
 | `POST /v1/sign-in/challenge` | `ChallengeRequest` | `Challenge` | Any device |
 | `POST /v1/sign-in` | `SignInRequest` | `Session` | Any device |
@@ -193,23 +241,36 @@ codes (400, 401, 403, 404, 409).
 | `GET /v1/directory` | | `Directory` | Members |
 | `POST /v1/folders` | `CreateFolderRequest` | 201 | Members |
 | `POST /v1/folders/{id}/members` | `AddMemberRequest` | 204 | Folder members |
-| `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Folder members |
+| `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Anyone who can open the item; for a new one, folder members or its owner |
 | `GET /v1/sync?cursor=N&limit=M` | | `SyncPage` | Members |
 
+`Health` is `{"status", "version", "item_format"}`. `item_format` is the newest item
+format the server stores; servers older than 0.2.0 leave it out and store only format 1,
+so clients check it before saving.
+
 When saving an item, the server checks that the path and body ids match, the session's
-user is the author and a folder member, and the version is `base_version + 1` (or 1 for
-a new item). If another version was saved first, it answers 409 with that version.
+user is the author and the version is `base_version + 1` (or 1 for a new item). The
+author must be able to open the current version: in its folder, its owner, or in its
+`people`. A new item must be in a folder the author is in, or be the author's own. The
+item can't change folder, owner or go back a format, everyone newly in `people` must be
+approved, and for now nobody can be dropped from `people`. If another version was saved
+first, it answers 409 with that version.
 
 **Sync** returns feed entries after the cursor, in change-number order, from one
-consistent snapshot: `item` entries for the latest version of each changed item,
-`joined` entries carrying the folder key wrapped for the user plus the folder's info
-and items, and `left` entries telling the device to drop a folder. The prototype in
-`prototypes/change-feed` shows why each item arrives exactly once.
+consistent snapshot: `item` entries for the latest version of each changed item the user
+can open (in their folders, their own, or shared with them directly), `joined` entries
+carrying the folder key wrapped for the user plus the folder's info and items, and `left`
+entries telling the device to drop a folder (keeping its items that were also shared with
+the user directly). An item shared directly arrives as an `item` entry: sharing saved a
+new version, with a new change number. The prototype in `prototypes/change-feed` shows
+why each item arrives exactly once.
 
-## Not in version 1 yet
+## Not in this format yet
 
 - Adding a second device by approving it from an existing one, and recovery by admins.
   (A recovery kit can already add a device.)
 - Group keys.
-- Read-only and manage roles (every folder member can edit).
+- Read-only and manage roles (everyone who can open an item can edit and share it).
+- Removing someone's access to a folder or an item, with new keys afterwards.
+- Moving an item to another folder.
 - Paginating a large folder that arrives with a join.

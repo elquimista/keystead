@@ -94,7 +94,7 @@ private struct AppCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Login…") { model.sheet = .addLogin(folder: nil) }
                 .keyboardShortcut("n")
-                .disabled(model.phase != .unlocked || model.folders.isEmpty)
+                .disabled(model.phase != .unlocked)
             Button("New Folder…") { model.sheet = .newFolder }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(model.phase != .unlocked)
@@ -103,8 +103,11 @@ private struct AppCommands: Commands {
             Button("All Logins") { model.section = .allLogins }
                 .keyboardShortcut("1")
                 .disabled(model.phase != .unlocked)
-            Button("People") { model.section = .people }
+            Button("Shared with Me") { model.section = .sharedWithMe }
                 .keyboardShortcut("2")
+                .disabled(model.phase != .unlocked || !model.hasSharedWithMe)
+            Button("People") { model.section = .people }
+                .keyboardShortcut("3")
                 .disabled(model.phase != .unlocked)
             Divider()
         }

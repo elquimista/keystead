@@ -106,12 +106,12 @@ fn alice_and_bob_share_a_password() {
 
     commands::share_folder(&alice, "Production", me.user_id).unwrap();
     let (overview, details) = login("AWS root", "first-secret");
-    commands::add(&alice, "Production", overview, details).unwrap();
+    commands::add(&alice, Some("Production"), overview, details).unwrap();
 
     // Bob sees it after syncing.
     let rows = commands::list(&bob).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].folder, "Production");
+    assert_eq!(rows[0].folder.as_deref(), Some("Production"));
     assert_eq!(rows[0].name, "AWS root");
     assert_eq!(show_password(&bob, "AWS root"), "first-secret");
 
@@ -119,6 +119,20 @@ fn alice_and_bob_share_a_password() {
     let outcome = commands::edit(&bob, "AWS root", None, "bobs-secret").unwrap();
     assert!(matches!(outcome, EditOutcome::Saved { version: 2 }));
     assert_eq!(show_password(&alice, "AWS root"), "bobs-secret");
+
+    // A login of Alice's own reaches Bob only once she shares it.
+    let (overview, details) = login("Bank", "own-secret");
+    commands::add(&alice, None, overview, details).unwrap();
+    assert_eq!(commands::list(&bob).unwrap().len(), 1);
+    assert_eq!(
+        commands::share(&alice, "Bank", None, me.user_id).unwrap(),
+        "Bob"
+    );
+    let rows = commands::list(&bob).unwrap();
+    let bank = rows.iter().find(|row| row.name == "Bank").unwrap();
+    assert_eq!(bank.folder, None);
+    assert_eq!(bank.owner.as_deref(), Some("Alice"));
+    assert_eq!(show_password(&bob, "Bank"), "own-secret");
 }
 
 #[test]
@@ -150,7 +164,7 @@ fn a_recovery_kit_restores_an_account_on_another_machine() {
     commands::setup(&old, &fixture.url, &fixture.setup_code, "Alice").unwrap();
     commands::create_folder(&old, "Production").unwrap();
     let (overview, details) = login("AWS root", "s3cret");
-    commands::add(&old, "Production", overview, details).unwrap();
+    commands::add(&old, Some("Production"), overview, details).unwrap();
 
     let (words, me) = commands::recovery_kit(&old).unwrap();
     assert_eq!(words.split(' ').count(), 24);

@@ -133,7 +133,7 @@ stops working once it's used.
 In Keystead, open **People** and choose **Invite**. Send each person their invite line
 directly, for example in a private message; it works once. When they've joined, they show
 up under People: approve them after they read you the fingerprint their Keystead shows, in
-person or on a call. Then share folders with them.
+person or on a call. Then share folders, or single logins, with them.
 
 ## Updating
 
@@ -149,8 +149,13 @@ docker compose pull
 docker compose up -d
 ```
 
-The data stays in its volume across updates. To go back, set the previous version and run
-the same two commands.
+The data stays in its volume across updates. Take a backup first (see below): a new version
+may upgrade the database, and going back to an older version means restoring that backup.
+
+**Updating to 0.2.0.** Logins get a new format, so that they can live outside folders and be
+shared one by one. Update the server first, then every Mac app and the CLI: apps from 0.2.0
+can't save logins to an older server, and older apps can't open logins saved by 0.2.0.
+Existing logins keep working and switch to the new format when next saved.
 
 ## Backups
 

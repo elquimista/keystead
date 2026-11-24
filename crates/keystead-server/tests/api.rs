@@ -14,10 +14,12 @@ use keystead_core::api::{
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::ids::{DeviceId, FolderId, ItemId, UserId};
-use keystead_core::items::{Details, EncryptedItem, FolderInfo, ItemVersion, Overview};
+use keystead_core::items::{
+    Details, EncryptedItem, FolderInfo, ItemKeys, ItemVersion, Overview, PersonKey,
+};
 use keystead_core::keys::{
-    AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, SoftwareDeviceKey, recovery_message,
-    sign_in_message,
+    AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, ItemKey, SoftwareDeviceKey,
+    recovery_message, sign_in_message,
 };
 use keystead_server::{AppState, router};
 use serde::Serialize;
@@ -317,15 +319,59 @@ fn login(name: &str, password: &str) -> (Overview, Details) {
     )
 }
 
+/// A version of an item in a folder, with a fresh item key sealed for the folder.
 fn seal(
     author: &Person,
-    key: &FolderKey,
+    folder_key: &FolderKey,
     at: ItemVersion,
     name: &str,
     password: &str,
 ) -> EncryptedItem {
+    let key = ItemKey::generate();
+    let keys = ItemKeys {
+        folder: Some(key.seal_for_folder(at.id, at.folder_id.unwrap(), folder_key)),
+        ..ItemKeys::default()
+    };
+    seal_with(author, &key, at, keys, name, password)
+}
+
+fn seal_with(
+    author: &Person,
+    key: &ItemKey,
+    at: ItemVersion,
+    keys: ItemKeys,
+    name: &str,
+    password: &str,
+) -> EncryptedItem {
     let (overview, details) = login(name, password);
-    EncryptedItem::seal(at, key, &author.keys, &overview, &details).unwrap()
+    EncryptedItem::seal(at, key, keys, &author.keys, &overview, &details).unwrap()
+}
+
+/// The item key copy for `person`.
+fn copy_for(person: &Person, key: &ItemKey, item: ItemId) -> PersonKey {
+    PersonKey {
+        user_id: person.user_id,
+        wrapped_key: person.keys.public().wrap_item_key(key, item).unwrap(),
+    }
+}
+
+/// Opens an item as `person`, with the folder key if they're in its folder.
+fn open_password(person: &Person, item: &EncryptedItem, folder_key: Option<&FolderKey>) -> String {
+    let key = item
+        .unlock(folder_key, &person.keys, person.user_id)
+        .unwrap();
+    item.open_details(&key).unwrap().password.clone()
+}
+
+/// The item entries in a sync page, as (item id, version).
+fn item_entries(page: &SyncPage) -> Vec<(ItemId, u64)> {
+    page.entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SyncEntry::Item { item, .. } => Some((item.id, item.version)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Keys of approved directory entries, checked against the pinned owner keys.
@@ -377,7 +423,8 @@ async fn invite_share_sync_and_conflict_end_to_end() {
 
     let at = ItemVersion {
         id: ItemId::random(),
-        folder_id,
+        folder_id: Some(folder_id),
+        owner: None,
         version: 1,
         author: alice.user_id,
     };
@@ -408,12 +455,12 @@ async fn invite_share_sync_and_conflict_end_to_end() {
     );
     assert_eq!(items.len(), 1);
     items[0].verify(&alice_keys).unwrap();
+    let item_key = items[0]
+        .unlock(Some(&bob_folder_key), &bob.keys, bob.user_id)
+        .unwrap();
+    assert_eq!(items[0].open_overview(&item_key).unwrap().name, "AWS root");
     assert_eq!(
-        items[0].open_overview(&bob_folder_key).unwrap().name,
-        "AWS root"
-    );
-    assert_eq!(
-        items[0].open_details(&bob_folder_key).unwrap().password,
+        open_password(&bob, &items[0], Some(&bob_folder_key)),
         "first-secret"
     );
     let bob_cursor = page.cursor;
@@ -580,7 +627,8 @@ async fn access_rules_are_enforced() {
     // Writes need membership, the caller as author, and a valid signature.
     let at = ItemVersion {
         id: ItemId::random(),
-        folder_id,
+        folder_id: Some(folder_id),
+        owner: None,
         version: 1,
         author: bob.user_id,
     };
@@ -641,7 +689,8 @@ async fn the_feed_pages_in_order() {
     for n in 0..30 {
         let at = ItemVersion {
             id: ItemId::random(),
-            folder_id,
+            folder_id: Some(folder_id),
+            owner: None,
             version: 1,
             author: alice.user_id,
         };
@@ -669,6 +718,262 @@ async fn the_feed_pages_in_order() {
     assert_eq!(seen.len(), 30);
     assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
     assert_eq!(pages, 3);
+}
+
+/// Alice's own item outside any folder, version 1, and its key.
+async fn private_item(server: &Server, alice: &Person, name: &str) -> (EncryptedItem, ItemKey) {
+    let key = ItemKey::generate();
+    let at = ItemVersion {
+        id: ItemId::random(),
+        folder_id: None,
+        owner: Some(alice.user_id),
+        version: 1,
+        author: alice.user_id,
+    };
+    let keys = ItemKeys {
+        owner: Some(key.seal_for_owner(at.id, alice.user_id, &alice.keys)),
+        ..ItemKeys::default()
+    };
+    let item = seal_with(alice, &key, at, keys, name, "own-secret");
+    let (status, body) = alice.put(server, &item, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    (item, key)
+}
+
+/// The next version of `item` by `author`, with `keys`.
+fn next(
+    author: &Person,
+    key: &ItemKey,
+    item: &EncryptedItem,
+    keys: ItemKeys,
+    password: &str,
+) -> EncryptedItem {
+    let at = ItemVersion {
+        id: item.id,
+        folder_id: item.folder_id,
+        owner: item.owner,
+        version: item.version + 1,
+        author: author.user_id,
+    };
+    seal_with(author, key, at, keys, "Bank", password)
+}
+
+#[tokio::test]
+async fn an_item_outside_folders_reaches_only_its_owner_and_who_it_is_shared_with() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let bob = invite(&server, &alice, "Bob").await;
+    approve(&server, &alice, &bob).await;
+    let carol = invite(&server, &alice, "Carol").await;
+
+    let (status, body) = server.call(Method::GET, "/v1/health", None, None).await;
+    assert_eq!(
+        (status, &body["item_format"]),
+        (StatusCode::OK, &Value::from(2)),
+        "{body}"
+    );
+
+    let (item, key) = private_item(&server, &alice, "Bank").await;
+    let bob_cursor = bob.sync(&server, 0, 100).await.cursor;
+    assert!(bob.sync(&server, 0, 100).await.entries.is_empty());
+    assert_eq!(
+        item_entries(&alice.sync(&server, 0, 100).await),
+        [(item.id, 1)]
+    );
+    assert_eq!(open_password(&alice, &item, None), "own-secret");
+
+    // Nobody else can save it, or start one as someone else's.
+    let mut bobs = next(&bob, &key, &item, item.keys.clone(), "taken");
+    let (status, _) = bob.put(&server, &bobs, Some(1)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    bobs.id = ItemId::random();
+    bobs.version = 1;
+    let bobs = seal_with(
+        &bob,
+        &key,
+        ItemVersion {
+            id: ItemId::random(),
+            folder_id: None,
+            owner: Some(alice.user_id),
+            version: 1,
+            author: bob.user_id,
+        },
+        ItemKeys {
+            owner: Some(key.seal_for_owner(bobs.id, alice.user_id, &bob.keys)),
+            ..ItemKeys::default()
+        },
+        "x",
+        "y",
+    );
+    let (status, _) = bob.put(&server, &bobs, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Only approved people can be given a copy, and each gets one.
+    let mut with_carol = item.keys.clone();
+    with_carol.people.push(copy_for(&carol, &key, item.id));
+    let (status, _) = alice
+        .put(
+            &server,
+            &next(&alice, &key, &item, with_carol, "own-secret"),
+            Some(1),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let mut twice = item.keys.clone();
+    twice.people.push(copy_for(&bob, &key, item.id));
+    twice.people.push(copy_for(&bob, &key, item.id));
+    let (status, _) = alice
+        .put(
+            &server,
+            &next(&alice, &key, &item, twice, "own-secret"),
+            Some(1),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Alice shares it with Bob: a new version with his copy. Bob's feed brings it.
+    let mut with_bob = item.keys.clone();
+    with_bob.people.push(copy_for(&bob, &key, item.id));
+    let shared = next(&alice, &key, &item, with_bob, "own-secret");
+    let (status, body) = alice.put(&server, &shared, Some(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page = bob.sync(&server, bob_cursor, 100).await;
+    assert_eq!(item_entries(&page), [(item.id, 2)]);
+    assert_eq!(open_password(&bob, &shared, None), "own-secret");
+
+    // Bob can now save it, keeping everyone's copies.
+    let edited = next(&bob, &key, &shared, shared.keys.clone(), "bobs-secret");
+    let (status, body) = bob.put(&server, &edited, Some(2)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        item_entries(&alice.sync(&server, 0, 100).await),
+        [(item.id, 3)]
+    );
+
+    // Nobody can be dropped yet, and the item can't move.
+    let (status, body) = bob
+        .put(
+            &server,
+            &next(&bob, &key, &edited, item.keys.clone(), "x"),
+            Some(3),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let mut moved = next(&bob, &key, &edited, edited.keys.clone(), "x");
+    moved.owner = Some(bob.user_id);
+    let (status, _) = bob.put(&server, &moved, Some(3)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn an_item_in_a_folder_can_be_shared_with_someone_outside_it() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let bob = invite(&server, &alice, "Bob").await;
+    approve(&server, &alice, &bob).await;
+    let (folder_id, folder_key) = create_folder(&server, &alice, "Production").await;
+
+    let key = ItemKey::generate();
+    let at = ItemVersion {
+        id: ItemId::random(),
+        folder_id: Some(folder_id),
+        owner: None,
+        version: 1,
+        author: alice.user_id,
+    };
+    let mut keys = ItemKeys {
+        folder: Some(key.seal_for_folder(at.id, folder_id, &folder_key)),
+        ..ItemKeys::default()
+    };
+    let item = seal_with(&alice, &key, at, keys.clone(), "Bank", "pw");
+    let (status, _) = alice.put(&server, &item, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (other, _) = private_item(&server, &alice, "Other").await;
+
+    keys.people.push(copy_for(&bob, &key, item.id));
+    let shared = next(&alice, &key, &item, keys, "pw");
+    let (status, body) = alice.put(&server, &shared, Some(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Bob gets that one item, not the folder or anything else in it.
+    let page = bob.sync(&server, 0, 100).await;
+    assert_eq!(item_entries(&page), [(item.id, 2)]);
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(open_password(&bob, &shared, None), "pw");
+    assert_ne!(other.id, item.id);
+
+    // Once he's in the folder too, each change still reaches him once.
+    let (status, _) = server
+        .call(
+            Method::POST,
+            &format!("/v1/folders/{folder_id}/members"),
+            alice.token(),
+            json(&AddMemberRequest {
+                user_id: bob.user_id,
+                wrapped_key: bob
+                    .keys
+                    .public()
+                    .wrap_folder_key(&folder_key, folder_id)
+                    .unwrap(),
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let edited = next(&alice, &key, &shared, shared.keys.clone(), "pw2");
+    let (status, _) = alice.put(&server, &edited, Some(2)).await;
+    assert_eq!(status, StatusCode::OK);
+    let page = bob.sync(&server, page.cursor, 100).await;
+    let joined: Vec<(ItemId, u64)> = page
+        .entries
+        .iter()
+        .flat_map(|entry| match entry {
+            SyncEntry::Joined { items, .. } => items.iter().map(|i| (i.id, i.version)).collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    assert_eq!(joined, [(item.id, 3)]);
+    assert!(item_entries(&page).is_empty());
+}
+
+#[tokio::test]
+async fn format_1_items_become_format_2_when_saved() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let (folder_id, folder_key) = create_folder(&server, &alice, "Production").await;
+    let at = ItemVersion {
+        id: ItemId::random(),
+        folder_id: Some(folder_id),
+        owner: None,
+        version: 1,
+        author: alice.user_id,
+    };
+    let (overview, details) = login("Old", "pw");
+    let old =
+        EncryptedItem::seal_format_1(at, &folder_key, &alice.keys, &overview, &details).unwrap();
+    let (status, body) = alice.put(&server, &old, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(open_password(&alice, &old, Some(&folder_key)), "pw");
+
+    let converted = seal(
+        &alice,
+        &folder_key,
+        ItemVersion { version: 2, ..at },
+        "Old",
+        "pw",
+    );
+    let (status, body) = alice.put(&server, &converted, Some(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let back = EncryptedItem::seal_format_1(
+        ItemVersion { version: 3, ..at },
+        &folder_key,
+        &alice.keys,
+        &overview,
+        &details,
+    )
+    .unwrap();
+    let (status, _) = alice.put(&server, &back, Some(2)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 /// Asks for a recovery challenge for `keys`, as a new device would.
@@ -866,6 +1171,13 @@ async fn a_database_from_0_1_0_is_upgraded() {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO folders (id, info) VALUES ('f1', '{}');
+             INSERT INTO items (id, folder_id, version, seq, body) VALUES ('i1', 'f1', 1, 5, '{}');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         pool.close().await;
     }
     for _ in 0..2 {
@@ -882,11 +1194,25 @@ async fn a_database_from_0_1_0_is_upgraded() {
             .await
             .unwrap();
     assert_eq!(row, ("d1".to_owned(), String::new(), None));
+    // Items survive the table rebuild, and new ones can be outside folders.
+    let item: (String, Option<String>, i64) =
+        sqlx::query_as("SELECT id, folder_id, seq FROM items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(item, ("i1".to_owned(), Some("f1".to_owned()), 5));
+    sqlx::raw_sql(
+        "INSERT INTO items (id, folder_id, version, seq, body) VALUES ('i2', NULL, 1, 6, '{}');
+         INSERT INTO item_access (user_id, item_id) VALUES (1, 'i2');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }

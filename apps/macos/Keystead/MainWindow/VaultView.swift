@@ -11,12 +11,10 @@ struct VaultView: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210)
         } content: {
             switch model.section ?? .allLogins {
-            case .allLogins:
-                LoginList(model: model, folder: nil, search: $search, selection: $model.selectedItemID)
-            case .folder(let folder):
-                LoginList(model: model, folder: folder, search: $search, selection: $model.selectedItemID)
             case .people:
                 PeopleList(model: model, selection: $model.selectedUserID)
+            case let section:
+                LoginList(model: model, section: section, search: $search, selection: $model.selectedItemID)
             }
         } detail: {
             if model.section == .people {
@@ -59,6 +57,11 @@ struct VaultView: View {
                 model.section = .allLogins
             }
         }
+        .onChange(of: model.hasSharedWithMe) {
+            if !model.hasSharedWithMe && model.section == .sharedWithMe {
+                model.section = .allLogins
+            }
+        }
     }
 }
 
@@ -70,6 +73,10 @@ private struct Sidebar: View {
         List(selection: $selection) {
             Label("All Logins", systemImage: "key")
                 .tag(AppModel.Section.allLogins)
+            if model.hasSharedWithMe {
+                Label("Shared with Me", systemImage: "shared.with.you")
+                    .tag(AppModel.Section.sharedWithMe)
+            }
             Section("Folders") {
                 ForEach(model.folders, id: \.self) { folder in
                     Label(folder, systemImage: "folder")
@@ -121,12 +128,25 @@ private struct Sidebar: View {
 
 private struct LoginList: View {
     let model: AppModel
-    let folder: String?
+    let section: AppModel.Section
     @Binding var search: String
     @Binding var selection: ItemSummary.ID?
 
+    private var folder: String? {
+        if case .folder(let folder) = section { return folder }
+        return nil
+    }
+
+    private var title: String {
+        switch section {
+        case .folder(let folder): folder
+        case .sharedWithMe: "Shared with Me"
+        case .allLogins, .people: "All Logins"
+        }
+    }
+
     var body: some View {
-        let items = model.items(matching: search, in: folder)
+        let items = model.items(matching: search, in: section)
         Group {
             if items.isEmpty {
                 emptyState
@@ -147,6 +167,7 @@ private struct LoginList: View {
                             .disabled(item.username.isEmpty)
                         Divider()
                         Button("Change Password…") { model.sheet = .changePassword(item) }
+                        Button("Share…") { model.sheet = .shareLogin(item) }
                     }
                 } primaryAction: { ids in
                     // Double-click or Return copies the password.
@@ -156,7 +177,7 @@ private struct LoginList: View {
                 }
             }
         }
-        .navigationTitle(folder ?? "All Logins")
+        .navigationTitle(title)
         .searchable(text: $search, prompt: "Search logins")
         .toolbar {
             ToolbarItem {
@@ -166,13 +187,13 @@ private struct LoginList: View {
                     Label("New Login", systemImage: "plus")
                 }
                 .help("Add a login")
-                .disabled(model.folders.isEmpty)
             }
         }
     }
 
+    /// The username, and outside a folder's own list, where the login lives.
     private func subtitle(for item: ItemSummary) -> String {
-        let parts = [item.username, folder == nil ? item.folder : ""].filter { !$0.isEmpty }
+        let parts = [item.username, folder == nil ? item.place : ""].filter { !$0.isEmpty }
         return parts.joined(separator: " · ")
     }
 
@@ -180,24 +201,30 @@ private struct LoginList: View {
     private var emptyState: some View {
         if !search.trimmed.isEmpty {
             ContentUnavailableView.search(text: search)
-        } else if model.folders.isEmpty {
+        } else if section == .sharedWithMe {
+            ContentUnavailableView(
+                "Nothing shared with you", systemImage: "shared.with.you",
+                description: Text("Logins people share with you one by one show up here."))
+        } else if model.items.isEmpty && model.folders.isEmpty {
             ContentUnavailableView {
-                Label(model.isOwner ? "Start with a folder" : "Nothing shared with you yet", systemImage: "folder")
+                Label("No logins yet", systemImage: "key")
             } description: {
                 Text(
                     model.isOwner
-                        ? "Logins live in folders, and you share whole folders with people. "
-                            + "Create one, for example \u{201C}Production\u{201D}, then add logins to it."
-                        : "Once the owner approves you and shares a folder, its logins show up "
-                            + "here. You can also keep your own folders.")
+                        ? "Add a login; only you can see it until you share it. For logins your "
+                            + "team needs, create a folder, for example \u{201C}Production\u{201D}, "
+                            + "and share it."
+                        : "Logins shared with you show up here once the owner approves you. You "
+                            + "can also add your own.")
             } actions: {
+                Button("New Login…") { model.sheet = .addLogin(folder: nil) }
                 Button("New Folder…") { model.sheet = .newFolder }
             }
         } else {
             ContentUnavailableView {
                 Label("No logins yet", systemImage: "key")
             } description: {
-                Text(folder.map { "\u{201C}\($0)\u{201D} is empty." } ?? "Your folders are empty.")
+                Text(folder.map { "\u{201C}\($0)\u{201D} is empty." } ?? "You have no logins yet.")
             } actions: {
                 Button("New Login…") { model.sheet = .addLogin(folder: folder) }
             }
@@ -264,14 +291,30 @@ private struct LoginDetail: View {
                         }
                     }
                 }
-                LabeledContent("Folder", value: item.folder)
+                // A login shared with you may sit in a folder of theirs you can't see.
+                if item.folder != nil || !item.sharedWithMe {
+                    LabeledContent("Folder", value: item.folder ?? "None")
+                }
+                if let owner = item.owner {
+                    LabeledContent("Owner", value: owner)
+                }
+                if item.folder == nil && item.owner == nil && !item.sharedWithMe {
+                    LabeledContent(
+                        "Shared with",
+                        value: item.sharedWith.isEmpty ? "No one yet" : sharedWith)
+                } else if !item.sharedWith.isEmpty {
+                    LabeledContent("Also shared with", value: sharedWith)
+                }
             } header: {
                 Text(item.name)
                     .font(.title2.weight(.semibold))
                     .padding(.bottom, 4)
             }
             Section {
-                Button("Change Password…") { model.sheet = .changePassword(item) }
+                HStack {
+                    Button("Change Password…") { model.sheet = .changePassword(item) }
+                    Button("Share…") { model.sheet = .shareLogin(item) }
+                }
             }
             if let error {
                 Text(error)
@@ -283,6 +326,10 @@ private struct LoginDetail: View {
             // The password may have changed; don't keep showing the old one.
             revealed = nil
         }
+    }
+
+    private var sharedWith: String {
+        ListFormatter.localizedString(byJoining: item.sharedWith)
     }
 
     private func toggleReveal() async {

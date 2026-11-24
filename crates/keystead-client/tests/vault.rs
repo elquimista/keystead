@@ -6,11 +6,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use keystead_client::http::Client;
 use keystead_client::{DeviceSigner, EditOutcome, NewAccount, Vault, join, recover, setup};
+use keystead_core::api::PutItemRequest;
 use keystead_core::encoding::Bytes;
-use keystead_core::ids::DeviceId;
-use keystead_core::items::{Details, Overview};
-use keystead_core::keys::{AccountSecret, DeviceKeyScheme, DevicePublicKey, SoftwareDeviceKey};
+use keystead_core::ids::{DeviceId, ItemId};
+use keystead_core::items::{Details, EncryptedItem, ItemVersion, Overview};
+use keystead_core::keys::{
+    AccountKeys, AccountSecret, DeviceKeyScheme, DevicePublicKey, SoftwareDeviceKey,
+};
 use keystead_server::AppState;
 use p256::ecdsa::signature::Signer as _;
 
@@ -134,7 +138,7 @@ fn a_secure_enclave_style_device_joins_and_syncs() {
         .unwrap();
     alice
         .add(
-            "Production",
+            Some("Production"),
             Overview {
                 name: "AWS root".into(),
                 ..Overview::default()
@@ -221,7 +225,7 @@ fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
     alice.create_folder("Production").unwrap();
     alice
         .add(
-            "Production",
+            Some("Production"),
             Overview {
                 name: "AWS root".into(),
                 ..Overview::default()
@@ -289,6 +293,200 @@ fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
 
     // She's still the owner: she can invite.
     alice.invite("Bob").unwrap();
+}
+
+fn login(name: &str, password: &str) -> (Overview, Details) {
+    (
+        Overview {
+            name: name.into(),
+            ..Overview::default()
+        },
+        Details {
+            password: password.into(),
+            notes: String::new(),
+        },
+    )
+}
+
+/// A team on a fresh server: Alice the owner, Bob approved, and Carol, who has joined but
+/// isn't approved. Returns each vault and Alice's secret and signer.
+struct Team {
+    alice: Vault,
+    bob: Vault,
+    carol: Vault,
+    alice_secret: AccountSecret,
+    alice_signer: Arc<dyn DeviceSigner>,
+}
+
+fn team(fixture: &Fixture) -> Team {
+    let alice_secret = AccountSecret::generate();
+    let alice_signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
+    let mut alice = setup(
+        &fixture.profile("alice"),
+        NewAccount {
+            server: &fixture.url,
+            secret: &alice_secret,
+            device_id: DeviceId::random(),
+            device_name: "Test device",
+            signer: alice_signer.clone(),
+        },
+        &fixture.setup_code,
+        "Alice",
+    )
+    .unwrap();
+    let mut member = |name: &str| {
+        let invite = alice.invite(name).unwrap();
+        join(
+            &fixture.profile(name),
+            NewAccount {
+                server: &invite.server,
+                secret: &AccountSecret::generate(),
+                device_id: DeviceId::random(),
+                device_name: "Test device",
+                signer: Arc::new(SoftwareDeviceKey::generate()),
+            },
+            &invite.token,
+            &invite.owner_fingerprint,
+        )
+        .unwrap()
+    };
+    let bob = member("Bob");
+    let carol = member("Carol");
+    let bob_identity = bob.whoami();
+    alice
+        .approve(bob_identity.user_id, &bob_identity.fingerprint)
+        .unwrap();
+    Team {
+        alice,
+        bob,
+        carol,
+        alice_secret,
+        alice_signer,
+    }
+}
+
+#[test]
+fn a_login_outside_folders_is_private_until_shared() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+
+    let (overview, details) = login("Bank", "s3cret");
+    let bank = alice.add(None, overview, details).unwrap();
+    let rows = alice.list().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].folder, None);
+    assert_eq!(rows[0].owner, None);
+    assert!(rows[0].shared_with.is_empty());
+    assert!(!rows[0].shared_with_me);
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap().is_empty());
+
+    // Only approved people, once each, and not yourself.
+    let carol_id = carol.whoami().user_id;
+    let error = alice.share_item(bank, carol_id).unwrap_err();
+    assert!(format!("{error:#}").contains("isn't approved"), "{error:#}");
+    let me = alice.whoami().user_id;
+    assert!(alice.share_item(bank, me).is_err());
+    assert_eq!(alice.share_item(bank, bob_id).unwrap(), "Bob");
+    assert!(alice.share_item(bank, bob_id).is_err());
+    assert_eq!(alice.list().unwrap()[0].shared_with, ["Bob"]);
+
+    bob.sync().unwrap();
+    let rows = bob.list().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].shared_with_me);
+    assert_eq!(rows[0].owner.as_deref(), Some("Alice"));
+    assert!(rows[0].shared_with.is_empty());
+    assert_eq!(bob.open_item(bank).unwrap().1.password, "s3cret");
+
+    // Bob can change it, and Alice gets his change.
+    assert!(matches!(
+        bob.edit(bank, "rotated").unwrap(),
+        EditOutcome::Saved { version: 3 }
+    ));
+    alice.sync().unwrap();
+    assert_eq!(alice.open_item(bank).unwrap().1.password, "rotated");
+}
+
+#[test]
+fn one_login_from_a_folder_can_be_shared_alone() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        alice_secret,
+        alice_signer,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    alice.create_folder("Production").unwrap();
+    let (overview, details) = login("Database", "db-pass");
+    alice.add(Some("Production"), overview, details).unwrap();
+
+    // A login saved by Keystead 0.1, in the old format, straight through the API.
+    let keys = AccountKeys::derive(&alice_secret);
+    let folder_id = alice.profile().find_folder(&keys, "Production").unwrap();
+    let folder_key = alice.profile().folder_key(&keys, folder_id).unwrap();
+    let (overview, details) = login("AWS root", "aws-pass");
+    let old = EncryptedItem::seal_format_1(
+        ItemVersion {
+            id: ItemId::random(),
+            folder_id: Some(folder_id),
+            owner: None,
+            version: 1,
+            author: alice.whoami().user_id,
+        },
+        &folder_key,
+        &keys,
+        &overview,
+        &details,
+    )
+    .unwrap();
+    let mut client = Client::new(&fixture.url);
+    client
+        .sign_in(alice.profile().device_id, alice_signer.as_ref())
+        .unwrap();
+    let _: EncryptedItem = client
+        .put(
+            &format!("/v1/items/{}", old.id),
+            &PutItemRequest {
+                base_version: None,
+                item: old.clone(),
+            },
+        )
+        .unwrap();
+    alice.sync().unwrap();
+    assert_eq!(alice.open_item(old.id).unwrap().1.password, "aws-pass");
+
+    // Sharing it converts it to the new format with a key of its own, in one version.
+    alice.share_item(old.id, bob_id).unwrap();
+    let saved = &alice.profile().items[&old.id];
+    assert_eq!((saved.format, saved.version), (2, 2));
+
+    // Bob gets that login, not the folder or its other login.
+    bob.sync().unwrap();
+    let rows = bob.list().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "AWS root");
+    assert_eq!(rows[0].folder, None);
+    assert!(rows[0].shared_with_me);
+    assert!(bob.folders().unwrap().is_empty());
+    assert_eq!(bob.open_item(old.id).unwrap().1.password, "aws-pass");
+
+    // Alice still sees both in the folder, and who the one is shared with.
+    let rows = alice.list().unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| row.folder.as_deref() == Some("Production"))
+    );
+    let aws = rows.iter().find(|row| row.name == "AWS root").unwrap();
+    assert_eq!(aws.shared_with, ["Bob"]);
 }
 
 fn rand_core_rng() -> impl p256::elliptic_curve::rand_core::CryptoRngCore {

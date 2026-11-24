@@ -128,7 +128,7 @@ private struct ItemRowView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(item.name)
-                    Text(item.username.isEmpty ? item.folder : "\(item.username) · \(item.folder)")
+                    Text(item.username.isEmpty ? item.place : "\(item.username) · \(item.place)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

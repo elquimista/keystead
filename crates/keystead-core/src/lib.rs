@@ -25,6 +25,8 @@ pub enum Error {
     BadSignature,
     /// The data uses a scheme this build can't handle.
     UnsupportedScheme(keys::WrapScheme),
+    /// An item in a format this build doesn't know; a newer Keystead wrote it.
+    UnsupportedFormat(u8),
     /// Plaintext inside a ciphertext wasn't valid.
     Encoding(serde_json::Error),
     /// Recovery kit words that don't make up an account secret, and why.
@@ -38,6 +40,10 @@ impl fmt::Display for Error {
             Self::InvalidKey => write!(f, "invalid key"),
             Self::BadSignature => write!(f, "signature did not verify"),
             Self::UnsupportedScheme(scheme) => write!(f, "unsupported scheme {scheme:?}"),
+            Self::UnsupportedFormat(format) => write!(
+                f,
+                "this item is in format {format}, from a newer Keystead; update to open it"
+            ),
             Self::Encoding(error) => write!(f, "invalid plaintext: {error}"),
             Self::RecoveryWords(reason) => f.write_str(reason),
         }

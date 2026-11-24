@@ -39,6 +39,16 @@ enum DebugSnapshots {
                     model.section = .allLogins
                     model.selectedItemID = model.items.first?.id
                 }),
+                // The demo's third login is Olivia's own; the fourth Mo shared with her.
+                ("6a-own-login", { model.selectedItemID = model.items[2].id }),
+                ("6b-share-login", { model.sheet = .shareLogin(model.items[2]) }),
+                ("6c-closed", { model.sheet = nil }),
+                ("6d-new-login", { model.sheet = .addLogin(folder: nil) }),
+                ("6e-shared-with-me", {
+                    model.sheet = nil
+                    model.section = .sharedWithMe
+                    model.selectedItemID = model.items[3].id
+                }),
                 ("7-notices", { model.showDemoNotices() }),
             ]
         }

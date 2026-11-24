@@ -7,9 +7,11 @@ struct SheetContent: View {
     var body: some View {
         switch sheet {
         case .addLogin(let folder):
-            AddLoginSheet(model: model, folder: folder ?? model.folders.first ?? "")
+            AddLoginSheet(model: model, folder: folder)
         case .changePassword(let item):
             ChangePasswordSheet(model: model, item: item)
+        case .shareLogin(let item):
+            ShareLoginSheet(model: model, item: item)
         case .newFolder:
             NewFolderSheet(model: model)
         case .share(let folder, let user):
@@ -124,7 +126,8 @@ private struct PasswordField: View {
 
 private struct AddLoginSheet: View {
     let model: AppModel
-    @State var folder: String
+    /// None: the login is yours alone until you share it.
+    @State var folder: String?
     @State private var name = ""
     @State private var username = ""
     @State private var url = ""
@@ -133,7 +136,7 @@ private struct AddLoginSheet: View {
     var body: some View {
         SheetScaffold(
             title: "New Login", actionTitle: "Add",
-            canAct: !folder.isEmpty && !name.trimmed.isEmpty && !password.isEmpty
+            canAct: !name.trimmed.isEmpty && !password.isEmpty
         ) {
             try await model.addLogin(
                 folder: folder, name: name.trimmed, username: username.trimmed, url: url.trimmed,
@@ -142,14 +145,19 @@ private struct AddLoginSheet: View {
         } content: {
             Form {
                 Picker("Folder", selection: $folder) {
-                    ForEach(model.folders, id: \.self) { Text($0).tag($0) }
+                    Text("None").tag(String?.none)
+                    if !model.folders.isEmpty {
+                        Divider()
+                    }
+                    ForEach(model.folders, id: \.self) { Text($0).tag(String?.some($0)) }
                 }
                 TextField("Name", text: $name, prompt: Text("AWS root account"))
                 TextField("Username", text: $username, prompt: Text("Optional"))
                 TextField("Website", text: $url, prompt: Text("Optional, https://…"))
                 PasswordField(title: "Password", password: $password)
             }
-            Text("Everyone the folder is shared with will see this login.")
+            Text(folder.map { "Everyone \u{201C}\($0)\u{201D} is shared with will see this login." }
+                ?? "Only you can see this login until you share it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -184,6 +192,64 @@ private struct ChangePasswordSheet: View {
                 Text("Change it on the website or service too, if you haven't already.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// Shares one login with an approved person.
+private struct ShareLoginSheet: View {
+    let model: AppModel
+    let item: ItemSummary
+    @State private var userId: Int64
+
+    init(model: AppModel, item: ItemSummary) {
+        self.model = model
+        self.item = item
+        _userId = State(initialValue: Self.candidates(for: item, in: model).first?.userId ?? 0)
+    }
+
+    /// Approved people other than you who don't have this login directly yet.
+    private static func candidates(for item: ItemSummary, in model: AppModel) -> [User] {
+        model.users.filter { user in
+            user.approved && user.userId != model.identity?.userId && user.name != item.owner
+                && !item.sharedWith.contains(user.name)
+        }
+    }
+
+    private var candidates: [User] { Self.candidates(for: item, in: model) }
+    private var recipient: User? { candidates.first { $0.userId == userId } }
+
+    var body: some View {
+        SheetScaffold(
+            title: "Share \u{201C}\(item.name)\u{201D}", actionTitle: "Share", canAct: recipient != nil
+        ) {
+            guard let recipient else { return false }
+            try await model.share(login: item, with: recipient)
+            return true
+        } content: {
+            if candidates.isEmpty {
+                Text(model.users.contains { $0.approved && $0.userId != model.identity?.userId }
+                    ? "Everyone approved can already open this login."
+                    : "There's no one approved to share with yet. "
+                        + (model.isOwner
+                            ? "Invite people from People, then approve them once they've joined."
+                            : "The owner approves people as they join."))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Form {
+                    Picker("With", selection: $userId) {
+                        ForEach(candidates) { Text($0.name).tag($0.userId) }
+                    }
+                }
+                if let recipient {
+                    Text("\(recipient.name) will see this login"
+                        + (item.folder.map { ", not the rest of \u{201C}\($0)\u{201D}" } ?? "")
+                        + ". They can change it and share it too.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -331,7 +397,7 @@ private struct ApproveSheet: View {
                 TextField("Fingerprint", text: $fingerprint, prompt: Text("1a2b-3c4d-5e6f-7a8b-9c0d"))
                     .font(.system(.body, design: .monospaced))
             }
-            Text("Once approved, \(user.name) can see the folders you share with them.")
+            Text("Once approved, \(user.name) can see the folders and logins you share with them.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -358,8 +424,8 @@ private struct FingerprintSheet: View {
                         .padding(12)
                         .frame(maxWidth: .infinity)
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                    Text("Once they approve you and share a folder, its logins show up here. You "
-                        + "can find your fingerprint again under People.")
+                    Text("Once they approve you, logins shared with you show up here. You can "
+                        + "find your fingerprint again under People.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
