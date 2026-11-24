@@ -13,10 +13,18 @@ name = "keystead_ffi"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
+keystead-client = { path = "../keystead-client" }
 keystead-core.workspace = true
+anyhow.workspace = true
 uniffi.workspace = true
 
 # Not the workspace lints: UniFFI's generated scaffolding needs `unsafe`, so this is the
 # one crate allowed to use it. Our own code here stays safe.
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+keystead-server.workspace = true
+axum.workspace = true
+p256.workspace = true
+tokio.workspace = true

@@ -1,0 +1,22 @@
+# The Keystead server for a deployment behind nginx on the same machine. It listens only
+# on the machine's own 127.0.0.1, so nothing but nginx can reach it. See deploy/README.md.
+#
+#   cp .env.example .env     # change KEYSTEAD_PORT if 8080 is taken
+#   docker compose up -d --build
+
+# A fixed project name, so the data volume is always keystead_keystead-data, whatever the
+# checkout's folder is called.
+name: keystead
+
+services:
+  server:
+    build: ..
+    image: keystead-server:latest
+    ports:
+      - "127.0.0.1:${KEYSTEAD_PORT:-8080}:8080"
+    volumes:
+      - keystead-data:/data
+    restart: unless-stopped
+
+volumes:
+  keystead-data:

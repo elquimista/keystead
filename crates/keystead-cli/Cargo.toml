@@ -15,14 +15,13 @@ name = "keystead"
 path = "src/main.rs"
 
 [dependencies]
+keystead-client = { path = "../keystead-client" }
 keystead-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
-rand.workspace = true
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ureq.workspace = true
 
 [dev-dependencies]
 keystead-server.workspace = true

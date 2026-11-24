@@ -13,9 +13,10 @@ app for colleagues who never open a terminal.
 | --- | --- |
 | `crates/keystead-core` | Shared Rust library: data format, crypto, sync and search |
 | `crates/keystead-server` | The server (`keystead-server`), one binary per organization |
+| `crates/keystead-client` | The client side shared by the CLI and the apps: sign-in, sync, verification, actions |
 | `crates/keystead-cli` | The command-line tool (`keystead`) with pass-style commands |
 | `crates/keystead-ffi` | The core's Swift bindings (UniFFI), linked into the Mac app |
-| `apps/macos` | The macOS menu bar app (SwiftUI, Xcode project); see its [README](apps/macos/README.md) |
+| `apps/macos` | The macOS app, with a main window and a menu bar icon (SwiftUI, Xcode project); see its [README](apps/macos/README.md) |
 | `docs/format.md` | The data format and API spec (version 1 draft) |
 | `prototypes/change-feed` | Prototype: the server's change feed on SQLite with 50 devices editing at once |
 | `prototypes/secure-enclave` | Prototype: a Secure Enclave device key unlocking the account key |
@@ -36,7 +37,8 @@ cargo fmt --all --check
 
 Run the server. It listens on `127.0.0.1:8080` (set `KEYSTEAD_LISTEN` to change it) and
 keeps its database in `./keystead-data` (set `KEYSTEAD_DATA`). On first start it prints a
-one-time setup code that the first admin uses to become the owner.
+one-time setup code that the first admin uses to become the owner, either in the Mac app
+(Set up a new team) or with `keystead setup`.
 
 ```sh
 cargo run -p keystead-server
@@ -51,6 +53,9 @@ docker compose up -d              # build and start on 127.0.0.1:8080 (KEYSTEAD_
 docker compose logs server        # shows the one-time setup code on first start
 docker compose down               # stop; add -v to also delete the data
 ```
+
+To run it for your team on a server with a domain name and HTTPS, see
+[`deploy/README.md`](deploy/README.md).
 
 The API is specified in [`docs/format.md`](docs/format.md).
 
@@ -82,7 +87,8 @@ keystead ls
 keystead show "AWS root"
 ```
 
-For now the CLI stores its keys unencrypted in `$KEYSTEAD_HOME/state.json` (readable only
+The CLI keeps the shared `profile.json` (the same format the Mac app uses) and its keys in
+`device.json`. For now those keys are stored unencrypted in `$KEYSTEAD_HOME/device.json` (readable only
 by you). Use it for trying things out, not for real secrets yet.
 
 Build the macOS app (signing is covered in [apps/macos/README.md](apps/macos/README.md)):

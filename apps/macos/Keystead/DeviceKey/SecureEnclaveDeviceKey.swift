@@ -8,8 +8,25 @@ enum DeviceKeyError: Error {
     case authenticationFailed
 }
 
-/// This Mac's device key, held by the Secure Enclave. The private key never leaves the
-/// chip, and every use requires Touch ID or the Mac's login password.
+/// Every use of a device key needs Touch ID or the Mac's login password, and the key
+/// works only on this Mac while it's unlocked.
+private func userPresenceAccessControl() throws -> SecAccessControl {
+    var error: Unmanaged<CFError>?
+    guard
+        let accessControl = SecAccessControlCreateWithFlags(
+            kCFAllocatorDefault,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            [.privateKeyUsage, .userPresence],
+            &error)
+    else {
+        if let error { throw error.takeRetainedValue() }
+        throw DeviceKeyError.accessControlUnavailable
+    }
+    return accessControl
+}
+
+/// The Secure Enclave key that unwraps the account secret. The private key never leaves
+/// the chip.
 struct SecureEnclaveDeviceKey {
     let privateKey: SecureEnclave.P256.KeyAgreement.PrivateKey
 
@@ -18,22 +35,9 @@ struct SecureEnclaveDeviceKey {
     /// An encrypted handle that only this Mac's Secure Enclave can use.
     var dataRepresentation: Data { privateKey.dataRepresentation }
 
-    static var isAvailable: Bool { SecureEnclave.isAvailable }
-
     static func create() throws -> SecureEnclaveDeviceKey {
-        var error: Unmanaged<CFError>?
-        guard
-            let accessControl = SecAccessControlCreateWithFlags(
-                kCFAllocatorDefault,
-                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                [.privateKeyUsage, .userPresence],
-                &error)
-        else {
-            if let error { throw error.takeRetainedValue() }
-            throw DeviceKeyError.accessControlUnavailable
-        }
         let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(
-            compactRepresentable: false, accessControl: accessControl)
+            compactRepresentable: false, accessControl: userPresenceAccessControl())
         return SecureEnclaveDeviceKey(privateKey: key)
     }
 
@@ -46,9 +50,46 @@ struct SecureEnclaveDeviceKey {
     }
 }
 
+/// The Secure Enclave key this Mac signs in to the server with.
+struct SecureEnclaveSigningKey {
+    let privateKey: SecureEnclave.P256.Signing.PrivateKey
+
+    var dataRepresentation: Data { privateKey.dataRepresentation }
+
+    static func create() throws -> SecureEnclaveSigningKey {
+        let key = try SecureEnclave.P256.Signing.PrivateKey(
+            compactRepresentable: false, accessControl: userPresenceAccessControl())
+        return SecureEnclaveSigningKey(privateKey: key)
+    }
+
+    static func restore(from handle: Data, context: LAContext) throws -> SecureEnclaveSigningKey {
+        let key = try SecureEnclave.P256.Signing.PrivateKey(
+            dataRepresentation: handle, authenticationContext: context)
+        return SecureEnclaveSigningKey(privateKey: key)
+    }
+}
+
+/// Hands the signing key to the Rust client, which signs in with it. The format matches
+/// the `ecdsa-p256-sha256` device key scheme in docs/format.md.
+final class SecureEnclaveSigner: DeviceSigner, @unchecked Sendable {
+    private let key: SecureEnclaveSigningKey
+
+    init(key: SecureEnclaveSigningKey) {
+        self.key = key
+    }
+
+    func publicKey() -> Data {
+        key.privateKey.publicKey.x963Representation
+    }
+
+    func sign(message: Data) throws -> Data {
+        try key.privateKey.signature(for: message).rawRepresentation
+    }
+}
+
 enum DeviceAuthentication {
     /// Asks for Touch ID, or the Mac password as a fallback, and returns the
-    /// authenticated context. One approval covers several uses of the key.
+    /// authenticated context. One approval covers every use of both keys.
     @MainActor
     static func authenticate(reason: String) async throws -> LAContext {
         let context = LAContext()

@@ -139,5 +139,6 @@ fn joining_checks_the_owner_fingerprint() {
         error.to_string().contains("Don't trust this server"),
         "{error}"
     );
-    assert!(!fixture.home("bob").join("state.json").exists());
+    assert!(!fixture.home("bob").join("profile.json").exists());
+    assert!(!fixture.home("bob").join("device.json").exists());
 }

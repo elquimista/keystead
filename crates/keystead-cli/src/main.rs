@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use keystead_cli::commands::{self, EditOutcome};
-use keystead_cli::state::default_home;
+use keystead_cli::default_home;
 use keystead_core::ids::UserId;
 use keystead_core::items::{Details, Overview};
 
@@ -122,10 +122,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Invite { name } => {
             let invite = commands::invite(&home, &name)?;
             println!("Send {name} this command. It works once:\n");
-            println!(
-                "  keystead join {} {} --owner {}\n",
-                invite.server, invite.token, invite.owner_fingerprint
-            );
+            println!("  {}\n", invite.command());
             println!("Then compare fingerprints with them and run:");
             println!("  keystead approve <their user id> --fingerprint <their fingerprint>");
         }

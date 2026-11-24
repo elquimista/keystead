@@ -4,11 +4,13 @@ use std::fmt;
 use std::time::Duration;
 
 use keystead_core::api::{Challenge, ChallengeRequest, Session, SignInRequest};
-use keystead_core::ids::{DeviceId, UserId};
-use keystead_core::keys::{SoftwareDeviceKey, sign_in_message};
+use keystead_core::ids::DeviceId;
+use keystead_core::keys::sign_in_message;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+
+use crate::DeviceSigner;
 
 /// Why a request failed: the server refused it, or it never got an answer.
 #[derive(Debug)]
@@ -52,11 +54,11 @@ impl Client {
     pub fn sign_in(
         &mut self,
         device_id: DeviceId,
-        key: &SoftwareDeviceKey,
-    ) -> Result<UserId, Failure> {
+        signer: &dyn DeviceSigner,
+    ) -> anyhow::Result<Session> {
         let challenge: Challenge =
             self.post("/v1/sign-in/challenge", &ChallengeRequest { device_id })?;
-        let signature = key.sign(&sign_in_message(device_id, challenge.challenge.as_slice()));
+        let signature = signer.sign(&sign_in_message(device_id, challenge.challenge.as_slice()))?;
         let session: Session = self.post(
             "/v1/sign-in",
             &SignInRequest {
@@ -65,8 +67,8 @@ impl Client {
                 signature,
             },
         )?;
-        self.token = Some(session.token);
-        Ok(session.user_id)
+        self.token = Some(session.token.clone());
+        Ok(session)
     }
 
     pub fn get<T: DeserializeOwned>(

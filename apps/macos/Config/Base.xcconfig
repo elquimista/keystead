@@ -2,6 +2,11 @@
 
 PRODUCT_NAME = Keystead
 PRODUCT_BUNDLE_IDENTIFIER = $(KEYSTEAD_BUNDLE_ID)
+
+// Debug builds are a separate app ("Keystead Dev") with their own sandbox container,
+// device key and data, so development can never touch a real vault. Both can be
+// installed side by side.
+PRODUCT_BUNDLE_IDENTIFIER[config=Debug] = $(KEYSTEAD_BUNDLE_ID).dev
 MARKETING_VERSION = 0.1.0
 CURRENT_PROJECT_VERSION = 1
 
@@ -9,10 +14,15 @@ SDKROOT = macosx
 MACOSX_DEPLOYMENT_TARGET = 14.0
 SWIFT_VERSION = 5.0
 
-// A menu bar app: no Dock icon and no main window.
+// A regular app with a main window and a menu bar icon. People who only want the menu bar
+// icon can hide the Dock icon in Settings (see DockIcon in KeysteadApp.swift).
 GENERATE_INFOPLIST_FILE = YES
-INFOPLIST_KEY_LSUIElement = YES
 INFOPLIST_KEY_CFBundleDisplayName = Keystead
+INFOPLIST_KEY_CFBundleDisplayName[config=Debug] = Keystead Dev
+
+// Icons are drawn by scripts/make-icons.swift. Debug builds get the orange DEV icon.
+ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon
+ASSETCATALOG_COMPILER_APPICON_NAME[config=Debug] = AppIcon-Dev
 INFOPLIST_KEY_LSApplicationCategoryType = public.app-category.productivity
 
 // The Hardened Runtime is required for notarization. The App Sandbox keeps the Mac App

@@ -1,43 +1,50 @@
 import Foundation
 
-/// Where this Mac keeps its device key handle and the wrapped account secret: the app's
-/// Application Support folder, inside its sandbox container.
+/// What this Mac keeps, in the app's Application Support folder inside its sandbox
+/// container:
 ///
-/// Neither file is secret on its own. The handle only works in this Mac's Secure Enclave,
-/// after Touch ID or the Mac password, and the account secret is encrypted to that key.
-/// That's why no Keychain entitlement (and so no provisioning profile) is needed yet.
+/// - `profile.json`: the shared profile format, written by the Rust client (server, pinned
+///   owner keys, and the encrypted copy of folders and items).
+/// - `device.json`: this Mac's device id, the handles of its two Secure Enclave keys, and
+///   the account secret wrapped to one of them.
+///
+/// None of it is readable on its own. The handles work only in this Mac's Secure Enclave,
+/// after Touch ID or the Mac password, and everything secret is encrypted to them.
 struct DeviceStore {
-    struct Saved {
-        let handle: Data
-        let wrappedSecret: WrappedKey
+    struct Device: Codable {
+        var deviceId: String
+        /// Handle of the key that unwraps the account secret.
+        var agreementKey: Data
+        /// Handle of the key that signs in to the server.
+        var signingKey: Data
+        var accountSecret: WrappedKey
     }
 
     private let directory = URL.applicationSupportDirectory
         .appending(path: "Keystead", directoryHint: .isDirectory)
-    private var handleURL: URL { directory.appending(path: "device-key.handle") }
-    private var wrappedSecretURL: URL { directory.appending(path: "account-secret.json") }
+    var profileURL: URL { directory.appending(path: "profile.json") }
+    private var deviceURL: URL { directory.appending(path: "device.json") }
 
-    var hasDeviceKey: Bool {
-        FileManager.default.fileExists(atPath: wrappedSecretURL.path)
+    var isEnrolled: Bool {
+        FileManager.default.fileExists(atPath: profileURL.path)
+            && FileManager.default.fileExists(atPath: deviceURL.path)
     }
 
-    func save(handle: Data, wrappedSecret: WrappedKey) throws {
+    func save(_ device: Device) throws {
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        try write(handle, to: handleURL)
-        try write(JSONEncoder().encode(wrappedSecret), to: wrappedSecretURL)
+        try JSONEncoder().encode(device).write(to: deviceURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: deviceURL.path)
     }
 
-    func load() throws -> Saved {
-        Saved(
-            handle: try Data(contentsOf: handleURL),
-            wrappedSecret: try JSONDecoder().decode(
-                WrappedKey.self, from: Data(contentsOf: wrappedSecretURL)))
+    func load() throws -> Device {
+        try JSONDecoder().decode(Device.self, from: Data(contentsOf: deviceURL))
     }
 
-    private func write(_ data: Data, to url: URL) throws {
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    /// Forgets a device whose enrollment didn't finish.
+    func removeDevice() {
+        try? FileManager.default.removeItem(at: deviceURL)
     }
 }

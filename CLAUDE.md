@@ -22,6 +22,8 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
   For throwaway checks use another project and port
   (`KEYSTEAD_PORT=18090 docker compose -p keystead-check up -d`, then `down -v`) so the
   user's own server and data on 8080 are never touched.
+- Production deployment: `deploy/` (the server behind nginx, with Cloudflare in front); guide in
+  `deploy/README.md`. Test it locally with another project name and ports, never 80/443.
 - Benchmarks (always `--release`; debug numbers are meaningless):
   `cargo run --release -p keystead-proto-unlock-search`,
   `cargo run --release -p keystead-proto-change-feed`
@@ -37,5 +39,8 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
 - Never write secrets or decrypted data to disk, logs or error messages.
 - `unsafe` is forbidden workspace-wide; only `keystead-ffi` opts out, because UniFFI's
   generated code needs it. Keep that crate a thin conversion layer.
+- Client logic (sign-in, sync, verification, actions) lives in `keystead-client`, shared by
+  the CLI and the apps. Platform code only supplies the account secret and a
+  `DeviceSigner`; don't duplicate client logic in Swift or the CLI.
 - Release builds of the Mac app must stay notarizable: Hardened Runtime on, no
   `get-task-allow`, no unsigned nested binaries. CI checks this.
