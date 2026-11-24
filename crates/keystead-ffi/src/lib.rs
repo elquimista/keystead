@@ -966,6 +966,12 @@ impl Vault {
         Ok(self.vault()?.add_to_group(&group, UserId(user_id))?)
     }
 
+    /// Deletes a group (the owner, or a manager in it): its members lose what only it gave
+    /// them, and folders shared with it get new keys, here if you manage them.
+    pub fn delete_group(&self, group: String) -> Result<SyncResult, CoreError> {
+        Ok(self.vault()?.delete_group(&group)?.into())
+    }
+
     /// Takes someone out of a group, or you, to leave it. The group, and folders shared
     /// with it, then get new keys.
     pub fn remove_from_group(&self, group: String, user_id: i64) -> Result<SyncResult, CoreError> {

@@ -167,6 +167,7 @@ keystead folder group-role Production Platform view
 keystead folder remove Production --group Platform
 keystead unshare Bank --group Platform
 keystead group leave Platform
+keystead group delete Platform          # everyone loses what only it gave them (asks first)
 ```
 
 To use the account on another machine too, add it from one that has it (needs a 0.8.0

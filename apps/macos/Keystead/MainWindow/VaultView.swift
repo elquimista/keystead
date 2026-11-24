@@ -917,6 +917,7 @@ private struct GroupDetail: View {
     let model: AppModel
     let group: GroupSummary
     @State private var leaving = false
+    @State private var deleting = false
     @State private var busy = false
     @State private var error: String?
 
@@ -994,6 +995,14 @@ private struct GroupDetail: View {
                     }
                 }
             }
+            if group.canManage {
+                Section {
+                    Text("Deleting \(group.name) takes away what only it gave the people in it, "
+                        + "and gives the folders shared with it new keys.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Delete Group…", role: .destructive) { deleting = true }
+                }
+            }
             if let error {
                 Text(error)
                     .foregroundStyle(.red)
@@ -1011,6 +1020,15 @@ private struct GroupDetail: View {
         } message: {
             Text("You'll lose the folders and logins shared with it, unless you have them "
                 + "another way.")
+        }
+        .confirmationDialog("Delete \u{201C}\(group.name)\u{201D}?", isPresented: $deleting) {
+            Button("Delete Group", role: .destructive) {
+                run { try await model.delete(group) }
+            }
+        } message: {
+            Text("Everyone in it loses the folders and logins shared with it, unless they have "
+                + "them another way, and those folders get new keys. The passwords they could "
+                + "see go on To Change.")
         }
     }
 

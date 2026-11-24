@@ -248,6 +248,10 @@ pub fn remove_from_group(home: &Path, group: &str, user: UserId) -> Result<SyncS
     refreshed(home)?.remove_from_group(group, user)
 }
 
+pub fn delete_group(home: &Path, group: &str) -> Result<SyncSummary> {
+    refreshed(home)?.delete_group(group)
+}
+
 pub fn leave_group(home: &Path, group: &str) -> Result<SyncSummary> {
     let mut vault = refreshed(home)?;
     let me = vault.whoami().user_id;

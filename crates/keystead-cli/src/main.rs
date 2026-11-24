@@ -317,6 +317,13 @@ enum GroupCommand {
     Remove { group: String, user_id: i64 },
     /// Leave a group
     Leave { group: String },
+    /// Delete a group: everyone in it loses what only it gave them (owner and its managers)
+    Delete {
+        group: String,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
     /// Rename a group (owner and its managers)
     Rename { group: String, name: String },
     /// Make someone in a group one of its managers (owner and its managers)
@@ -675,6 +682,26 @@ fn run(cli: Cli) -> Result<()> {
             if summary.rekeyed == 0 {
                 println!("One of its managers' apps gives it a new key when it next syncs.");
             }
+        }
+        Command::Group(GroupCommand::Delete { group, yes }) => {
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!("add --yes to delete the group without being asked");
+                }
+                println!("Everyone in {group} loses what only the group gave them, and folders");
+                println!("shared with it get new keys.");
+                print!("Delete {group}? [y/N] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("Not deleted.");
+                    return Ok(());
+                }
+            }
+            let summary = commands::delete_group(&home, &group)?;
+            commands::warn_rejected(&summary);
+            println!("Deleted {group}.");
         }
         Command::Group(GroupCommand::Leave { group }) => {
             commands::leave_group(&home, &group)?;

@@ -544,7 +544,17 @@ pub(crate) async fn put_item(
         .flat_map(|current| current.keys.groups.iter().map(|copy| copy.group_id))
         .collect();
     let groups_after: HashSet<GroupId> = item.keys.groups.iter().map(|c| c.group_id).collect();
-    let groups_changed = groups_before != groups_after;
+    // Dropping the copy of a group that was deleted is anyone's to do, like dropping
+    // people removed from the team; other changes to groups take a manager.
+    let mut groups_changed = groups_after.difference(&groups_before).next().is_some();
+    for group in groups_before.difference(&groups_after) {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM team_groups WHERE id = ?)")
+                .bind(group.to_string())
+                .fetch_one(&mut *tx)
+                .await?;
+        groups_changed |= exists;
+    }
     if (!added.is_empty() || dropped_active || groups_changed) && role != Role::Manage {
         return Err(ApiError::Forbidden(
             "you need manage access to change who this login is shared with".into(),
@@ -1278,7 +1288,7 @@ pub(crate) async fn require_shareable(
 
 /// A folder must keep a manager, a person or a group: someone has to be able to share it
 /// and change its key.
-async fn require_another_manager(
+pub(crate) async fn require_another_manager(
     conn: &mut SqliteConnection,
     folder_id: FolderId,
     leaving: Option<UserId>,

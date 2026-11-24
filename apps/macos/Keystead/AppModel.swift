@@ -758,6 +758,16 @@ final class AppModel {
         note(result)
     }
 
+    /// Deletes a group (the owner, or a manager in it). Folders shared with it get new keys,
+    /// from here if this account manages them.
+    func delete(_ group: GroupSummary) async throws {
+        let name = group.name
+        let result = try await perform { try $0.deleteGroup(group: name) }
+        if selectedGroupID == group.id { selectedGroupID = nil }
+        await refresh()
+        note(result)
+    }
+
     func setManager(_ member: GroupMember, of group: GroupSummary, to manager: Bool) async throws {
         let name = group.name
         try await perform { try $0.setGroupManager(group: name, userId: member.userId, manager: manager) }

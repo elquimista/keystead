@@ -21,7 +21,9 @@ use keystead_core::ids::{GroupId, UserId};
 use sqlx::SqliteConnection;
 
 use crate::accounts::{Auth, check_name};
-use crate::vault::{reconcile, require_shareable, resend_keys};
+use crate::vault::{
+    parse_folder, reconcile, require_another_manager, require_shareable, resend_keys,
+};
 use crate::{ApiError, AppState, next_seq, user_entry};
 
 /// `POST /v1/groups` (owner): makes a group with its first members, the owner among them.
@@ -199,6 +201,71 @@ pub(crate) async fn update_group(
     insert_entry(&mut tx, &entry).await?;
     for member in members {
         log(&mut tx, member, group_id, true).await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/groups/{group_id}`: the owner or a manager in the group deletes it. Its
+/// members lose whatever only the group gave them, as if each had left it: their devices
+/// forget it, folders shared with it get new keys, and what they could see goes on the
+/// passwords to change. Refused while it's the only manager of a folder.
+pub(crate) async fn delete_group(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(group_id): Path<GroupId>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    let latest = latest_entry(&mut tx, group_id).await?;
+    let members = group_member_ids(&mut tx, group_id).await?;
+    let manager = latest.is_manager(auth.user_id) && members.contains(&auth.user_id);
+    if !manager && !is_owner(&mut tx, auth.user_id).await? {
+        return Err(ApiError::Forbidden(
+            "only the owner and the group's managers can delete it".into(),
+        ));
+    }
+    let folders: Vec<(String, String)> =
+        sqlx::query_as("SELECT folder_id, role FROM folder_groups WHERE group_id = ?")
+            .bind(group_id.to_string())
+            .fetch_all(&mut *tx)
+            .await?;
+    for (folder_id, role) in &folders {
+        if role == "manage" {
+            require_another_manager(&mut tx, parse_folder(folder_id)?, None, Some(group_id))
+                .await
+                .map_err(|_| {
+                    ApiError::Conflict(
+                        "this group is the only manager of a folder shared with it; make \
+                         someone else a manager of that folder first"
+                            .into(),
+                    )
+                })?;
+        }
+    }
+    for table in [
+        "folder_groups",
+        "item_groups",
+        "group_members",
+        "group_keys",
+        "group_entries",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE group_id = ?"))
+            .bind(group_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM team_groups WHERE id = ?")
+        .bind(group_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    let folders: Vec<String> = folders
+        .into_iter()
+        .map(|(folder_id, _)| folder_id)
+        .collect();
+    for member in members {
+        log(&mut tx, member, group_id, false).await?;
+        reconcile(&mut tx, member).await?;
+        resend_keys(&mut tx, member, &folders).await?;
     }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)

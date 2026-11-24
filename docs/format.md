@@ -343,6 +343,15 @@ secret; the owner and managers in the group remove people, rename it and change 
 managers. A manager who has left the group stops being one at its next revision, and the
 server stops taking their changes at once.
 
+**Deleting a group** (0.10.0 and later; `DELETE /v1/groups/{id}`, the owner and managers in
+it). Everyone in it loses what only the group gave them, as if each had left: their feeds
+get `left_group` and the `left` and `left_item` entries that follow, folders they lost are
+marked for new keys, those who keep a folder another way get its key again (`rekeyed`),
+and what they could see goes on the passwords to change. The server forgets the group's
+entries and keys. It refuses while the group is the only manager of a folder. Items keep
+their copy for the deleted group until next saved; clients then drop it, and anyone who
+can save may (as for people removed from the team).
+
 **New secrets.** When someone leaves, the group needs a new secret, the next generation:
 a manager in it makes one, wraps it for exactly the remaining members, signs the next
 revision with the new key, and seals the previous secret with the new chain key:
@@ -404,6 +413,7 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/groups/{id}/members` | `AddGroupMemberRequest` | 204 | The group's managers in it (the owner too, if in it) |
 | `DELETE /v1/groups/{id}/members/{user}` | | 204 | Owner and the group's managers in it, or the member themselves |
 | `POST /v1/groups/{id}/rekey` | `GroupRekeyRequest` | 204 | The group's managers in it (the owner too, if in it) |
+| `DELETE /v1/groups/{id}` | | 204 | Owner, and the group's managers in it |
 | `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Editors and managers of the item (see Roles) |
 | `GET /v1/items/{id}/people` | | `Members` | Anyone who can open the item |
 | `GET /v1/items/{id}/history` | | `ItemHistory` | Editors and managers of the item |
@@ -574,7 +584,6 @@ with them or their groups directly, the highest of the ways in), and every page
 - Signed membership changes. Roles and memberships are enforced by the server; a
   server that lied could let someone save who shouldn't, though every version stays
   signed by its author. A group's managers and key are signed; who is in it isn't.
-- Deleting a group, and groups inside groups (on purpose: no loops, and access stays
-  easy to follow).
+- Groups inside groups (on purpose: no loops, and access stays easy to follow).
 - Moving an item to another folder.
 - Paginating a large folder that arrives with a join.

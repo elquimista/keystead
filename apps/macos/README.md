@@ -21,7 +21,9 @@ account back on a new Mac with a Recovery Kit.
   with a group as with a person, and reach everyone in it, including people added later.
   A group's managers in it add people; the owner and its managers remove people, rename
   it and change its managers. Taking someone out gives the group, and the folders shared
-  with it, new keys in the background. Needs a 0.4.0 server.
+  with it, new keys in the background. Needs a 0.4.0 server. Delete Group… (0.10.0 server)
+  takes away what only the group gave its members, and gives its folders new keys; it
+  can't while the group is a folder's only manager.
 - **To Change:** when someone loses access, the passwords they could see that you can
   change are listed under To Change in the sidebar, with a warning on each login and on the
   person's page. Saving a new password takes a login off; Keep It (or Keep All, for someone

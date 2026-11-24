@@ -280,6 +280,13 @@ impl Profile {
         Ok((info, self.verify_group(&info.entries)?))
     }
 
+    /// Whether a group is still on the team, as of the last sync; a deleted one isn't.
+    pub fn group_exists(&self, group_id: GroupId) -> bool {
+        self.team_groups
+            .iter()
+            .any(|info| info.entries.first().is_some_and(|e| e.group_id == group_id))
+    }
+
     /// A group's name, if it checks out.
     pub fn group_name(&self, group_id: GroupId) -> String {
         self.team_group(group_id)

@@ -944,8 +944,9 @@ impl Vault {
         let path = format!("/v1/folders/{folder_id}/members/{user}");
         let () = self.call(|client| client.delete(&path))??;
         if user == self.profile.user_id {
-            self.forget_folder(folder_id);
-            self.save()?;
+            // The feed says whether this account lost the folder: not if a group of its
+            // still gives it.
+            self.sync()?;
         } else {
             // If this fails, the next sync of any manager tries again.
             self.rekey(folder_id)?;
@@ -1163,6 +1164,22 @@ impl Vault {
         let path = format!("/v1/groups/{group_id}/members/{user}");
         let () = self.call(|client| client.delete(&path))??;
         // If this account manages the group, the new keys come from here.
+        self.sync()
+    }
+
+    /// Deletes a group (the owner, or a manager in it). Its members lose what only it gave
+    /// them; folders shared with it get new keys, here if this account manages them.
+    pub fn delete_group(&mut self, group: &str) -> Result<SyncSummary> {
+        self.check_server_has_groups()?;
+        let group_id = self.profile.find_group(group)?;
+        let path = format!("/v1/groups/{group_id}");
+        match self.call(|client| client.delete::<()>(&path))? {
+            Ok(()) => {}
+            Err(Failure::Status { code: 405, .. }) => {
+                bail!("the server is older than Keystead 0.10.0 and can't delete groups; update it")
+            }
+            Err(error) => return Err(error.into()),
+        }
         self.sync()
     }
 
@@ -1533,6 +1550,7 @@ impl Vault {
                     .keys
                     .groups
                     .iter()
+                    .filter(|copy| self.profile.group_exists(copy.group_id))
                     .map(|copy| self.profile.group_name(copy.group_id))
                     .collect(),
                 shared_with_me: folder.is_none() && item.owner != Some(me),
@@ -2203,8 +2221,11 @@ impl Vault {
                     wrapped_key: recipient.wrap_item_key(&key, current.id)?,
                 });
             }
-            // Groups get the new key at their current generation.
+            // Groups get the new key at their current generation; deleted ones are dropped.
             for copy in &current.keys.groups {
+                if !self.profile.group_exists(copy.group_id) {
+                    continue;
+                }
                 let (_, entry) = self.profile.team_group(copy.group_id)?;
                 keys.groups.push(GroupKeyCopy {
                     group_id: copy.group_id,
@@ -2217,6 +2238,8 @@ impl Vault {
             let mut keys = current.keys.clone();
             keys.people
                 .retain(|person| !self.profile.is_removed(person.user_id));
+            keys.groups
+                .retain(|copy| self.profile.group_exists(copy.group_id));
             (self.item_key(current)?, keys)
         };
         let mut roles = Vec::new();

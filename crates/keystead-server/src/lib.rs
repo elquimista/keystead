@@ -292,7 +292,10 @@ pub fn router(state: AppState) -> Router {
             put(vault::set_folder_group_role).delete(vault::remove_folder_group),
         )
         .route("/v1/groups", post(groups::create_group).get(groups::groups))
-        .route("/v1/groups/{group_id}", put(groups::update_group))
+        .route(
+            "/v1/groups/{group_id}",
+            put(groups::update_group).delete(groups::delete_group),
+        )
         .route(
             "/v1/groups/{group_id}/members",
             post(groups::add_group_member),

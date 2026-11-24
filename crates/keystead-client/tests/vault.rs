@@ -1216,3 +1216,92 @@ fn a_deleted_login_can_be_brought_back_for_30_days() {
     bob.sync().unwrap();
     assert!(bob.deleted().unwrap().unwrap().is_empty());
 }
+
+#[test]
+fn deleting_a_group_takes_away_what_only_it_gave() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let alice_id = alice.whoami().user_id;
+    let bob_id = bob.whoami().user_id;
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+
+    // Ops (Alice and Bob) edits Production, and has Bank and Production's Database too.
+    alice.create_group("Ops", &[bob_id]).unwrap();
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder_with_group("Production", "Ops", Role::Edit)
+        .unwrap();
+    alice
+        .share_folder("Production", carol_identity.user_id, Role::Edit)
+        .unwrap();
+    let (overview, details) = login("Database", "db");
+    alice.add(Some("Production"), overview, details).unwrap();
+    let database = alice.find_item("Database", None).unwrap();
+    alice
+        .share_item_with_group(database, "Ops", Role::View)
+        .unwrap();
+    let (overview, details) = login("Bank", "bank");
+    let bank = alice.add(None, overview, details).unwrap();
+    alice
+        .share_item_with_group(bank, "Ops", Role::Edit)
+        .unwrap();
+    bob.sync().unwrap();
+    assert_eq!(bob.list().unwrap().len(), 2);
+
+    // Not while it's the only manager of a folder: Infra, which Alice left to Ops.
+    alice.create_folder("Infra").unwrap();
+    alice
+        .share_folder_with_group("Infra", "Ops", Role::Manage)
+        .unwrap();
+    alice.remove_from_folder("Infra", alice_id).unwrap();
+    let error = alice.delete_group("Ops").unwrap_err();
+    assert!(format!("{error:#}").contains("only manager"), "{error:#}");
+    assert!(bob.delete_group("Ops").is_err(), "Bob isn't a manager");
+    alice.share_folder("Infra", bob_id, Role::Manage).unwrap();
+
+    // Deleted: Bob keeps Infra (his own now) but loses the rest; Alice's app gives
+    // Production a new key.
+    let generation = alice
+        .profile()
+        .folders
+        .values()
+        .map(|folder| folder.generation)
+        .max()
+        .unwrap();
+    let summary = alice.delete_group("Ops").unwrap();
+    assert_eq!(summary.rekey_problems, Vec::<String>::new());
+    assert!(alice.groups().is_empty());
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap().is_empty());
+    assert_eq!(bob.folders().unwrap(), ["Infra"]);
+    assert!(bob.groups().is_empty());
+    assert!(
+        alice
+            .profile()
+            .folders
+            .values()
+            .any(|folder| folder.generation > generation)
+    );
+
+    // Logins that had a copy for Ops lose it when next saved, even by an editor.
+    carol.sync().unwrap();
+    carol.edit(database, "db-2").unwrap();
+    assert!(carol.profile().items[&database].keys.groups.is_empty());
+    alice.edit(bank, "bank-2").unwrap();
+    assert_eq!(alice.profile().items[&bank].format, 2);
+    assert!(
+        alice
+            .list()
+            .unwrap()
+            .iter()
+            .all(|row| row.shared_with_groups.is_empty())
+    );
+}
