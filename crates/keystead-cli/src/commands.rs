@@ -46,8 +46,13 @@ pub fn join(home: &Path, server: &str, token: &str, owner_fingerprint: &str) -> 
 }
 
 /// Recovers an account onto this machine with the words from its recovery kit, then
-/// fetches its folders and logins.
-pub fn recover(home: &Path, server: &str, owner_fingerprint: &str, words: &str) -> Result<Whoami> {
+/// fetches its folders and logins. The owner can leave out the owner's fingerprint.
+pub fn recover(
+    home: &Path,
+    server: &str,
+    owner_fingerprint: Option<&str>,
+    words: &str,
+) -> Result<Whoami> {
     refuse_existing(home)?;
     let secret = AccountSecret::from_recovery_words(words)?;
     let key = Arc::new(SoftwareDeviceKey::generate());
@@ -68,6 +73,14 @@ pub fn recovery_kit(home: &Path) -> Result<(String, Whoami)> {
     let device = DeviceFile::load(home)?;
     let whoami = open(home)?.whoami();
     Ok((device.secret()?.recovery_words().to_string(), whoami))
+}
+
+/// Signs this machine out: the server forgets it, and its profile and keys are deleted.
+/// Returns why the server couldn't be told, if it couldn't.
+pub fn sign_out(home: &Path) -> Result<Option<String>> {
+    let not_told = open(home)?.sign_out()?;
+    DeviceFile::delete(home)?;
+    Ok(not_told)
 }
 
 pub fn devices(home: &Path) -> Result<Vec<DeviceRow>> {

@@ -59,6 +59,17 @@ impl DeviceFile {
         serde_json::from_slice(&text).with_context(|| format!("reading {}", path.display()))
     }
 
+    /// Deletes the device file, if there is one.
+    pub fn delete(home: &Path) -> Result<()> {
+        let path = home.join(DEVICE_FILE);
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).with_context(|| format!("deleting {}", path.display()))
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn save(&self, home: &Path) -> Result<()> {
         write_private(&home.join(DEVICE_FILE), &serde_json::to_vec_pretty(self)?)
     }

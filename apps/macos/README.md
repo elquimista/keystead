@@ -17,11 +17,15 @@ account back on a new Mac with a Recovery Kit.
 - **Approving people:** the owner types in the fingerprint the new person reads out (in
   person or on a call). Keystead checks it against the keys they joined with, ignoring
   spaces, dashes and capitals.
-- **Recovery Kit:** the account secret as 24 words, shown after Touch ID and printable
+- **Recovery Kit:** the account secret as 24 words, shown after Touch ID (hidden until
+  asked for), printable, or copied as words alone to this Mac's clipboard for 30 seconds
   (People › You, or Settings › Account). The owner is asked to save one right after setup.
   Recovering on a new Mac checks the owner's fingerprint from the kit before registering
-  anything; the old Mac can then be removed from the device list under People › You. Needs
-  a 0.2.0 server.
+  anything (the owner can leave it out); the old Mac can then be removed from the device
+  list under People › You. Needs a 0.2.0 server.
+- **Sign out:** People › You, Settings › Account or Vault › Sign Out, after Touch ID. The
+  server forgets this Mac, and the account's files and keys here are deleted; coming back
+  takes the Recovery Kit.
 - **Keys:** two Secure Enclave keys per Mac. One signs in to the server
   (`ecdsa-p256-sha256`), one unwraps the account secret. One Touch ID approval covers
   both.

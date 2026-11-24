@@ -37,6 +37,8 @@ struct WelcomeView: View {
     @State private var invite = ""
     @State private var ownerFingerprint = ""
     @State private var words = ""
+    /// The recovery words are masked while typed, unless the user chooses to see them.
+    @State private var showsWords = false
     @State private var server = ""
     @State private var setupCode = ""
     @State private var name = ""
@@ -174,19 +176,49 @@ struct WelcomeView: View {
                 }
                 GridRow {
                     Text("Owner's fingerprint")
-                    TextField("", text: $ownerFingerprint, prompt: Text("From your Recovery Kit"))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("", text: $ownerFingerprint, prompt: Text("From your Recovery Kit"))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                        Text("Leave it empty if you're your team's owner.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 GridRow(alignment: .top) {
                     Text("The 24 words")
-                    TextField(
-                        "", text: $words, prompt: Text("In order, as on your Recovery Kit"),
-                        axis: .vertical
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .lineLimit(2...8)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .top, spacing: 6) {
+                            Group {
+                                if showsWords {
+                                    TextField(
+                                        "", text: $words,
+                                        prompt: Text("In order, as on your Recovery Kit"),
+                                        axis: .vertical
+                                    )
+                                    .lineLimit(2...8)
+                                } else {
+                                    SecureField(
+                                        "", text: $words,
+                                        prompt: Text("In order, as on your Recovery Kit"))
+                                }
+                            }
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                            Button {
+                                showsWords.toggle()
+                            } label: {
+                                Image(systemName: showsWords ? "eye.slash" : "eye")
+                            }
+                            .buttonStyle(.borderless)
+                            .padding(.top, 3)
+                            .help(showsWords ? "Hide the words" : "Show the words")
+                        }
+                        Text("\(recoveryWordCount) of 24 words")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
                 }
             }
             HStack {
@@ -199,7 +231,7 @@ struct WelcomeView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .controlSize(.large)
-                .disabled(!hasScheme || ownerFingerprint.trimmed.isEmpty || words.trimmed.isEmpty)
+                .disabled(!hasScheme || words.trimmed.isEmpty)
             }
         }
     }
@@ -217,6 +249,19 @@ struct WelcomeView: View {
         }
         #endif
         return .join
+    }
+
+    /// How many words have been entered, counted as Keystead reads them: numbers, commas,
+    /// spacing and line breaks don't count.
+    private var recoveryWordCount: Int {
+        words.split(whereSeparator: { $0.isWhitespace || $0 == "," })
+            .map { word in
+                var word = word
+                while let last = word.last, last == "." || last == ")" { word = word.dropLast() }
+                return word
+            }
+            .filter { word in !word.isEmpty && !word.allSatisfy { $0.isASCII && $0.isNumber } }
+            .count
     }
 
     private var hasScheme: Bool {

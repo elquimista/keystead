@@ -41,6 +41,7 @@ final class AppModel {
         case fingerprint
         /// The recovery kit; right after setup it first explains why it matters.
         case recoveryKit(afterSetup: Bool)
+        case signOut
 
         var id: String {
             switch self {
@@ -53,6 +54,7 @@ final class AppModel {
             case .approve(let user): "approve-\(user.userId)"
             case .fingerprint: "fingerprint"
             case .recoveryKit: "recovery-kit"
+            case .signOut: "sign-out"
             }
         }
     }
@@ -156,9 +158,11 @@ final class AppModel {
     }
 
     /// Brings an account back on this Mac with the 24 words from its recovery kit. The
-    /// owner's fingerprint from the kit is checked before anything is registered.
+    /// owner's fingerprint from the kit is checked before anything is registered; the owner
+    /// can leave it empty, and their own keys are checked instead.
     func recover(server: String, ownerFingerprint: String, words: String) async {
         let server = server.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ownerFingerprint: String? = ownerFingerprint.trimmed.isEmpty ? nil : ownerFingerprint
         let secret: SymmetricKey
         do {
             secret = SymmetricKey(data: try accountSecretFromRecoveryWords(words: words))
@@ -408,6 +412,44 @@ final class AppModel {
         return RecoveryKit(words: try recoveryWords(accountSecret: secret), identity: identity)
     }
 
+    /// Copies the kit's 24 words, and nothing else, the way passwords are copied: to this Mac
+    /// only, kept out of clipboard history, and cleared after 30 seconds.
+    func copyRecoveryWords(of kit: RecoveryKit) {
+        clipboard.copy(kit.words.joined(separator: " "))
+    }
+
+    /// Signs out after Touch ID: the server forgets this Mac, so it can't sign in again, and
+    /// the account's files and keys on this Mac are deleted. Coming back takes the Recovery
+    /// Kit. Ends on the welcome screen.
+    func signOut() async throws {
+        #if DEBUG
+        if isDemo {
+            forgetAccount(note: nil)
+            return
+        }
+        #endif
+        _ = try await DeviceAuthentication.authenticate(reason: "sign out of Keystead on this Mac")
+        var notTold: String?
+        do {
+            notTold = try await perform { try $0.signOut() }
+        } catch {
+            notTold = describe(error)
+        }
+        store.forgetAccount()
+        forgetAccount(
+            note: notTold.map {
+                "Signed out, but the server couldn't be told (\($0)). This Mac stays in your "
+                    + "device list until you remove it from another device."
+            })
+    }
+
+    private func forgetAccount(note: String?) {
+        lock()
+        identity = nil
+        message = note
+        phase = .welcome
+    }
+
     /// Removes another of this account's devices, such as a lost Mac.
     func removeDevice(_ device: AccountDevice) async throws {
         let id = device.deviceId
@@ -461,6 +503,10 @@ extension AppModel {
                 deviceId: "00000000-0000-4000-8000-0000000000d2", name: "Olivia's MacBook Pro",
                 addedAt: 1_795_000_000, current: true),
         ]
+        if alone {
+            // A new owner's only device, as right after setup.
+            model.devices.removeFirst()
+        }
         if !alone {
             model.users += [
                 User(userId: 2, name: "Mo", approved: true, isOwner: false),

@@ -1109,6 +1109,27 @@ async fn recovery_adds_a_device_and_the_lost_one_can_be_removed() {
     let (status, body) = devices(&server, &bob).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(decode::<DeviceList>(body).devices.len(), 1);
+
+    // Signing out removes the device making the request: its session ends at once.
+    let (status, _) = server
+        .call(Method::POST, "/v1/sign-out", new_mac.token(), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = devices(&server, &new_mac).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = server
+        .call(
+            Method::POST,
+            "/v1/sign-in/challenge",
+            None,
+            json(&ChallengeRequest {
+                device_id: new_mac.device_id,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = server.call(Method::POST, "/v1/sign-out", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

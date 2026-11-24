@@ -2,9 +2,15 @@ import AppKit
 import SwiftUI
 
 struct SettingsView: View {
+    /// The sheets the Account tab opens, in the Settings window itself.
+    enum AccountSheet: String, Identifiable {
+        case recoveryKit, signOut
+        var id: String { rawValue }
+    }
+
     let model: AppModel
     @AppStorage(DockIcon.preferenceKey) private var showInDock = true
-    @State private var showingKit = false
+    @State private var sheet: AccountSheet?
 
     var body: some View {
         TabView {
@@ -19,12 +25,17 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
 
-            AccountSettings(model: model, showingKit: $showingKit)
+            AccountSettings(model: model, sheet: $sheet)
                 .tabItem { Label("Account", systemImage: "person.crop.circle") }
         }
-        .frame(width: 480, height: 320)
-        .sheet(isPresented: $showingKit) {
-            RecoveryKitSheet(model: model, afterSetup: false)
+        .frame(width: 480, height: 360)
+        .sheet(item: $sheet) { sheet in
+            switch sheet {
+            case .recoveryKit:
+                RecoveryKitSheet(model: model, afterSetup: false)
+            case .signOut:
+                SignOutSheet(model: model) { self.sheet = .recoveryKit }
+            }
         }
         .onChange(of: showInDock) {
             DockIcon.applyPreference()
@@ -37,7 +48,7 @@ struct SettingsView: View {
 
 private struct AccountSettings: View {
     let model: AppModel
-    @Binding var showingKit: Bool
+    @Binding var sheet: SettingsView.AccountSheet?
 
     var body: some View {
         Form {
@@ -51,7 +62,10 @@ private struct AccountSettings: View {
                         .textSelection(.enabled)
                 }
                 LabeledContent("Recovery Kit") {
-                    Button("Show Recovery Kit…") { showingKit = true }
+                    Button("Show Recovery Kit…") { sheet = .recoveryKit }
+                }
+                LabeledContent("This Mac") {
+                    Button("Sign Out…") { sheet = .signOut }
                 }
             } else {
                 Text(model.phase == .welcome

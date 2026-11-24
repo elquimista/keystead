@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/recover", post(accounts::recover))
         .route("/v1/devices", get(accounts::devices))
         .route("/v1/devices/{device_id}", delete(accounts::remove_device))
+        .route("/v1/sign-out", post(accounts::sign_out))
         .route("/v1/users/{user_id}/approval", post(accounts::approve))
         .route("/v1/directory", get(accounts::directory))
         .route("/v1/folders", post(vault::create_folder))

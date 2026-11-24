@@ -27,6 +27,9 @@ enum DebugSnapshots {
             steps += [
                 ("2a-kit-after-setup", { model.sheet = .recoveryKit(afterSetup: true) }),
                 ("2b-kit-closed", { model.sheet = nil }),
+                // The owner's only device: the strongest warning.
+                ("2c-sign-out", { model.sheet = .signOut }),
+                ("2d-closed", { model.sheet = nil }),
             ]
         } else {
             steps += [
@@ -35,6 +38,8 @@ enum DebugSnapshots {
                 ("5-person-you", { model.selectedUserID = 1 }),
                 ("5a-recovery-kit", { model.sheet = .recoveryKit(afterSetup: false) }),
                 ("5b-kit-closed", { model.sheet = nil }),
+                ("5c-sign-out", { model.sheet = .signOut }),
+                ("5d-closed", { model.sheet = nil }),
                 ("6-login", {
                     model.section = .allLogins
                     model.selectedItemID = model.items.first?.id

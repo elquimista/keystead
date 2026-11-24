@@ -246,12 +246,13 @@ impl Vault {
 
     /// Recovers an account onto this device with its secret, from a recovery kit's words
     /// (see `account_secret_from_recovery_words`). Checks the owner's fingerprint from the
-    /// kit before registering anything. Sync afterwards to fetch folders and logins.
+    /// kit before registering anything; the owner can pass none, and their own keys are
+    /// checked instead. Sync afterwards to fetch folders and logins.
     #[uniffi::constructor]
     pub fn recover(
         profile_path: String,
         server: String,
-        owner_fingerprint: String,
+        owner_fingerprint: Option<String>,
         account_secret: Vec<u8>,
         device_id: String,
         device_name: String,
@@ -267,7 +268,7 @@ impl Vault {
                 device_name: &device_name,
                 signer: Arc::new(SignerAdapter(signer)),
             },
-            &owner_fingerprint,
+            owner_fingerprint.as_deref(),
         )?;
         Ok(Arc::new(Self {
             inner: Mutex::new(vault),
@@ -320,6 +321,14 @@ impl Vault {
     }
 
     /// Removes another of the account's devices, such as a lost Mac.
+    /// Signs this device out: the server forgets it and the profile is deleted. Delete the
+    /// device's own keys afterwards, and drop this vault. Returns why the server couldn't be
+    /// told, if it couldn't; the device then stays listed until it's removed from another
+    /// one.
+    pub fn sign_out(&self) -> Result<Option<String>, CoreError> {
+        Ok(self.vault()?.sign_out()?)
+    }
+
     pub fn remove_device(&self, device_id: String) -> Result<(), CoreError> {
         Ok(self.vault()?.remove_device(device_id_from(&device_id)?)?)
     }

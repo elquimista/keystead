@@ -31,6 +31,8 @@ const OWNER: UserId = UserId(1);
 /// What an older server answers for something it doesn't have yet: 404 on the whole route.
 const NEEDS_0_2: &str = "the server is older than Keystead 0.2.0 and can't do this yet; \
                          update it to 0.2.0 or later";
+/// What a server answers for sign-out if it's from before sign-out existed.
+const NO_SIGN_OUT: &str = "the server is too old to forget a device that signs out; update it";
 const PAGE_SIZE: i64 = 500;
 /// Sign in again this long before the server's session would expire.
 const SESSION_MARGIN: Duration = Duration::from_secs(60);
@@ -218,7 +220,11 @@ pub fn join(
     let directory: Directory = client.get("/v1/directory", &[])?;
 
     let owner = owner_entry(&directory)?;
-    check_owner(owner, owner_fingerprint, "ask the owner for a new invite")?;
+    check_owner(
+        owner,
+        Owner::Fingerprint(owner_fingerprint),
+        "ask the owner for a new invite",
+    )?;
     let name = directory
         .entries
         .iter()
@@ -239,11 +245,24 @@ pub fn join(
 
 /// Recovers an account onto a new device with its secret, from a recovery kit. The account
 /// key signs for the new device; then, as when joining, the owner's keys are pinned only
-/// if their fingerprint matches the one on the kit. Nothing is saved unless everything
-/// checks out. Call `sync` afterwards to fetch the account's folders and logins.
-pub fn recover(path: &Path, account: NewAccount<'_>, owner_fingerprint: &str) -> Result<Vault> {
+/// if their fingerprint matches the one on the kit. The owner can leave the fingerprint
+/// out: their own keys, from the secret, are checked instead. Nothing is saved unless
+/// everything checks out. Call `sync` afterwards to fetch the account's folders and logins.
+pub fn recover(
+    path: &Path,
+    account: NewAccount<'_>,
+    owner_fingerprint: Option<&str>,
+) -> Result<Vault> {
     const ADVICE: &str = "check the owner's fingerprint on your recovery kit";
     let keys = AccountKeys::derive(account.secret);
+    let public = keys.public();
+    let expected = match owner_fingerprint
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        Some(fingerprint) => Owner::Fingerprint(fingerprint),
+        None => Owner::Me(&public),
+    };
     let mut client = Client::new(account.server);
     let challenge: RecoveryChallenge = match client.post(
         "/v1/recover/challenge",
@@ -256,7 +275,7 @@ pub fn recover(path: &Path, account: NewAccount<'_>, owner_fingerprint: &str) ->
         Err(error) => return Err(error.into()),
     };
     // Before registering anything, so a mistyped fingerprint leaves no trace.
-    check_owner(&challenge.owner, owner_fingerprint, ADVICE)?;
+    check_owner(&challenge.owner, expected, ADVICE)?;
     let device_key = account.signer.public_key();
     let signature = keys.sign(&recovery_message(
         challenge.challenge.as_slice(),
@@ -277,7 +296,7 @@ pub fn recover(path: &Path, account: NewAccount<'_>, owner_fingerprint: &str) ->
     let directory: Directory = client.get("/v1/directory", &[])?;
 
     let owner = owner_entry(&directory)?;
-    check_owner(owner, owner_fingerprint, ADVICE)?;
+    check_owner(owner, expected, ADVICE)?;
     let me = directory
         .entries
         .iter()
@@ -305,19 +324,42 @@ fn owner_entry(directory: &Directory) -> Result<&DirectoryEntry> {
         .context("the server has no owner")
 }
 
-/// Checks the owner's keys match `fingerprint` and their self-approval verifies.
-/// `advice` says what to do if not.
-fn check_owner(owner: &DirectoryEntry, fingerprint: &str, advice: &str) -> Result<()> {
+/// Who the server's owner must be.
+#[derive(Clone, Copy)]
+enum Owner<'a> {
+    /// Whoever has this fingerprint, from an invite or a recovery kit.
+    Fingerprint(&'a str),
+    /// This account itself: an owner recovering without typing their fingerprint.
+    Me(&'a AccountPublicKeys),
+}
+
+/// Checks the owner is who `expected` says and their self-approval verifies. `advice` says
+/// what to do if not.
+fn check_owner(owner: &DirectoryEntry, expected: Owner<'_>, advice: &str) -> Result<()> {
     if owner.user_id != OWNER {
         bail!("the server sent someone else as the owner. Don't trust this server.");
     }
-    let expected = normalize(fingerprint);
-    if owner.keys.fingerprint() != expected || owner.verify(&owner.keys).is_err() {
-        bail!(
-            "the owner's fingerprint on this server is {}, not {expected}. Don't trust this \
-             server; {advice}.",
-            owner.keys.fingerprint()
-        );
+    let self_approved = owner.verify(&owner.keys).is_ok();
+    match expected {
+        Owner::Fingerprint(fingerprint) => {
+            let expected = normalize(fingerprint);
+            if owner.keys.fingerprint() != expected || !self_approved {
+                bail!(
+                    "the owner's fingerprint on this server is {}, not {expected}. Don't trust \
+                     this server; {advice}.",
+                    owner.keys.fingerprint()
+                );
+            }
+        }
+        Owner::Me(keys) => {
+            if owner.keys != *keys || !self_approved {
+                bail!(
+                    "this account isn't the owner of this server. If you're not the owner, \
+                     enter the owner's fingerprint from your recovery kit; if you are, check \
+                     the server address, and don't trust this server."
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -501,11 +543,33 @@ impl Vault {
     }
 
     /// Removes another of this account's devices, such as a lost one: it can't sign in
-    /// any more. The device it runs on can't remove itself.
+    /// any more. The device it runs on can't remove itself this way; see `sign_out`.
     pub fn remove_device(&mut self, device: DeviceId) -> Result<()> {
         let path = format!("/v1/devices/{device}");
         let () = self.call(|client| client.delete(&path))??;
         Ok(())
+    }
+
+    /// Signs this device out: the server forgets it, so its key can't sign in again, and
+    /// the profile is deleted. Platform code then deletes the keys it keeps. Works offline
+    /// too; then the server still lists the device until it's removed from another one.
+    /// Returns why the server couldn't be told, if it couldn't. Don't use the vault
+    /// afterwards.
+    pub fn sign_out(&mut self) -> Result<Option<String>> {
+        let not_told = match self.call(|client| client.post::<_, ()>("/v1/sign-out", &())) {
+            Ok(Ok(())) => None,
+            Ok(Err(Failure::Status { code: 404, .. })) => Some(NO_SIGN_OUT.to_owned()),
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(format!("{error:#}")),
+        };
+        match std::fs::remove_file(&self.path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).with_context(|| format!("deleting {}", self.path.display()));
+            }
+            _ => {}
+        }
+        self.client = None;
+        Ok(not_told)
     }
 
     pub fn create_folder(&mut self, name: &str) -> Result<FolderId> {

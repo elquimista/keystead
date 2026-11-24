@@ -253,17 +253,18 @@ fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
     let error = recover(
         &fixture.profile("alice-wrong"),
         new_device("Alice's new Mac"),
-        "0000-0000-0000-0000-0000",
+        Some("0000-0000-0000-0000-0000"),
     )
     .err()
     .unwrap();
     assert!(format!("{error:#}").contains("Don't trust this server"));
     assert!(!fixture.profile("alice-wrong").exists());
 
+    // She's the owner, so the owner's fingerprint can be left out: it's her own.
     let mut alice = recover(
         &fixture.profile("alice-new"),
         new_device("Alice's new Mac"),
-        &owner_fingerprint,
+        None,
     )
     .unwrap();
     let me = alice.whoami();
@@ -291,8 +292,52 @@ fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
     let mut stolen = Vault::open(&fixture.profile("alice-old"), &alice_secret, old_mac).unwrap();
     assert!(stolen.sync().is_err());
 
-    // She's still the owner: she can invite.
-    alice.invite("Bob").unwrap();
+    // She's still the owner: she can invite. Bob joins, but recovering his account needs
+    // the owner's fingerprint: without it, nothing is registered or saved.
+    let invite = alice.invite("Bob").unwrap();
+    let bob_secret = AccountSecret::generate();
+    let bob_account = |device_name| NewAccount {
+        server: &fixture.url,
+        secret: &bob_secret,
+        device_id: DeviceId::random(),
+        device_name,
+        signer: enclave(),
+    };
+    join(
+        &fixture.profile("bob"),
+        bob_account("Bob's Mac"),
+        &invite.token,
+        &invite.owner_fingerprint,
+    )
+    .unwrap();
+    let error = recover(
+        &fixture.profile("bob-new"),
+        bob_account("Bob's new Mac"),
+        None,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        format!("{error:#}").contains("isn't the owner"),
+        "{error:#}"
+    );
+    assert!(!fixture.profile("bob-new").exists());
+    let mut bob = recover(
+        &fixture.profile("bob-new"),
+        bob_account("Bob's new Mac"),
+        Some(&owner_fingerprint),
+    )
+    .unwrap();
+    assert_eq!(bob.devices().unwrap().len(), 2);
+
+    // Alice signs out on her new Mac: the server forgets it and its profile is gone.
+    assert_eq!(alice.sign_out().unwrap(), None);
+    assert!(!fixture.profile("alice-new").exists());
+    assert_eq!(
+        bob.devices().unwrap().len(),
+        2,
+        "Bob's devices are untouched"
+    );
 }
 
 fn login(name: &str, password: &str) -> (Overview, Details) {

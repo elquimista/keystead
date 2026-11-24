@@ -496,6 +496,7 @@ private struct DeviceRow: View {
             if device.current {
                 Text("This Mac")
                     .foregroundStyle(.secondary)
+                Button("Sign Out…") { model.sheet = .signOut }
             } else {
                 Button("Remove…") { confirming = true }
             }

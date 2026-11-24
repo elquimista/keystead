@@ -118,6 +118,9 @@ private struct AppCommands: Commands {
             Button("Lock") { model.lock() }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
                 .disabled(model.phase != .unlocked)
+            Divider()
+            Button("Sign Out…") { model.sheet = .signOut }
+                .disabled(model.phase != .unlocked)
         }
     }
 }

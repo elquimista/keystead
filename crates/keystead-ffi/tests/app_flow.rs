@@ -266,7 +266,7 @@ fn an_owner_recovers_on_a_new_mac_from_the_kit() {
     let new_mac = Vault::recover(
         server.profile("new-mac"),
         server.url.clone(),
-        identity.owner_fingerprint.clone(),
+        Some(identity.owner_fingerprint.clone()),
         recovered_secret,
         new_device_id(),
         "Olivia's new Mac".into(),
@@ -286,4 +286,8 @@ fn an_owner_recovers_on_a_new_mac_from_the_kit() {
     assert_eq!(old.name, "Olivia's old Mac");
     new_mac.remove_device(old.device_id.clone()).unwrap();
     assert!(owner.sync().is_err(), "the old Mac is locked out");
+
+    // Signing out tells the server and deletes the profile.
+    assert_eq!(new_mac.sign_out().unwrap(), None);
+    assert!(!std::path::Path::new(&server.profile("new-mac")).exists());
 }

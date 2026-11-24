@@ -24,6 +24,8 @@ struct SheetContent: View {
             FingerprintSheet(model: model)
         case .recoveryKit(let afterSetup):
             RecoveryKitSheet(model: model, afterSetup: afterSetup)
+        case .signOut:
+            SignOutSheet(model: model) { model.sheet = .recoveryKit(afterSetup: false) }
         }
     }
 }
@@ -401,6 +403,72 @@ private struct ApproveSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// Asks before signing out, and says what it costs: coming back takes the Recovery Kit.
+struct SignOutSheet: View {
+    let model: AppModel
+    /// Shows the Recovery Kit instead, wherever this sheet was opened.
+    let showKit: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var busy = false
+    @State private var error: String?
+
+    /// Whether this Mac is the account's only device, as far as the device list shows.
+    private var onlyDevice: Bool { !model.devices.contains { !$0.current } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Sign Out of \(appName)?")
+                .font(.title3.weight(.semibold))
+            Text("This Mac forgets your account: your logins and the keys that open them. "
+                + "Your team and the server keep everything else, and the server forgets this Mac.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("To use your account again, on this Mac or another, you'll need your Recovery Kit.")
+                .fixedSize(horizontal: false, vertical: true)
+            if model.isOwner && onlyDevice {
+                Label("You're the owner, and this is your only device. Without your Recovery Kit, "
+                    + "nobody could invite or approve people on "
+                    + "\(host(model.identity?.server ?? "your server")) again.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Show Recovery Kit…", action: showKit)
+                Spacer()
+                if busy {
+                    ProgressView().controlSize(.small)
+                }
+                // Return cancels; signing out takes a deliberate click.
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                Button("Sign Out", role: .destructive) {
+                    Task { await signOut() }
+                }
+                .disabled(busy)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private func signOut() async {
+        busy = true
+        error = nil
+        do {
+            try await model.signOut()
+            dismiss()
+        } catch let failure {
+            error = describe(failure)
+        }
+        busy = false
     }
 }
 

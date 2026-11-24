@@ -108,7 +108,10 @@ short-lived bearer token.
 
 An account can have several devices. Each has an optional name, like "Ana's MacBook Pro",
 and the time it was added. A signed-in device can list the account's devices and remove the
-others (not itself); a removed device's sessions end at once.
+others; a removed device's sessions end at once. A device removes itself by **signing out**
+(`POST /v1/sign-out`), and then deletes its profile and keys. Servers before sign-out
+existed answer 404; the device still deletes its own data, and stays listed until removed
+from another device.
 
 **Recovering an account on a new device** uses the account signing key instead of an
 existing device:
@@ -117,13 +120,16 @@ existing device:
    to `POST /v1/recover/challenge`. The server answers with a random challenge and the
    owner's directory entry.
 2. The device checks the owner's fingerprint against the kit and the owner's
-   self-approval, before registering anything.
+   self-approval, before registering anything. The owner may leave the fingerprint out:
+   the device then checks that the owner's keys are the ones it derived, which is just as
+   strong, since only the account secret gives those keys.
 3. It signs `transcript("keystead/recover/v1", challenge, device id, device key scheme,
    device key)` with the account signing key, and sends that with its new device key to
    `POST /v1/recover`. The server checks the signature against the account's registered
    signing key, so only the account secret can add a device this way.
 4. The device signs in as usual and checks the directory: the owner's keys must still match
-   the kit's fingerprint, and the account's own entry must carry the keys it derived.
+   the kit's fingerprint (or the derived keys), and the account's own entry must carry the
+   keys it derived.
 
 ## Items
 
@@ -237,6 +243,7 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/recover` | `RecoverRequest` | `Enrolled` | A device with the account secret |
 | `GET /v1/devices` | | `DeviceList` | Members |
 | `DELETE /v1/devices/{id}` | | 204 | The device's own account, from another device |
+| `POST /v1/sign-out` | | 204 | The device itself, which is then forgotten |
 | `POST /v1/users/{id}/approval` | `ApprovalRequest` | 204 | Owner |
 | `GET /v1/directory` | | `Directory` | Members |
 | `POST /v1/folders` | `CreateFolderRequest` | 201 | Members |

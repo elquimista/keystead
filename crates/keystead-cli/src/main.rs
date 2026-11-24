@@ -47,9 +47,16 @@ enum Command {
     /// Recover your account on this machine with the words from your recovery kit
     Recover {
         server: String,
-        /// The owner's fingerprint, from the recovery kit
+        /// The owner's fingerprint, from the recovery kit; the owner can leave it out
         #[arg(long)]
-        owner: String,
+        owner: Option<String>,
+    },
+    /// Sign out: this machine forgets your account; you'll need your recovery kit to use it
+    /// here again
+    SignOut {
+        /// Don't ask for confirmation
+        #[arg(long)]
+        yes: bool,
     },
     /// List your devices, or remove a lost one
     Devices {
@@ -199,12 +206,42 @@ fn run(cli: Cli) -> Result<()> {
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
                 text
             };
-            let me = commands::recover(&home, &server, &owner, &words)?;
+            let me = commands::recover(&home, &server, owner.as_deref(), &words)?;
             println!(
                 "Recovered {} (user {}) on {}.",
                 me.name, me.user_id, me.server
             );
             println!("Remove your lost device with `keystead devices remove <id>`.");
+        }
+        Command::SignOut { yes } => {
+            let me = commands::whoami(&home)?;
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!("add --yes to sign out without being asked");
+                }
+                println!(
+                    "This machine will forget {} on {}. To use the account here again, you'll",
+                    me.name, me.server
+                );
+                println!("need your recovery kit.");
+                print!("Sign out? [y/N] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("Not signed out.");
+                    return Ok(());
+                }
+            }
+            match commands::sign_out(&home)? {
+                None => println!("Signed out. The server has forgotten this machine."),
+                Some(reason) => {
+                    println!("Signed out here, but the server couldn't be told ({reason}).");
+                    println!(
+                        "Remove this machine from another device: keystead devices remove <id>"
+                    );
+                }
+            }
         }
         Command::Devices { action: None } => {
             let rows = commands::devices(&home)?

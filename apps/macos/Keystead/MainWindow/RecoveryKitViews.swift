@@ -2,8 +2,9 @@ import AppKit
 import PDFKit
 import SwiftUI
 
-/// Shows the recovery kit after Touch ID, and prints it. Right after setup it first explains
-/// why the kit matters, since the owner's account then exists only on this Mac.
+/// Shows the recovery kit after Touch ID, and prints or copies it. The words stay hidden
+/// until asked for, in case someone is looking over the user's shoulder. Right after setup it
+/// first explains why the kit matters, since the owner's account then exists only on this Mac.
 struct RecoveryKitSheet: View {
     let model: AppModel
     let afterSetup: Bool
@@ -11,6 +12,9 @@ struct RecoveryKitSheet: View {
     @State private var kit: RecoveryKit?
     @State private var error: String?
     @State private var loading = false
+    @State private var revealed = false
+    /// When the words were last copied, while the clipboard still holds them.
+    @State private var copiedAt: Date?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -20,7 +24,32 @@ struct RecoveryKitSheet: View {
                 Text("Print this page, or write the 24 words down by hand, and keep it somewhere "
                     + "safe and offline. With it, you can bring your account back on a new Mac.")
                     .fixedSize(horizontal: false, vertical: true)
-                RecoveryKitWords(words: kit.words)
+                RecoveryKitWords(words: kit.words, hidden: !revealed)
+                HStack(spacing: 12) {
+                    Button {
+                        revealed.toggle()
+                    } label: {
+                        Label(revealed ? "Hide Words" : "Show Words",
+                              systemImage: revealed ? "eye.slash" : "eye")
+                    }
+                    Button {
+                        model.copyRecoveryWords(of: kit)
+                        copiedAt = .now
+                    } label: {
+                        Label("Copy Words", systemImage: "doc.on.doc")
+                    }
+                    .help("Copy only the 24 words, to this Mac's clipboard")
+                    if copiedAt != nil {
+                        Text("Copied to this Mac only. The clipboard clears in 30 seconds.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .task(id: copiedAt) {
+                    guard copiedAt != nil else { return }
+                    try? await Task.sleep(for: SecureClipboard.clearAfter)
+                    if !Task.isCancelled { copiedAt = nil }
+                }
                 Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 6) {
                     GridRow {
                         Text("Server").foregroundStyle(.secondary)
@@ -33,7 +62,8 @@ struct RecoveryKitSheet: View {
                     }
                 }
                 Text("Anyone with these words can be you on \(host(kit.server)). Don't photograph "
-                    + "them or keep them on a computer or online.")
+                    + "them. If you copy them, paste them only somewhere as safe as Keystead, like "
+                    + "an encrypted vault, never into a note, chat or email.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -98,9 +128,11 @@ struct RecoveryKitSheet: View {
     }
 }
 
-/// The 24 words in four numbered columns, read top to bottom.
+/// The 24 words in four numbered columns, read top to bottom. Hidden, each shows as the
+/// same row of dots, so not even word lengths show.
 struct RecoveryKitWords: View {
     let words: [String]
+    var hidden = false
     var fontSize: CGFloat = 13
 
     var body: some View {
@@ -109,13 +141,16 @@ struct RecoveryKitWords: View {
                 GridRow {
                     ForEach(0..<4, id: \.self) { column in
                         let index = column * 6 + row
+                        let word = index < words.count ? words[index] : ""
                         HStack(spacing: 6) {
                             Text("\(index + 1)")
                                 .font(.system(size: fontSize - 2).monospacedDigit())
                                 .foregroundStyle(.secondary)
                                 .frame(width: 20, alignment: .trailing)
-                            Text(index < words.count ? words[index] : "")
+                            Text(hidden ? "••••••••" : word)
                                 .font(.system(size: fontSize, design: .monospaced))
+                                .foregroundStyle(hidden ? .secondary : .primary)
+                                .accessibilityLabel(hidden ? "Hidden" : word)
                         }
                     }
                 }

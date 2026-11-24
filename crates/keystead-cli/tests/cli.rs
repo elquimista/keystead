@@ -176,7 +176,8 @@ fn a_recovery_kit_restores_an_account_on_another_machine() {
         .map(|(index, word)| format!("{}. {word}\n", index + 1))
         .collect();
     let new = fixture.home("alice-new");
-    let recovered = commands::recover(&new, &fixture.url, &me.owner_fingerprint, &typed).unwrap();
+    // The owner can leave out the owner's fingerprint: it's their own.
+    let recovered = commands::recover(&new, &fixture.url, None, &typed).unwrap();
     assert_eq!(recovered.fingerprint, me.fingerprint);
     assert!(recovered.is_owner);
     assert_eq!(show_password(&new, "AWS root"), "s3cret");
@@ -189,4 +190,13 @@ fn a_recovery_kit_restores_an_account_on_another_machine() {
         commands::sync(&old).is_err(),
         "the removed device is locked out"
     );
+
+    // Signing out forgets this machine, here and on the server.
+    assert_eq!(commands::sign_out(&new).unwrap(), None);
+    assert!(!new.join("profile.json").exists());
+    assert!(!new.join("device.json").exists());
+    assert!(commands::whoami(&new).is_err());
+    let again = fixture.home("alice-again");
+    commands::recover(&again, &fixture.url, Some(&me.owner_fingerprint), &words).unwrap();
+    assert_eq!(commands::devices(&again).unwrap().len(), 1);
 }

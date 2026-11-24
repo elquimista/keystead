@@ -401,6 +401,25 @@ pub(crate) async fn devices(
 
 /// `DELETE /v1/devices/{device_id}`: removes one of the user's other devices and ends its
 /// sessions, for a lost or retired device.
+/// `POST /v1/sign-out`: the device making the request removes itself. Its sessions end and
+/// its key can't sign in again; the account and its other devices carry on.
+pub(crate) async fn sign_out(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<StatusCode, ApiError> {
+    sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
+        .bind(auth.device_id.to_string())
+        .bind(auth.user_id.0)
+        .execute(&state.writer)
+        .await?;
+    state
+        .sessions
+        .lock()
+        .expect("session lock poisoned")
+        .retain(|_, session| session.device_id != auth.device_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn remove_device(
     State(state): State<AppState>,
     auth: Auth,

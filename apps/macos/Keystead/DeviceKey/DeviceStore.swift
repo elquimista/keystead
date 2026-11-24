@@ -47,4 +47,11 @@ struct DeviceStore {
     func removeDevice() {
         try? FileManager.default.removeItem(at: deviceURL)
     }
+
+    /// Forgets the account on this Mac, for signing out: the profile and the device file.
+    /// The Secure Enclave keys are gone with their handles; nothing else can use them.
+    func forgetAccount() {
+        try? FileManager.default.removeItem(at: profileURL)
+        try? FileManager.default.removeItem(at: deviceURL)
+    }
 }
