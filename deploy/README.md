@@ -183,6 +183,12 @@ before 0.6.0 can't list any logins once it syncs one with a code, so update ever
 the CLI before anyone adds a code. Nothing changes until someone does. Apps from 0.6.0 work
 with older servers, but say the server needs updating before saving a code.
 
+**Updating to 0.7.0.** History: the server keeps the last 10 earlier versions of each
+login, and apps from 0.7.0 show them to its editors and managers and can bring one back.
+It starts from the update: logins saved before have no earlier versions yet. The database
+grows with up to 10 earlier versions per login (a few KB each). Older apps keep working
+without history, and apps from 0.7.0 work with older servers, saying the server keeps none.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
