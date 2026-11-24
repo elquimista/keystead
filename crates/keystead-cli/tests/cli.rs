@@ -67,6 +67,7 @@ fn login(name: &str, password: &str) -> (Overview, Details) {
         Details {
             password: password.into(),
             notes: String::new(),
+            otp: String::new(),
         },
     )
 }

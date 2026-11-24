@@ -14,6 +14,7 @@ pub use keystead_core::api::Role;
 use keystead_core::ids::{DeviceId, UserId};
 use keystead_core::items::{Details, Overview};
 use keystead_core::keys::{AccountSecret, SoftwareDeviceKey};
+use keystead_core::otp::OneTimeCode;
 
 use crate::device::{DeviceFile, profile_path};
 
@@ -286,7 +287,15 @@ pub fn unshare_group(home: &Path, name: &str, folder: Option<&str>, group: &str)
 }
 
 pub fn list(home: &Path) -> Result<Vec<ItemRow>> {
-    refreshed(home)?.list()
+    let vault = refreshed(home)?;
+    let too_new = vault.too_new();
+    if too_new > 0 {
+        eprintln!(
+            "warning: {too_new} login(s) are from a newer Keystead and don't show; update to see \
+             them"
+        );
+    }
+    vault.list()
 }
 
 pub fn show(home: &Path, name: &str, folder: Option<&str>) -> Result<(Overview, Details)> {
@@ -309,6 +318,8 @@ pub struct Changes {
     pub url: Option<String>,
     pub notes: Option<String>,
     pub password: Option<String>,
+    /// A one-time code setup; empty to remove it.
+    pub otp: Option<String>,
 }
 
 /// Changes some of a login's fields and keeps the rest.
@@ -337,7 +348,18 @@ pub fn update(
     if let Some(password) = changes.password {
         details.password = password;
     }
+    if let Some(otp) = changes.otp {
+        details.otp = otp;
+    }
     vault.update(item_id, &overview, &details)
+}
+
+/// A login's current one-time code.
+pub fn one_time_code(home: &Path, name: &str, folder: Option<&str>) -> Result<OneTimeCode> {
+    let vault = refreshed(home)?;
+    vault
+        .one_time_code(vault.find_item(name, folder)?)?
+        .ok_or_else(|| anyhow::anyhow!("{name} has no one-time codes; add them with edit --otp"))
 }
 
 /// Deletes a login for everyone who can open it.

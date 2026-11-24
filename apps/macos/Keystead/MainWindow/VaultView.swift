@@ -196,6 +196,9 @@ private struct LoginList: View {
                         Button("Copy Password") { Task { await model.copyPassword(of: item) } }
                         Button("Copy Username") { model.copy(item.username) }
                             .disabled(item.username.isEmpty)
+                        if item.hasOneTimeCode {
+                            Button("Copy One-Time Code") { Task { await model.copyOneTimeCode(of: item) } }
+                        }
                         Divider()
                         Button("Edit…") { model.sheet = .editLogin(item) }
                             .disabled(item.role == .view)
@@ -351,6 +354,9 @@ private struct LoginDetail: View {
                         .help("Copy password (cleared after 30 seconds)")
                     }
                 }
+                if item.hasOneTimeCode {
+                    OneTimeCodeRow(model: model, item: item)
+                }
                 if !item.url.isEmpty {
                     LabeledContent("Website") {
                         HStack {
@@ -484,6 +490,70 @@ private struct LoginDetail: View {
         } catch let failure {
             error = describe(failure)
         }
+    }
+}
+
+/// A login's current one-time code and the seconds it has left, fetched again as each one
+/// runs out.
+private struct OneTimeCodeRow: View {
+    let model: AppModel
+    let item: ItemSummary
+    @State private var code: OneTimeCode?
+    @State private var expires = Date.distantPast
+    @State private var error: String?
+
+    var body: some View {
+        LabeledContent("One-time code") {
+            HStack {
+                if let code {
+                    Text(grouped(code.code))
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let left = max(0, Int(expires.timeIntervalSince(context.date).rounded(.up)))
+                        Text("\(left)s")
+                            .monospacedDigit()
+                            .foregroundStyle(left <= 5 ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                            .help("Seconds until the next code")
+                    }
+                    Button {
+                        Task { await model.copyOneTimeCode(of: item) }
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy one-time code (cleared after 30 seconds)")
+                } else if let error {
+                    Text(error)
+                        .foregroundStyle(.red)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        }
+        .task(id: "\(item.id)-\(model.localRevision)") {
+            while !Task.isCancelled {
+                do {
+                    guard let next = try await model.oneTimeCode(of: item) else { return }
+                    code = next
+                    error = nil
+                    expires = Date().addingTimeInterval(TimeInterval(next.remaining))
+                    try await Task.sleep(for: .seconds(Double(next.remaining)))
+                } catch is CancellationError {
+                    return
+                } catch let failure {
+                    error = describe(failure)
+                    return
+                }
+            }
+        }
+    }
+
+    /// "492 039", "4920 3912": easier to read and type.
+    private func grouped(_ code: String) -> String {
+        let middle = code.index(code.startIndex, offsetBy: code.count / 2)
+        return "\(code[..<middle]) \(code[middle...])"
     }
 }
 
@@ -922,7 +992,7 @@ private struct Notices: View {
                 .notice()
             }
             if let copied = model.copiedName {
-                Label("Copied the password for \(copied). It clears in 30 seconds.",
+                Label("Copied the \(model.copiedWhat) for \(copied). It clears in 30 seconds.",
                       systemImage: "checkmark.circle.fill")
                     .notice()
             }

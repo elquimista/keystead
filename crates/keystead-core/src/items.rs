@@ -65,9 +65,9 @@ fn chain_aad(folder: FolderId, generation: u32) -> Vec<u8> {
     )
 }
 
-/// The newest item format this build writes: 3 for items shared with a group, 2 for the
-/// rest.
-pub const ITEM_FORMAT: u8 = 3;
+/// The newest item format this build writes: 4 for items with a one-time code, 3 for
+/// items shared with a group, 2 for the rest.
+pub const ITEM_FORMAT: u8 = 4;
 
 /// The searchable fields of an item.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +79,10 @@ pub struct Overview {
     pub url: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The details hold a one-time code setup, so lists can offer the code without
+    /// opening every login. [`EncryptedItem::seal`] keeps it in step.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub one_time_code: bool,
 }
 
 /// The sensitive fields of an item. Wiped from memory when dropped.
@@ -87,6 +91,10 @@ pub struct Details {
     pub password: String,
     #[serde(default)]
     pub notes: String,
+    /// The `otpauth://totp/…` link one-time codes come from, or empty (format 4; see
+    /// [`crate::otp`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub otp: String,
 }
 
 impl fmt::Debug for Details {
@@ -152,7 +160,8 @@ pub struct GroupKeyCopy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedItem {
     pub id: ItemId,
-    /// 2 for items with their own key, 3 if they're also shared with a group. Keystead
+    /// 2 for items with their own key, 3 if they're also shared with a group, 4 if their
+    /// details hold a one-time code (whether or not they're shared with a group). Keystead
     /// 0.1's items have no `format`: they're 1.
     #[serde(default = "format_1", skip_serializing_if = "is_format_1")]
     pub format: u8,
@@ -198,6 +207,9 @@ pub struct ItemVersion {
 impl EncryptedItem {
     /// Encrypts and signs a version of an item with its key. `keys` must already hold the
     /// key's copies: for its folder or owner, and for anyone it's shared with.
+    ///
+    /// An item with a one-time code is format 4, which apps from before 0.6.0 can't open:
+    /// they would otherwise drop the code when saving the login.
     pub fn seal(
         at: ItemVersion,
         key: &ItemKey,
@@ -206,7 +218,13 @@ impl EncryptedItem {
         overview: &Overview,
         details: &Details,
     ) -> Result<Self, Error> {
-        Self::seal_format(keys.format(), at, key, keys, author_keys, overview, details)
+        let has_code = !details.otp.is_empty();
+        let format = if has_code { 4 } else { keys.format() };
+        let overview = Overview {
+            one_time_code: has_code,
+            ..overview.clone()
+        };
+        Self::seal_format(format, at, key, keys, author_keys, &overview, details)
     }
 
     /// Encrypts and signs a format 1 version, as Keystead 0.1 did: with the folder key
@@ -304,7 +322,7 @@ impl EncryptedItem {
             1 => folder_key
                 .map(FolderKey::format_1_item_key)
                 .ok_or(Error::Decrypt),
-            2 | 3 => {
+            2..=4 => {
                 if let (Some(folder_id), Some(sealed), Some(folder_key)) =
                     (self.folder_id, &self.keys.folder, folder_key)
                 {
@@ -426,6 +444,7 @@ impl EncryptedItem {
             parts.push(person.wrapped_key.ciphertext.0.clone());
         }
         // Format 3 adds the group copies; format 2 has none, and signs as it always did.
+        // Format 4 signs as 3 does: only its details differ, and the format is signed.
         if self.format >= 3 {
             parts.push((self.keys.groups.len() as u32).to_be_bytes().to_vec());
             for copy in &self.keys.groups {
@@ -593,10 +612,12 @@ mod tests {
                 username: "alice@example.com".into(),
                 url: "https://github.com".into(),
                 tags: vec!["engineering".into()],
+                one_time_code: false,
             },
             details: Details {
                 password: "correct horse battery staple".into(),
                 notes: String::new(),
+                otp: String::new(),
             },
         }
     }
@@ -833,11 +854,46 @@ mod tests {
     fn unknown_formats_are_reported() {
         let f = fixture();
         let (mut item, _) = seal(&f, true, false);
-        item.format = 4;
+        item.format = ITEM_FORMAT + 1;
         assert!(matches!(
             item.unlock(Some(&f.folder_key), &f.bob, BOB),
-            Err(Error::UnsupportedFormat(4))
+            Err(Error::UnsupportedFormat(format)) if format == ITEM_FORMAT + 1
         ));
+    }
+
+    #[test]
+    fn a_one_time_code_makes_format_4() {
+        let f = fixture();
+        let (plain, _) = seal(&f, true, false);
+        let key = plain.unlock(Some(&f.folder_key), &f.bob, BOB).unwrap();
+        let mut details = plain.open_details(&key).unwrap();
+        details.otp = "otpauth://totp/?secret=JBSWY3DPEHPK3PXP".into();
+        let at = ItemVersion {
+            id: plain.id,
+            folder_id: plain.folder_id,
+            owner: None,
+            version: 2,
+            author: ALICE,
+        };
+        // The overview says so whatever the caller passed, so lists can offer codes.
+        let item = EncryptedItem::seal(
+            at,
+            &key,
+            plain.keys.clone(),
+            &f.alice,
+            &f.overview,
+            &details,
+        )
+        .unwrap();
+        assert_eq!(item.format, 4);
+        item.verify(&f.alice.public()).unwrap();
+        assert!(item.open_overview(&key).unwrap().one_time_code);
+        assert_eq!(item.open_details(&key).unwrap().otp, details.otp);
+        // The format is signed: calling it 3, so an older app would open and save it
+        // without the code, breaks the signature.
+        let mut relabeled = item.clone();
+        relabeled.format = 3;
+        assert!(relabeled.verify(&f.alice.public()).is_err());
     }
 
     #[test]

@@ -147,6 +147,7 @@ fn a_secure_enclave_style_device_joins_and_syncs() {
             Details {
                 password: "s3cret".into(),
                 notes: String::new(),
+                otp: String::new(),
             },
         )
         .unwrap();
@@ -234,6 +235,7 @@ fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
             Details {
                 password: "s3cret".into(),
                 notes: String::new(),
+                otp: String::new(),
             },
         )
         .unwrap();
@@ -350,6 +352,7 @@ fn login(name: &str, password: &str) -> (Overview, Details) {
         Details {
             password: password.into(),
             notes: String::new(),
+            otp: String::new(),
         },
     )
 }
@@ -990,4 +993,50 @@ fn passwords_to_change_after_someone_loses_access() {
     assert_eq!(alice.dismiss_all(bob_id).unwrap(), 2);
     alice.sync().unwrap();
     assert!(names(&alice).is_empty());
+}
+
+#[test]
+fn one_time_codes_are_kept_with_a_login_and_shared_with_it() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+
+    // A setup key as a site shows it: kept as a link, and the login becomes format 4.
+    let (overview, mut details) = login("GitHub", "s3cret");
+    details.otp = " jbsw y3dp ehpk 3pxp ".into();
+    let github = alice.add(None, overview, details).unwrap();
+    let saved = &alice.profile().items[&github];
+    assert_eq!(saved.format, 4);
+    let (overview, details) = alice.open_item(github).unwrap();
+    assert!(overview.one_time_code);
+    assert_eq!(details.otp, "otpauth://totp/?secret=JBSWY3DPEHPK3PXP");
+    let code = alice.one_time_code(github).unwrap().unwrap();
+    assert_eq!(code.code.len(), 6);
+    assert!((1..=30).contains(&code.remaining));
+    assert!(alice.list().unwrap()[0].has_one_time_code);
+
+    // Whoever it's shared with gets the same codes; saving other changes keeps the code.
+    alice.share_item(github, bob_id, Role::Edit).unwrap();
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap()[0].has_one_time_code);
+    assert!(bob.one_time_code(github).unwrap().is_some());
+    bob.edit(github, "rotated").unwrap();
+    alice.sync().unwrap();
+    assert!(alice.one_time_code(github).unwrap().is_some());
+
+    // Something that isn't a setup key is refused, without saving anything.
+    let (overview, mut details) = alice.open_item(github).unwrap();
+    details.otp = "not a key!".into();
+    let error = alice.update(github, &overview, &details).unwrap_err();
+    assert!(format!("{error:#}").contains("one-time code"), "{error:#}");
+
+    // Removed, the login goes back to format 2 and has no codes.
+    details.otp = String::new();
+    alice.update(github, &overview, &details).unwrap();
+    assert_eq!(alice.profile().items[&github].format, 2);
+    assert!(alice.one_time_code(github).unwrap().is_none());
+    assert!(!alice.list().unwrap()[0].has_one_time_code);
+    assert_eq!(alice.too_new(), 0);
 }

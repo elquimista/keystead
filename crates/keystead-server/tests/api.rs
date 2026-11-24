@@ -346,6 +346,7 @@ fn login(name: &str, password: &str) -> (Overview, Details) {
         Details {
             password: password.into(),
             notes: String::new(),
+            otp: String::new(),
         },
     )
 }
@@ -804,7 +805,7 @@ async fn an_item_outside_folders_reaches_only_its_owner_and_who_it_is_shared_wit
     let (status, body) = server.call(Method::GET, "/v1/health", None, None).await;
     assert_eq!(
         (status, &body["item_format"]),
-        (StatusCode::OK, &Value::from(3)),
+        (StatusCode::OK, &Value::from(4)),
         "{body}"
     );
 

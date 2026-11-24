@@ -52,6 +52,9 @@ enum DebugSnapshots {
                 ("6c-closed", { model.sheet = nil }),
                 ("6c1-edit-login", { model.sheet = .editLogin(model.items[2]) }),
                 ("6c2-closed", { model.sheet = nil }),
+                // AWS root has one-time codes.
+                ("6c2a-edit-with-code", { model.sheet = .editLogin(model.items[0]) }),
+                ("6c2b-closed", { model.sheet = nil }),
                 // AWS root: in a folder, and also shared with Mo.
                 ("6c3-delete-login", { model.sheet = .deleteLogin(model.items[0]) }),
                 ("6c4-closed", { model.sheet = nil }),

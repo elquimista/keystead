@@ -87,7 +87,7 @@ struct PanelView: View {
                 .frame(maxHeight: 300)
             }
             if let copied = model.copiedName {
-                Text("Copied the password for \(copied). It clears in 30 seconds.")
+                Text("Copied the \(model.copiedWhat) for \(copied). It clears in 30 seconds.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

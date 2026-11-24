@@ -273,6 +273,30 @@ impl From<EditOutcome> for SaveOutcome {
 pub struct LoginDetails {
     pub password: String,
     pub notes: String,
+    /// The otpauth:// link one-time codes come from, or empty.
+    pub one_time_code: String,
+}
+
+/// The fields of a login the app edits, for adding or saving one.
+#[derive(uniffi::Record)]
+pub struct LoginFields {
+    pub name: String,
+    pub username: String,
+    pub url: String,
+    pub password: String,
+    pub notes: String,
+    /// An otpauth:// link or a site's setup key for one-time codes, or empty for none.
+    pub one_time_code: String,
+}
+
+/// A login's current one-time code.
+#[derive(uniffi::Record)]
+pub struct OneTimeCode {
+    pub code: String,
+    /// Seconds each code lasts, usually 30.
+    pub period: u64,
+    /// Seconds this one has left.
+    pub remaining: u64,
 }
 
 /// An item's searchable fields, and who it's shared with. The password stays encrypted
@@ -296,6 +320,8 @@ pub struct ItemSummary {
     pub shared_with_me: bool,
     /// What you may do with it.
     pub role: Role,
+    /// It has one-time codes.
+    pub has_one_time_code: bool,
 }
 
 /// A password to change: someone lost access to a login while its password stayed the
@@ -519,8 +545,27 @@ impl Vault {
                 shared_with_groups: row.shared_with_groups,
                 shared_with_me: row.shared_with_me,
                 role: row.role.into(),
+                has_one_time_code: row.has_one_time_code,
             })
             .collect())
+    }
+
+    /// How many logins a newer Keystead wrote, in a format this build can't open; `items`
+    /// leaves them out.
+    pub fn too_new(&self) -> Result<u32, CoreError> {
+        Ok(u32::try_from(self.vault()?.too_new()).unwrap_or(u32::MAX))
+    }
+
+    /// A login's current one-time code, if it has one-time codes.
+    pub fn one_time_code(&self, item_id: String) -> Result<Option<OneTimeCode>, CoreError> {
+        Ok(self
+            .vault()?
+            .one_time_code(item_id_from(&item_id)?)?
+            .map(|code| OneTimeCode {
+                code: code.code.clone(),
+                period: code.period,
+                remaining: code.remaining,
+            }))
     }
 
     /// Decrypts one login's password.
@@ -547,6 +592,7 @@ impl Vault {
         Ok(LoginDetails {
             password: details.password.clone(),
             notes: details.notes.clone(),
+            one_time_code: details.otp.clone(),
         })
     }
 
@@ -555,21 +601,18 @@ impl Vault {
     pub fn update_login(
         &self,
         item_id: String,
-        name: String,
-        username: String,
-        url: String,
-        password: String,
-        notes: String,
+        fields: LoginFields,
     ) -> Result<SaveOutcome, CoreError> {
         let item_id = item_id_from(&item_id)?;
         let mut vault = self.vault()?;
         // Start from the current version, so fields the app doesn't edit, like tags, stay.
         let (mut overview, mut details) = vault.open_item(item_id)?;
-        overview.name = name;
-        overview.username = username;
-        overview.url = url;
-        details.password = password;
-        details.notes = notes;
+        overview.name = fields.name;
+        overview.username = fields.username;
+        overview.url = fields.url;
+        details.password = fields.password;
+        details.notes = fields.notes;
+        details.otp = fields.one_time_code;
         Ok(vault.update(item_id, &overview, &details)?.into())
     }
 
@@ -706,22 +749,18 @@ impl Vault {
     }
 
     /// Adds a login to a folder, or with no folder as yours alone until you share it.
-    pub fn add_login(
-        &self,
-        folder: Option<String>,
-        name: String,
-        username: String,
-        url: String,
-        password: String,
-        notes: String,
-    ) -> Result<(), CoreError> {
+    pub fn add_login(&self, folder: Option<String>, fields: LoginFields) -> Result<(), CoreError> {
         let overview = Overview {
-            name,
-            username,
-            url,
-            tags: Vec::new(),
+            name: fields.name,
+            username: fields.username,
+            url: fields.url,
+            ..Overview::default()
         };
-        let details = Details { password, notes };
+        let details = Details {
+            password: fields.password,
+            notes: fields.notes,
+            otp: fields.one_time_code,
+        };
         self.vault()?.add(folder.as_deref(), overview, details)?;
         Ok(())
     }
@@ -924,6 +963,14 @@ impl Vault {
                 .into(),
         })
     }
+}
+
+/// Checks a one-time code setup someone pasted or scanned (an otpauth:// link, or a site's
+/// setup key) and says who it's for, like "GitHub (octocat)"; empty if it doesn't say.
+#[uniffi::export]
+pub fn describe_one_time_code(text: String) -> Result<String, CoreError> {
+    let link = keystead_core::otp::normalize(&text).map_err(anyhow::Error::from)?;
+    Ok(keystead_core::otp::label(&link).map_err(anyhow::Error::from)?)
 }
 
 /// The version of the core this app was built with.

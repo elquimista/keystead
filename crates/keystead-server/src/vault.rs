@@ -788,9 +788,10 @@ fn check_shape(item: &EncryptedItem) -> Result<(), ApiError> {
                 return bad("a format 1 item is in a folder and has no key copies");
             }
         }
-        2 | 3 => {
+        2..=4 => {
             let keys = &item.keys;
-            if (item.format == 3) == keys.groups.is_empty() {
+            // Format 4 (a one-time code in the details) may have group copies or not.
+            if item.format < 4 && (item.format == 3) == keys.groups.is_empty() {
                 return bad("format 3 items, and only they, have copies for groups");
             }
             let mut groups = HashSet::new();

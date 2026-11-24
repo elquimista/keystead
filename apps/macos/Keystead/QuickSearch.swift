@@ -86,7 +86,8 @@ final class QuickSearch: NSObject, NSWindowDelegate {
         let panel = self.panel ?? makePanel()
         self.panel = panel
         panel.contentView = NSHostingView(rootView: QuickSearchView(
-            state: state, copy: { [weak self] item, username in self?.copy(item, username: username) }))
+            state: state,
+            copy: { [weak self] item, username in self?.copy(username ? .username : .password, of: item) }))
         let size = panel.contentView?.fittingSize ?? NSSize(width: 640, height: 400)
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
             ?? NSScreen.main
@@ -145,8 +146,9 @@ final class QuickSearch: NSObject, NSWindowDelegate {
                 case kVK_UpArrow:
                     state.move(by: -1)
                 case kVK_Return, kVK_ANSI_KeypadEnter:
-                    let username = event.modifierFlags.contains(.shift)
-                    Task { await state.activate { item in self.copy(item, username: username) } }
+                    let what: Copy = event.modifierFlags.contains(.shift) ? .username
+                        : event.modifierFlags.contains(.option) ? .oneTimeCode : .password
+                    Task { await state.activate { item in self.copy(what, of: item) } }
                 case kVK_Escape:
                     self.close()
                 default:
@@ -157,12 +159,14 @@ final class QuickSearch: NSObject, NSWindowDelegate {
         }
     }
 
-    private func copy(_ item: ItemSummary, username: Bool) {
+    private enum Copy { case password, username, oneTimeCode }
+
+    private func copy(_ what: Copy, of item: ItemSummary) {
         close()
-        if username {
-            model.copy(item.username)
-        } else {
-            Task { await model.copyPassword(of: item) }
+        switch what {
+        case .password: Task { await model.copyPassword(of: item) }
+        case .username: model.copy(item.username)
+        case .oneTimeCode: Task { await model.copyOneTimeCode(of: item) }
         }
     }
 }
@@ -262,7 +266,7 @@ struct QuickSearchView: View {
 
     private var hint: String {
         switch state.model.phase {
-        case .unlocked: "↩ copy password    ⇧↩ copy username    ↑↓ choose    esc close"
+        case .unlocked: "↩ password    ⇧↩ username    ⌥↩ one-time code    ↑↓ choose    esc close"
         case .locked: "↩ unlock    esc close"
         default: "esc close"
         }

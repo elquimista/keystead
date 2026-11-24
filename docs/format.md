@@ -157,8 +157,18 @@ existing device:
 
 An item version has two encrypted parts:
 
-- **Overview** (decrypted at unlock, searchable): `{"name", "username", "url", "tags"}`.
-- **Details** (decrypted only when used): `{"password", "notes"}`.
+- **Overview** (decrypted at unlock, searchable): `{"name", "username", "url", "tags"}`,
+  plus `"one_time_code": true` when the details hold a one-time code setup, so lists can
+  offer the code without opening every item.
+- **Details** (decrypted only when used): `{"password", "notes"}`, plus `"otp"` for
+  one-time codes (format 4).
+
+**One-time codes** (0.6.0 and later) are time-based codes (TOTP, RFC 6238) for sites that
+ask for a second factor. `otp` holds their setup as the `otpauth://totp/…` link a site's
+QR code carries (algorithm SHA1, SHA256 or SHA512, 6 to 8 digits, any period); a setup key
+typed in instead becomes `otpauth://totp/?secret=<base32>`. Counter-based codes (HOTP)
+aren't supported. Clients make the codes from the link and the clock, with the `totp-rs`
+crate, and never store them.
 
 Each part is its JSON encoding, encrypted with **XChaCha20-Poly1305** under the item's
 own key, with a fresh random 24-byte nonce and associated data:
@@ -180,7 +190,6 @@ Its key travels with it, in `keys`, once for each way in:
 | `folder` | The item is in a folder | XChaCha20-Poly1305 under the folder key, associated data `transcript("keystead/item-key/folder/v1", item id, folder id)` |
 | `owner` | The item is outside folders | XChaCha20-Poly1305 under the owner's personal key, associated data `transcript("keystead/item-key/personal/v1", item id, owner user id)` |
 | `people` | For each person it's shared with directly | `{"user_id", "wrapped_key"}`, the item key wrapped for their account key (see Wrapped keys) |
-
 | `groups` | For each group it's shared with directly (format 3) | `{"group_id", "generation", "wrapped_key"}`, the item key wrapped for that generation of the group's key |
 
 So folder members open an item through the folder, its owner through their personal key,
@@ -195,6 +204,14 @@ them: format 3 signs `transcript("keystead/item-signature/v3", …)` with the sa
 below, plus, after the people, the number of groups (4 bytes) and per group: group id,
 generation (4 bytes), wrapped key scheme name, encapsulated key, ciphertext. An item goes
 back to format 2 when its last group copy is removed.
+
+An item whose details hold a one-time code is **format 4**, with or without group copies.
+It's laid out and signed exactly like format 3 (the format number is the first signed
+part); only its details differ. The new number is what protects the code: apps from before
+0.6.0 can't open format 4, where they would otherwise open the item, save it without the
+`otp` they don't know, and lose it. Removing the code takes the item back to format 3 or 2.
+Clients that meet a format newer than theirs leave the item out and say how many there are,
+rather than failing.
 
 ```json
 { "id": "…", "format": 2, "folder_id": "…", "version": 3, "author": 2, "deleted": false,
@@ -366,7 +383,8 @@ codes (400, 401, 403, 404, 409).
 
 `Health` is `{"status", "version", "item_format"}`. `item_format` is the newest item
 format the server stores; servers older than 0.2.0 leave it out and store only format 1,
-so clients check it before saving. Servers with groups (0.4.0 and later) say 3.
+so clients check it before saving. Servers with groups (0.4.0 and later) say 3, and with
+one-time codes (0.6.0 and later) 4.
 
 When saving an item, the server checks that the path and body ids match, the session's
 user is the author and the version is `base_version + 1` (or 1 for a new item). The

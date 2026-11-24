@@ -96,6 +96,15 @@ keystead edit "AWS root"             # new password; or --rename, --username, --
 keystead rm Bank                     # delete for everyone who can open it (asks first)
 ```
 
+For sites that ask for a one-time code, keep its setup with the login: the `otpauth://`
+link from the site's QR code, or the setup key it shows for typing in (needs a 0.6.0
+server).
+
+```sh
+keystead edit GitHub --otp "JBSW Y3DP EHPK 3PXP"   # or --otp 'otpauth://totp/…'; --no-otp removes it
+keystead otp GitHub                               # the current code
+```
+
 Everyone who can open a folder or a login has a role: `view`, `edit` or `manage`.
 Managers share (`--role`, edit by default), change roles and remove people; removing
 someone from a folder gives it a new key, so they can't read what's saved afterwards.

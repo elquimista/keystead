@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use keystead_ffi::{
-    CoreError, DeviceSigner, Role, SaveOutcome, Vault, account_secret_from_recovery_words,
-    new_device_id, parse_invite, recovery_words,
+    CoreError, DeviceSigner, LoginFields, Role, SaveOutcome, Vault,
+    account_secret_from_recovery_words, new_device_id, parse_invite, recovery_words,
 };
 use keystead_server::AppState;
 use p256::ecdsa::signature::Signer as _;
@@ -161,11 +161,14 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     owner
         .add_login(
             Some("Production".into()),
-            "AWS root".into(),
-            "root@example.com".into(),
-            "https://aws.amazon.com".into(),
-            "s3cret".into(),
-            String::new(),
+            LoginFields {
+                name: "AWS root".into(),
+                username: "root@example.com".into(),
+                url: "https://aws.amazon.com".into(),
+                password: "s3cret".into(),
+                notes: String::new(),
+                one_time_code: String::new(),
+            },
         )
         .unwrap();
     assert_eq!(
@@ -196,11 +199,14 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     owner
         .add_login(
             None,
-            "Bank".into(),
-            String::new(),
-            String::new(),
-            "own".into(),
-            "PIN 1234".into(),
+            LoginFields {
+                name: "Bank".into(),
+                username: String::new(),
+                url: String::new(),
+                password: "own".into(),
+                notes: "PIN 1234".into(),
+                one_time_code: String::new(),
+            },
         )
         .unwrap();
     let bank = owner
@@ -236,11 +242,14 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     let saved = member
         .update_login(
             shared.id.clone(),
-            "Bank (joint)".into(),
-            "mo@example.com".into(),
-            "https://bank.example.com".into(),
-            "new".into(),
-            "PIN 5678".into(),
+            LoginFields {
+                name: "Bank (joint)".into(),
+                username: "mo@example.com".into(),
+                url: "https://bank.example.com".into(),
+                password: "new".into(),
+                notes: "PIN 5678".into(),
+                one_time_code: String::new(),
+            },
         )
         .unwrap();
     assert!(matches!(saved, SaveOutcome::Saved { version: 3 }));
@@ -299,11 +308,14 @@ fn an_owner_recovers_on_a_new_mac_from_the_kit() {
     owner
         .add_login(
             Some("Production".into()),
-            "AWS root".into(),
-            String::new(),
-            String::new(),
-            "s3cret".into(),
-            String::new(),
+            LoginFields {
+                name: "AWS root".into(),
+                username: String::new(),
+                url: String::new(),
+                password: "s3cret".into(),
+                notes: String::new(),
+                one_time_code: String::new(),
+            },
         )
         .unwrap();
     let identity = owner.identity().unwrap();

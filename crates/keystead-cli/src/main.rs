@@ -90,6 +90,10 @@ enum Command {
         /// Generate a random password instead of asking for one
         #[arg(long)]
         generate: bool,
+        /// Its one-time codes: the otpauth:// link from the site's QR code, or the setup key
+        /// the site shows for typing in
+        #[arg(long, value_name = "LINK_OR_KEY")]
+        otp: Option<String>,
     },
     /// Share one login with an approved user or a group, without the rest of its folder
     Share {
@@ -153,6 +157,19 @@ enum Command {
         /// Generate a random password instead of asking for one
         #[arg(long)]
         generate: bool,
+        /// Set up one-time codes: the otpauth:// link from the site's QR code, or the setup
+        /// key the site shows for typing in
+        #[arg(long, value_name = "LINK_OR_KEY", conflicts_with = "no_otp")]
+        otp: Option<String>,
+        /// Stop keeping one-time codes for it
+        #[arg(long)]
+        no_otp: bool,
+    },
+    /// Print a login's current one-time code
+    Otp {
+        name: String,
+        #[arg(long)]
+        folder: Option<String>,
     },
     /// Delete a login for everyone who can open it
     Rm {
@@ -609,16 +626,18 @@ fn run(cli: Cli) -> Result<()> {
             username,
             url,
             generate,
+            otp,
         } => {
             let details = Details {
                 password: password(generate)?,
                 notes: String::new(),
+                otp: otp.unwrap_or_default(),
             };
             let overview = Overview {
                 name: name.clone(),
                 username: username.unwrap_or_default(),
                 url: url.unwrap_or_default(),
-                tags: Vec::new(),
+                ..Overview::default()
             };
             commands::add(&home, folder.as_deref(), overview, details)?;
             match folder {
@@ -737,14 +756,21 @@ fn run(cli: Cli) -> Result<()> {
             notes,
             password: new_password,
             generate,
+            otp,
+            no_otp,
         } => {
-            let other_fields =
-                rename.is_some() || username.is_some() || url.is_some() || notes.is_some();
+            let otp = if no_otp { Some(String::new()) } else { otp };
+            let other_fields = rename.is_some()
+                || username.is_some()
+                || url.is_some()
+                || notes.is_some()
+                || otp.is_some();
             let changes = commands::Changes {
                 name: rename,
                 username,
                 url,
                 notes,
+                otp,
                 // Without other fields, edit changes the password, as it always has.
                 password: if new_password || generate || !other_fields {
                     Some(password(generate)?)
@@ -758,6 +784,13 @@ fn run(cli: Cli) -> Result<()> {
                     println!("Not saved: {author} saved version {version} first.");
                     println!("Your copy now has their version; run edit again to replace it.");
                 }
+            }
+        }
+        Command::Otp { name, folder } => {
+            let code = commands::one_time_code(&home, &name, folder.as_deref())?;
+            println!("{}", code.code);
+            if std::io::stdout().is_terminal() {
+                eprintln!("Good for {} more second(s).", code.remaining);
             }
         }
         Command::Rm { name, folder, yes } => {

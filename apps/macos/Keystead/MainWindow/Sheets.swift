@@ -1,4 +1,6 @@
+import CoreImage
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SheetContent: View {
     let sheet: AppModel.Sheet
@@ -149,6 +151,7 @@ private struct AddLoginSheet: View {
     @State private var url = ""
     @State private var password = ""
     @State private var notes = ""
+    @State private var oneTimeCode = ""
 
     var body: some View {
         SheetScaffold(
@@ -156,8 +159,10 @@ private struct AddLoginSheet: View {
             canAct: !name.trimmed.isEmpty && !password.isEmpty
         ) {
             try await model.addLogin(
-                folder: folder, name: name.trimmed, username: username.trimmed, url: url.trimmed,
-                password: password, notes: notes)
+                folder: folder,
+                LoginFields(
+                    name: name.trimmed, username: username.trimmed, url: url.trimmed,
+                    password: password, notes: notes, oneTimeCode: oneTimeCode.trimmed))
             return true
         } content: {
             Form {
@@ -172,12 +177,95 @@ private struct AddLoginSheet: View {
                 TextField("Username", text: $username, prompt: Text("Optional"))
                 TextField("Website", text: $url, prompt: Text("Optional, https://…"))
                 PasswordField(title: "Password", password: $password)
+                OneTimeCodeField(setup: $oneTimeCode)
                 NotesField(notes: $notes)
             }
             Text(folder.map { "Everyone \u{201C}\($0)\u{201D} is shared with will see this login." }
                 ?? "Only you can see this login until you share it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Sets up one-time codes for a login: the otpauth:// link from a site's QR code (pasted, or
+/// read from a screenshot of it) or the setup key the site shows for typing in. Kept secret
+/// like the password.
+private struct OneTimeCodeField: View {
+    @Binding var setup: String
+    @State private var visible = false
+    /// Who the codes are for, once the setup checks out.
+    @State private var label: String?
+    @State private var problem: String?
+
+    var body: some View {
+        LabeledContent("One-time code") {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Group {
+                        if visible {
+                            TextField("One-time code", text: $setup, prompt: Text("Optional: setup key or link"))
+                                .font(.system(.body, design: .monospaced))
+                        } else {
+                            SecureField("One-time code", text: $setup, prompt: Text("Optional: setup key or link"))
+                        }
+                    }
+                    .labelsHidden()
+                    Button {
+                        visible.toggle()
+                    } label: {
+                        Image(systemName: visible ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(visible ? "Hide the setup key" : "Show the setup key")
+                    Button("From QR Code…") { readQRCode() }
+                        .help("Read the site's QR code from a screenshot or image")
+                }
+                if let problem {
+                    Text(problem)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let label {
+                    Text(label.isEmpty ? "Makes one-time codes." : "Makes one-time codes for \(label).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .onChange(of: setup, initial: true) { check() }
+    }
+
+    private func check() {
+        guard !setup.trimmed.isEmpty else {
+            label = nil
+            problem = nil
+            return
+        }
+        do {
+            label = try describeOneTimeCode(text: setup)
+            problem = nil
+        } catch {
+            label = nil
+            problem = describe(error)
+        }
+    }
+
+    private func readQRCode() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.message = "Choose a screenshot or image of the site's QR code."
+        guard panel.runModal() == .OK, let url = panel.url, let image = CIImage(contentsOf: url) else {
+            return
+        }
+        let detector = CIDetector(
+            ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])
+        let messages = detector?.features(in: image).compactMap { ($0 as? CIQRCodeFeature)?.messageString } ?? []
+        if let link = messages.first(where: { $0.lowercased().hasPrefix("otpauth://") }) {
+            setup = link
+        } else {
+            label = nil
+            problem = "There's no one-time code QR code in that image."
         }
     }
 }
@@ -201,8 +289,9 @@ private struct EditLoginSheet: View {
     @State private var url: String
     @State private var password = ""
     @State private var notes = ""
-    /// The password and notes as they were, once decrypted; until then there's nothing to
-    /// edit or save.
+    @State private var oneTimeCode = ""
+    /// The password, notes and one-time code setup as they were, once decrypted; until then
+    /// there's nothing to edit or save.
     @State private var original: LoginDetails?
     @State private var loadError: String?
     /// Set when someone else changed it first; the sheet then only offers to close.
@@ -219,6 +308,7 @@ private struct EditLoginSheet: View {
     private var changed: Bool {
         name.trimmed != item.name || username.trimmed != item.username || url.trimmed != item.url
             || password != original?.password || notes != original?.notes
+            || oneTimeCode.trimmed != original?.oneTimeCode
     }
 
     var body: some View {
@@ -231,8 +321,10 @@ private struct EditLoginSheet: View {
         ) {
             if conflict != nil { return true }
             conflict = try await model.update(
-                item, name: name.trimmed, username: username.trimmed, url: url.trimmed,
-                password: password, notes: notes)
+                item,
+                LoginFields(
+                    name: name.trimmed, username: username.trimmed, url: url.trimmed,
+                    password: password, notes: notes, oneTimeCode: oneTimeCode.trimmed))
             return conflict == nil
         } content: {
             if let conflict {
@@ -251,6 +343,7 @@ private struct EditLoginSheet: View {
                     TextField("Username", text: $username, prompt: Text("Optional"))
                     TextField("Website", text: $url, prompt: Text("Optional, https://…"))
                     PasswordField(title: "Password", password: $password)
+                    OneTimeCodeField(setup: $oneTimeCode)
                     NotesField(notes: $notes)
                 }
                 if password != original?.password {
@@ -265,6 +358,7 @@ private struct EditLoginSheet: View {
                 let details = try await model.details(of: item)
                 password = details.password
                 notes = details.notes
+                oneTimeCode = details.oneTimeCode
                 original = details
             } catch {
                 loadError = describe(error)

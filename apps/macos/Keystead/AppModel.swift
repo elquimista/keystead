@@ -99,6 +99,11 @@ final class AppModel {
     private(set) var message: String?
     /// The login whose password is on the clipboard, until it's cleared.
     private(set) var copiedName: String?
+    /// What was copied for `copiedName`: "password" or "one-time code".
+    private(set) var copiedWhat = "password"
+    /// Goes up each time the logins are reloaded from this Mac's copy, so views that show
+    /// something decrypted (like a one-time code) know to fetch it again.
+    private(set) var localRevision = 0
     var sheet: Sheet?
     var section: Section? = .allLogins
     /// The login or person selected in the main window's list.
@@ -369,14 +374,46 @@ final class AppModel {
     func copyPassword(of item: ItemSummary) async {
         do {
             clipboard.copy(try await password(of: item))
-            copiedName = item.name
-            copiedNoticeTask?.cancel()
-            copiedNoticeTask = Task {
-                try? await Task.sleep(for: SecureClipboard.clearAfter)
-                if !Task.isCancelled { copiedName = nil }
-            }
+            noteCopied("password", of: item)
         } catch {
             message = describe(error)
+        }
+    }
+
+    /// A login's current one-time code, if it has one-time codes.
+    func oneTimeCode(of item: ItemSummary) async throws -> OneTimeCode? {
+        #if DEBUG
+        if isDemo {
+            let now = UInt64(Date().timeIntervalSince1970)
+            return item.hasOneTimeCode ? OneTimeCode(code: "492039", period: 30, remaining: 30 - now % 30) : nil
+        }
+        #endif
+        let id = item.id
+        return try await perform { try $0.oneTimeCode(itemId: id) }
+    }
+
+    /// Copies a login's current one-time code the way passwords are copied.
+    func copyOneTimeCode(of item: ItemSummary) async {
+        do {
+            guard let code = try await oneTimeCode(of: item) else {
+                message = "\(item.name) has no one-time codes."
+                return
+            }
+            clipboard.copy(code.code)
+            noteCopied("one-time code", of: item)
+        } catch {
+            message = describe(error)
+        }
+    }
+
+    /// Shows what was copied until the clipboard clears.
+    private func noteCopied(_ what: String, of item: ItemSummary) {
+        copiedWhat = what
+        copiedName = item.name
+        copiedNoticeTask?.cancel()
+        copiedNoticeTask = Task {
+            try? await Task.sleep(for: SecureClipboard.clearAfter)
+            if !Task.isCancelled { copiedName = nil }
         }
     }
 
@@ -393,15 +430,8 @@ final class AppModel {
     // MARK: - Changing things (each throws, so the sheet that asked can show why)
 
     /// Adds a login to `folder`, or with none as yours alone until you share it.
-    func addLogin(
-        folder: String?, name: String, username: String, url: String, password: String,
-        notes: String
-    ) async throws {
-        try await perform {
-            try $0.addLogin(
-                folder: folder, name: name, username: username, url: url, password: password,
-                notes: notes)
-        }
+    func addLogin(folder: String?, _ fields: LoginFields) async throws {
+        try await perform { try $0.addLogin(folder: folder, fields: fields) }
         await reloadLocal()
     }
 
@@ -409,7 +439,10 @@ final class AppModel {
     func details(of item: ItemSummary) async throws -> LoginDetails {
         #if DEBUG
         if isDemo {
-            return LoginDetails(password: "correct-horse-battery", notes: "Recovery codes are in the safe.")
+            return LoginDetails(
+                password: "correct-horse-battery", notes: "Recovery codes are in the safe.",
+                oneTimeCode: item.hasOneTimeCode
+                    ? "otpauth://totp/AWS:root?secret=JBSWY3DPEHPK3PXP&issuer=AWS" : "")
         }
         #endif
         return try await perform { try $0.details(itemId: item.id) }
@@ -417,16 +450,9 @@ final class AppModel {
 
     /// Saves all of a login's fields. Returns a note if someone else changed it first, in
     /// which case nothing was saved.
-    func update(
-        _ item: ItemSummary, name: String, username: String, url: String, password: String,
-        notes: String
-    ) async throws -> String? {
+    func update(_ item: ItemSummary, _ fields: LoginFields) async throws -> String? {
         let id = item.id
-        let outcome = try await perform {
-            try $0.updateLogin(
-                itemId: id, name: name, username: username, url: url, password: password,
-                notes: notes)
-        }
+        let outcome = try await perform { try $0.updateLogin(itemId: id, fields: fields) }
         await reloadLocal()
         return conflictNote(outcome, doing: "your changes weren't saved")
     }
@@ -726,6 +752,12 @@ final class AppModel {
             items = try await perform { try $0.items() }
             groups = try await perform { try $0.groups() }.sorted { $0.name < $1.name }
             toChange = try await perform { try $0.toChange() }
+            let tooNew = try await perform { try $0.tooNew() }
+            if tooNew > 0 && message == nil {
+                message = "\(tooNew == 1 ? "A login is" : "\(tooNew) logins are") from a newer "
+                    + "Keystead and can't be shown. Update Keystead to see them."
+            }
+            localRevision += 1
             let summaries = try await perform { try $0.folderSummaries() }
             folders = summaries.map(\.name).sorted()
             folderRoles = Dictionary(summaries.map { ($0.name, $0.role) }, uniquingKeysWith: { a, _ in a })
@@ -782,22 +814,22 @@ extension AppModel {
                     id: "00000000-0000-4000-8000-000000000001", folder: "Production",
                     name: "AWS root", username: "root@example.com", url: "https://aws.amazon.com",
                     owner: nil, sharedWith: ["Mo"], sharedWithGroups: [], sharedWithMe: false,
-                    role: .manage),
+                    role: .manage, hasOneTimeCode: true),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000002", folder: "Staging",
                     name: "Database", username: "admin", url: "",
                     owner: nil, sharedWith: [], sharedWithGroups: [], sharedWithMe: false,
-                    role: .view),
+                    role: .view, hasOneTimeCode: false),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000003", folder: nil,
                     name: "Bank", username: "olivia@example.com", url: "https://bank.example.com",
                     owner: nil, sharedWith: [], sharedWithGroups: ["On-call"], sharedWithMe: false,
-                    role: .manage),
+                    role: .manage, hasOneTimeCode: false),
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000004", folder: nil,
                     name: "Domain registrar", username: "ops@example.com", url: "",
                     owner: "Mo", sharedWith: [], sharedWithGroups: [], sharedWithMe: true,
-                    role: .edit),
+                    role: .edit, hasOneTimeCode: false),
             ]
             model.groups = [
                 GroupSummary(

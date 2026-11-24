@@ -27,7 +27,8 @@ struct SettingsView: View {
                     Text(shortcutTaken
                         ? "Another app already uses that shortcut. Choose a different one."
                         : "Opens a search box over any app: type, then press Return to copy the "
-                            + "password, or Shift-Return for the username.")
+                            + "password, Shift-Return for the username, or Option-Return for the "
+                            + "one-time code.")
                         .font(.caption)
                         .foregroundStyle(shortcutTaken ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                         .fixedSize(horizontal: false, vertical: true)

@@ -26,9 +26,15 @@ account back on a new Mac with a Recovery Kit.
   change are listed under To Change in the sidebar, with a warning on each login and on the
   person's page. Saving a new password takes a login off; Keep It (or Keep All, for someone
   who only moved teams) keeps the password as it is. Needs a 0.5.0 server.
+- **One-time codes:** a login can keep the setup of a site's one-time codes (Edit…, then
+  paste the setup key or otpauth:// link, or From QR Code… to read it from a screenshot).
+  Its details then show the current code with the seconds it has left; copying it works
+  like copying the password. Logins with codes need a 0.6.0 server, and apps before 0.6.0
+  can't open them.
 - **Quick search:** ⇧⌘Space (Settings › General: ⌥⌘K, ⌃⌥⌘K or off) opens a Spotlight-style
   box over any app. Type, pick with the arrows, and Return copies the password (Shift-Return
-  the username) and closes it, so the app you were in is still in front to paste into. It
+  the username, Option-Return the one-time code) and closes it, so the app you were in is
+  still in front to paste into. It
   unlocks with Touch ID first if needed. It uses Carbon's hot key API, which needs no
   Accessibility permission and works in the App Sandbox.
 - **Menu bar icon:** a quick panel to search and copy without opening the window.

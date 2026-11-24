@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{
@@ -19,12 +19,14 @@ use keystead_core::directory::DirectoryEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{
-    Details, EncryptedItem, FolderInfo, GroupKeyCopy, ItemKeys, ItemVersion, Overview, PersonKey,
+    Details, EncryptedItem, FolderInfo, GroupKeyCopy, ITEM_FORMAT, ItemKeys, ItemVersion, Overview,
+    PersonKey,
 };
 use keystead_core::keys::{
     AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, GroupKeys, GroupSecret, ItemKey,
     recovery_message,
 };
+use keystead_core::otp::{self, OneTimeCode};
 use rand::Rng;
 use rand::rngs::OsRng;
 
@@ -38,6 +40,9 @@ const NEEDS_0_2: &str = "the server is older than Keystead 0.2.0 and can't do th
 /// Groups came with 0.4.0; an older server doesn't have them.
 const NEEDS_0_4: &str = "the server is older than Keystead 0.4.0 and doesn't have groups; \
                          update it to 0.4.0 or later";
+/// One-time codes came with 0.6.0 (item format 4); an older server can't store them.
+const NEEDS_0_6: &str = "the server is older than Keystead 0.6.0 and can't store one-time \
+                         codes; update it to 0.6.0 or later";
 /// What a server answers for sign-out if it's from before sign-out existed.
 const NO_SIGN_OUT: &str = "the server is too old to forget a device that signs out; update it";
 const PAGE_SIZE: i64 = 500;
@@ -155,6 +160,8 @@ pub struct ItemRow {
     pub shared_with_me: bool,
     /// What you may do with it.
     pub role: Role,
+    /// It has one-time codes ([`Vault::one_time_code`]).
+    pub has_one_time_code: bool,
 }
 
 /// A password to change: someone lost access to a login while its password stayed the
@@ -1319,7 +1326,7 @@ impl Vault {
         let me = self.profile.user_id;
         let mut folders = HashMap::new();
         let mut rows = Vec::new();
-        for item in self.profile.items.values().filter(|item| !item.deleted) {
+        for item in self.openable_items() {
             let folder = match item.folder_id {
                 Some(folder_id) if self.profile.folders.contains_key(&folder_id) => {
                     // Each folder key is unwrapped once per listing, not once per item.
@@ -1365,10 +1372,43 @@ impl Vault {
                     .collect(),
                 shared_with_me: folder.is_none() && item.owner != Some(me),
                 role: self.profile.item_role(item),
+                has_one_time_code: overview.one_time_code,
             });
         }
         rows.sort_by(|a, b| (&a.folder, &a.name).cmp(&(&b.folder, &b.name)));
         Ok(rows)
+    }
+
+    /// Live items this build can open; ones a newer Keystead wrote are left out (see
+    /// [`too_new`](Self::too_new)) rather than failing the whole list.
+    fn openable_items(&self) -> impl Iterator<Item = &EncryptedItem> {
+        self.profile
+            .items
+            .values()
+            .filter(|item| !item.deleted && item.format <= ITEM_FORMAT)
+    }
+
+    /// How many logins a newer Keystead wrote, in a format this build can't open. They
+    /// show up again after updating.
+    pub fn too_new(&self) -> usize {
+        self.profile
+            .items
+            .values()
+            .filter(|item| !item.deleted && item.format > ITEM_FORMAT)
+            .count()
+    }
+
+    /// The login's current one-time code, if it has one codes come from.
+    pub fn one_time_code(&self, item_id: ItemId) -> Result<Option<OneTimeCode>> {
+        let (_, details) = self.open_item(item_id)?;
+        if details.otp.is_empty() {
+            return Ok(None);
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("the clock is before 1970")?
+            .as_secs();
+        Ok(Some(otp::code_at(&details.otp, now)?))
     }
 
     /// Passwords to change, from the last sync: for each login this account can change, the
@@ -1382,7 +1422,7 @@ impl Vault {
                 .profile
                 .items
                 .get(&exposure.item_id)
-                .filter(|item| !item.deleted)
+                .filter(|item| !item.deleted && item.format <= ITEM_FORMAT)
             else {
                 continue;
             };
@@ -1453,7 +1493,7 @@ impl Vault {
             .map(|folder| self.profile.find_folder(&self.keys, &self.groups, folder))
             .transpose()?;
         let mut matches = Vec::new();
-        for item in self.profile.items.values().filter(|item| !item.deleted) {
+        for item in self.openable_items() {
             if folder_id.is_some_and(|folder_id| Some(folder_id) != item.folder_id) {
                 continue;
             }
@@ -1485,6 +1525,7 @@ impl Vault {
         details: Details,
     ) -> Result<ItemId> {
         self.check_server_takes_items()?;
+        let details = self.with_one_time_code(details)?;
         self.sync()?;
         let me = self.profile.user_id;
         let id = ItemId::random();
@@ -1543,9 +1584,10 @@ impl Vault {
             bail!("a login needs a name");
         }
         self.check_server_takes_items()?;
+        let details = self.with_one_time_code(details.clone())?;
         self.sync()?;
         let current = self.live_item(item_id)?.clone();
-        let outcome = self.save_version(&current, overview, details, People::Same)?;
+        let outcome = self.save_version(&current, overview, &details, People::Same)?;
         self.save()?;
         Ok(outcome)
     }
@@ -1876,6 +1918,21 @@ impl Vault {
         }
         self.server_takes_items = true;
         Ok(())
+    }
+
+    /// `details` with its one-time code setup, if any, in the form it's kept: a checked
+    /// otpauth:// link. Servers before 0.6.0 can't store one.
+    fn with_one_time_code(&mut self, mut details: Details) -> Result<Details> {
+        if details.otp.trim().is_empty() {
+            details.otp.clear();
+            return Ok(details);
+        }
+        details.otp = otp::normalize(&details.otp)?;
+        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        if health.item_format < 4 {
+            bail!(NEEDS_0_6);
+        }
+        Ok(details)
     }
 
     /// Servers older than 0.4.0 have no groups, and don't store items shared with them.
