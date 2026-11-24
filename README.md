@@ -127,21 +127,63 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
 ## Releasing
 
-Pushing a version tag publishes the server image to the GitHub Container Registry, for
-`linux/amd64` and `linux/arm64`. The tag must match the version in `Cargo.toml`, and all of
-CI must pass on the tagged commit first. For example, for 0.2.0:
+### One version for everything
 
-1. Set `version = "0.2.0"` in the root `Cargo.toml`, and commit.
-2. Tag and push:
+The server, the CLI and the apps share one version number and one tag, `v<version>`. A
+release that changes only the Mac app, or only the server, still takes the next version, and
+the release workflow publishes the server image under it either way. The image may then be
+the same as the previous release's; the release notes say so, and updating the server is
+optional.
+
+Versions follow semantic versioning: from here on, the patch number for fixes (0.3.1) and
+the minor number for new features or format changes (0.4.0). Before 1.0, a minor release may need the server
+updated first; the release notes and `deploy/README.md` say so when it does.
+
+### Keeping apps and servers compatible
+
+Matching versions aren't what keeps the parts working together; each side checks what the
+other can do:
+
+- **A new app works with an older server.** It checks before using anything newer (the
+  `item_format` from `/v1/health`, or a 404 from an endpoint the server doesn't have yet),
+  then explains what to update instead of failing. Signing out against a 0.2.0 server, for
+  example, still wipes the Mac and says the server couldn't be told.
+- **A new server keeps older apps working**, or the release notes say which ones need
+  updating and why, as 0.2.0 did for the login format.
+
+Separate versions per part (`server-v…`, `mac-v…`) are worth it only once parts ship on
+very different schedules; until then they'd add a compatibility table to keep up to date.
+
+### Release checklist
+
+1. Bump the version in all three places:
+   - `version` in the root `Cargo.toml`;
+   - `MARKETING_VERSION` in `apps/macos/Config/Base.xcconfig`, plus 1 on
+     `CURRENT_PROJECT_VERSION` (the build number);
+   - `KEYSTEAD_VERSION` in `deploy/.env.example`.
+2. Run the checks (`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+   warnings`, `cargo test --workspace`), which also updates `Cargo.lock`.
+3. If admins must do something when updating, such as updating the server before the apps,
+   add it to the Updating section of `deploy/README.md`.
+4. Commit as "Release 0.2.1", then tag and push:
 
    ```sh
-   git tag v0.2.0
-   git push origin main v0.2.0
+   git tag -a v0.2.1 -m "Keystead 0.2.1"
+   git push origin main v0.2.1
    ```
 
-The [release workflow](.github/workflows/release.yml) then publishes
-`ghcr.io/elquimista/keystead-server` tagged `0.2.0`, `0.2` and `latest`. Pre-releases such
-as `v0.3.0-rc.1` get only their own tag.
+5. Write short notes for the tag's GitHub release: what changed in the server and in the
+   apps, and whether the server has to be updated first.
+
+The tag must match `Cargo.toml`, and all of CI must pass on the tagged commit. The
+[release workflow](.github/workflows/release.yml) then publishes
+`ghcr.io/elquimista/keystead-server` for `linux/amd64` and `linux/arm64`, tagged `0.2.1`,
+`0.2` and `latest`. Pre-releases such as `v0.3.0-rc.1` get only their own tag.
+
+The Mac app isn't published by the workflow yet: build it as described in
+[apps/macos/README.md](apps/macos/README.md). Handing it to other people needs a Developer
+ID certificate (the paid Apple Developer Program) so it can be notarized; then the same tag
+can publish it too.
 
 After the first release, GitHub may list the image as private: on the repository's
 **Packages** entry, open **Package settings** and change the visibility to public, so

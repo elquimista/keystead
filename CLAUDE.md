@@ -30,9 +30,14 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
   user's own server and data on 8080 are never touched.
 - Production deployment: `deploy/` (the server behind nginx, with Cloudflare in front); guide in
   `deploy/README.md`. Test it locally with another project name and ports, never 80/443.
-- Releases: pushing a `v<version>` tag matching `Cargo.toml` publishes the server image to
+- Releases: one version and one `v<version>` tag for the server, CLI and apps, even when
+  only one part changed; follow the checklist in README.md's Releasing section (the version
+  lives in three files). Pushing the tag publishes the server image to
   `ghcr.io/elquimista/keystead-server` (`.github/workflows/release.yml`). Tagging and pushing
   are the user's call.
+- Compatibility: a new app must keep working with older servers, checking what the server
+  can do (`item_format` in `/v1/health`, or a 404) and saying what to update instead of
+  failing.
 - Benchmarks (always `--release`; debug numbers are meaningless):
   `cargo run --release -p keystead-proto-unlock-search`,
   `cargo run --release -p keystead-proto-change-feed`
