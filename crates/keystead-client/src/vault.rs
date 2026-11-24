@@ -744,6 +744,40 @@ impl Vault {
         Ok(id)
     }
 
+    /// Saves new contents for a login (name, username, website, tags, password and notes)
+    /// on top of the latest version this device has seen. Its folder and who can open it
+    /// stay as they are. Start from `open_item` to keep what isn't changing.
+    pub fn update(
+        &mut self,
+        item_id: ItemId,
+        overview: &Overview,
+        details: &Details,
+    ) -> Result<EditOutcome> {
+        if overview.name.trim().is_empty() {
+            bail!("a login needs a name");
+        }
+        self.check_server_takes_items()?;
+        self.sync()?;
+        let current = self.live_item(item_id)?.clone();
+        let outcome = self.save_version(&current, overview, details, None)?;
+        self.save()?;
+        Ok(outcome)
+    }
+
+    /// Deletes a login for everyone who can open it: a signed version marked deleted, which
+    /// everyone's sync then removes. If someone saved a newer version first, nothing is
+    /// deleted and the local copy takes their version, so it can be looked at first.
+    pub fn delete(&mut self, item_id: ItemId) -> Result<EditOutcome> {
+        self.check_server_takes_items()?;
+        self.sync()?;
+        let current = self.live_item(item_id)?.clone();
+        let (_, keys) = self.next_keys(&current)?;
+        let tombstone = EncryptedItem::tombstone(self.next_version(&current), keys, &self.keys);
+        let outcome = self.put_version(&current, tombstone)?;
+        self.save()?;
+        Ok(outcome)
+    }
+
     /// Saves a new password on top of the latest version this device has seen.
     pub fn edit(&mut self, item_id: ItemId, password: &str) -> Result<EditOutcome> {
         self.check_server_takes_items()?;
@@ -802,7 +836,28 @@ impl Vault {
         details: &Details,
         add: Option<(UserId, &AccountPublicKeys)>,
     ) -> Result<EditOutcome> {
-        let (key, mut keys) = if current.format < ITEM_FORMAT {
+        let (key, mut keys) = self.next_keys(current)?;
+        if let Some((user_id, recipient)) = add {
+            keys.people.push(PersonKey {
+                user_id,
+                wrapped_key: recipient.wrap_item_key(&key, current.id)?,
+            });
+        }
+        let item = EncryptedItem::seal(
+            self.next_version(current),
+            &key,
+            keys,
+            &self.keys,
+            overview,
+            details,
+        )?;
+        self.put_version(current, item)
+    }
+
+    /// The key and key copies for the next version of `current`: the same ones, or for a
+    /// format 1 item, a new key of its own sealed for its folder.
+    fn next_keys(&self, current: &EncryptedItem) -> Result<(ItemKey, ItemKeys)> {
+        if current.format < ITEM_FORMAT {
             let folder_id = current
                 .folder_id
                 .context("a format 1 item is always in a folder")?;
@@ -812,26 +867,28 @@ impl Vault {
                 folder: Some(key.seal_for_folder(current.id, folder_id, &folder_key)),
                 ..ItemKeys::default()
             };
-            (key, keys)
+            Ok((key, keys))
         } else {
-            (self.item_key(current)?, current.keys.clone())
-        };
-        if let Some((user_id, recipient)) = add {
-            keys.people.push(PersonKey {
-                user_id,
-                wrapped_key: recipient.wrap_item_key(&key, current.id)?,
-            });
+            Ok((self.item_key(current)?, current.keys.clone()))
         }
-        let at = ItemVersion {
+    }
+
+    fn next_version(&self, current: &EncryptedItem) -> ItemVersion {
+        ItemVersion {
             id: current.id,
             folder_id: current.folder_id,
             owner: current.owner,
             version: current.version + 1,
             author: self.profile.user_id,
-        };
+        }
+    }
+
+    /// Saves `item` as the version after `current`. If someone else saved first, the local
+    /// copy takes their version instead.
+    fn put_version(&mut self, current: &EncryptedItem, item: EncryptedItem) -> Result<EditOutcome> {
         let request = PutItemRequest {
             base_version: Some(current.version),
-            item: EncryptedItem::seal(at, &key, keys, &self.keys, overview, details)?,
+            item,
         };
         let path = format!("/v1/items/{}", current.id);
         Ok(

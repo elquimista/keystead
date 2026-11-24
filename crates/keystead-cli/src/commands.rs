@@ -148,6 +148,53 @@ pub fn edit(home: &Path, name: &str, folder: Option<&str>, password: &str) -> Re
     vault.edit(item_id, password)
 }
 
+/// What to change in a login; `None` keeps the field as it is.
+#[derive(Default)]
+pub struct Changes {
+    pub name: Option<String>,
+    pub username: Option<String>,
+    pub url: Option<String>,
+    pub notes: Option<String>,
+    pub password: Option<String>,
+}
+
+/// Changes some of a login's fields and keeps the rest.
+pub fn update(
+    home: &Path,
+    name: &str,
+    folder: Option<&str>,
+    changes: Changes,
+) -> Result<EditOutcome> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    let (mut overview, mut details) = vault.open_item(item_id)?;
+    if let Some(name) = changes.name {
+        overview.name = name;
+    }
+    if let Some(username) = changes.username {
+        overview.username = username;
+    }
+    if let Some(url) = changes.url {
+        overview.url = url;
+    }
+    if let Some(notes) = changes.notes {
+        details.notes = notes;
+    }
+    if let Some(password) = changes.password {
+        details.password = password;
+    }
+    vault.update(item_id, &overview, &details)
+}
+
+/// Deletes a login for everyone who can open it.
+pub fn remove(home: &Path, name: &str, folder: Option<&str>) -> Result<EditOutcome> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.delete(item_id)
+}
+
 pub fn sync(home: &Path) -> Result<SyncSummary> {
     open(home)?.sync()
 }

@@ -48,6 +48,16 @@ enum DebugSnapshots {
                 ("6a-own-login", { model.selectedItemID = model.items[2].id }),
                 ("6b-share-login", { model.sheet = .shareLogin(model.items[2]) }),
                 ("6c-closed", { model.sheet = nil }),
+                ("6c1-edit-login", { model.sheet = .editLogin(model.items[2]) }),
+                ("6c2-closed", { model.sheet = nil }),
+                // AWS root: in a folder, and also shared with Mo.
+                ("6c3-delete-login", { model.sheet = .deleteLogin(model.items[0]) }),
+                ("6c4-closed", { model.sheet = nil }),
+                // Bank: Olivia's own; Domain registrar: Mo's, shared with her.
+                ("6c5-delete-own", { model.sheet = .deleteLogin(model.items[2]) }),
+                ("6c6-closed", { model.sheet = nil }),
+                ("6c7-delete-shared", { model.sheet = .deleteLogin(model.items[3]) }),
+                ("6c8-closed", { model.sheet = nil }),
                 ("6d-new-login", { model.sheet = .addLogin(folder: nil) }),
                 ("6e-shared-with-me", {
                     model.sheet = nil

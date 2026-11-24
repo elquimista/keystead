@@ -131,16 +131,34 @@ pub struct User {
     pub is_owner: bool,
 }
 
+/// How saving a change to a login went: changing it, or deleting it.
 #[derive(uniffi::Enum)]
-pub enum PasswordChange {
+pub enum SaveOutcome {
     Saved {
         version: u64,
     },
-    /// Someone saved a newer version first; the local copy now holds theirs.
+    /// Someone saved a newer version first, so nothing changed; the local copy now holds
+    /// theirs.
     Conflict {
         version: u64,
         author: String,
     },
+}
+
+impl From<EditOutcome> for SaveOutcome {
+    fn from(outcome: EditOutcome) -> Self {
+        match outcome {
+            EditOutcome::Saved { version } => Self::Saved { version },
+            EditOutcome::Conflict { version, author } => Self::Conflict { version, author },
+        }
+    }
+}
+
+/// A login's secret fields, decrypted when asked for.
+#[derive(uniffi::Record)]
+pub struct LoginDetails {
+    pub password: String,
+    pub notes: String,
 }
 
 /// An item's searchable fields, and who it's shared with. The password stays encrypted
@@ -372,15 +390,48 @@ impl Vault {
         &self,
         item_id: String,
         password: String,
-    ) -> Result<PasswordChange, CoreError> {
-        Ok(
-            match self.vault()?.edit(item_id_from(&item_id)?, &password)? {
-                EditOutcome::Saved { version } => PasswordChange::Saved { version },
-                EditOutcome::Conflict { version, author } => {
-                    PasswordChange::Conflict { version, author }
-                }
-            },
-        )
+    ) -> Result<SaveOutcome, CoreError> {
+        Ok(self
+            .vault()?
+            .edit(item_id_from(&item_id)?, &password)?
+            .into())
+    }
+
+    /// Decrypts one login's password and notes, for showing or editing them.
+    pub fn details(&self, item_id: String) -> Result<LoginDetails, CoreError> {
+        let (_, details) = self.vault()?.open_item(item_id_from(&item_id)?)?;
+        Ok(LoginDetails {
+            password: details.password.clone(),
+            notes: details.notes.clone(),
+        })
+    }
+
+    /// Saves all of a login's fields at once, on top of the latest version this device has.
+    /// Its folder and who can open it stay as they are.
+    pub fn update_login(
+        &self,
+        item_id: String,
+        name: String,
+        username: String,
+        url: String,
+        password: String,
+        notes: String,
+    ) -> Result<SaveOutcome, CoreError> {
+        let item_id = item_id_from(&item_id)?;
+        let mut vault = self.vault()?;
+        // Start from the current version, so fields the app doesn't edit, like tags, stay.
+        let (mut overview, mut details) = vault.open_item(item_id)?;
+        overview.name = name;
+        overview.username = username;
+        overview.url = url;
+        details.password = password;
+        details.notes = notes;
+        Ok(vault.update(item_id, &overview, &details)?.into())
+    }
+
+    /// Deletes a login for everyone who can open it.
+    pub fn delete_login(&self, item_id: String) -> Result<SaveOutcome, CoreError> {
+        Ok(self.vault()?.delete(item_id_from(&item_id)?)?.into())
     }
 
     /// Everyone on the server, fetched fresh.
@@ -431,6 +482,7 @@ impl Vault {
         username: String,
         url: String,
         password: String,
+        notes: String,
     ) -> Result<(), CoreError> {
         let overview = Overview {
             name,
@@ -438,10 +490,7 @@ impl Vault {
             url,
             tags: Vec::new(),
         };
-        let details = Details {
-            password,
-            notes: String::new(),
-        };
+        let details = Details { password, notes };
         self.vault()?.add(folder.as_deref(), overview, details)?;
         Ok(())
     }

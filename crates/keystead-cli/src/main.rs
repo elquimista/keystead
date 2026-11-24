@@ -97,20 +97,44 @@ enum Command {
     },
     /// List logins
     Ls,
-    /// Print a login's password
+    /// Print a login's password, or its notes
     Show {
         name: String,
         #[arg(long)]
         folder: Option<String>,
+        /// Print the notes instead of the password
+        #[arg(long)]
+        notes: bool,
     },
-    /// Change a login's password
+    /// Change a login: its password by default, or the fields given
     Edit {
         name: String,
         #[arg(long)]
         folder: Option<String>,
+        /// A new name for the login
+        #[arg(long)]
+        rename: Option<String>,
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Also ask for a new password when changing other fields
+        #[arg(long)]
+        password: bool,
         /// Generate a random password instead of asking for one
         #[arg(long)]
         generate: bool,
+    },
+    /// Delete a login for everyone who can open it
+    Rm {
+        name: String,
+        #[arg(long)]
+        folder: Option<String>,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        yes: bool,
     },
     /// Fetch changes from the server
     Sync,
@@ -351,21 +375,72 @@ fn run(cli: Cli) -> Result<()> {
                 .collect();
             print_table(&["FOLDER", "NAME", "USERNAME", "URL", "SHARED"], rows);
         }
-        Command::Show { name, folder } => {
+        Command::Show {
+            name,
+            folder,
+            notes,
+        } => {
             let (_, details) = commands::show(&home, &name, folder.as_deref())?;
-            println!("{}", details.password);
+            println!(
+                "{}",
+                if notes {
+                    &details.notes
+                } else {
+                    &details.password
+                }
+            );
         }
         Command::Edit {
             name,
             folder,
+            rename,
+            username,
+            url,
+            notes,
+            password: new_password,
             generate,
         } => {
-            let new_password = password(generate)?;
-            match commands::edit(&home, &name, folder.as_deref(), &new_password)? {
+            let other_fields =
+                rename.is_some() || username.is_some() || url.is_some() || notes.is_some();
+            let changes = commands::Changes {
+                name: rename,
+                username,
+                url,
+                notes,
+                // Without other fields, edit changes the password, as it always has.
+                password: if new_password || generate || !other_fields {
+                    Some(password(generate)?)
+                } else {
+                    None
+                },
+            };
+            match commands::update(&home, &name, folder.as_deref(), changes)? {
                 EditOutcome::Saved { version } => println!("Saved {name} (version {version})."),
                 EditOutcome::Conflict { version, author } => {
                     println!("Not saved: {author} saved version {version} first.");
                     println!("Your copy now has their version; run edit again to replace it.");
+                }
+            }
+        }
+        Command::Rm { name, folder, yes } => {
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!("add --yes to delete without being asked");
+                }
+                print!("Delete {name} for everyone who can open it? [y/N] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("Not deleted.");
+                    return Ok(());
+                }
+            }
+            match commands::remove(&home, &name, folder.as_deref())? {
+                EditOutcome::Saved { .. } => println!("Deleted {name}."),
+                EditOutcome::Conflict { version, author } => {
+                    println!("Not deleted: {author} saved version {version} first.");
+                    println!("Your copy now has their version; check it, then run rm again.");
                 }
             }
         }

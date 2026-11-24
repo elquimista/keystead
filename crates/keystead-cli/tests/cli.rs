@@ -133,6 +133,33 @@ fn alice_and_bob_share_a_password() {
     assert_eq!(bank.folder, None);
     assert_eq!(bank.owner.as_deref(), Some("Alice"));
     assert_eq!(show_password(&bob, "Bank"), "own-secret");
+
+    // Bob edits a few fields; the password stays unless asked for.
+    commands::update(
+        &bob,
+        "Bank",
+        None,
+        commands::Changes {
+            username: Some("bob@example.com".into()),
+            notes: Some("Branch 12".into()),
+            ..commands::Changes::default()
+        },
+    )
+    .unwrap();
+    let (overview, details) = commands::show(&alice, "Bank", None).unwrap();
+    assert_eq!(overview.username, "bob@example.com");
+    assert_eq!(details.notes, "Branch 12");
+    assert_eq!(details.password, "own-secret");
+
+    // Alice deletes it; it's gone for Bob too.
+    commands::remove(&alice, "Bank", None).unwrap();
+    assert!(
+        commands::list(&bob)
+            .unwrap()
+            .iter()
+            .all(|row| row.name != "Bank")
+    );
+    assert!(commands::show(&bob, "Bank", None).is_err());
 }
 
 #[test]

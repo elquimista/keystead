@@ -31,7 +31,8 @@ final class AppModel {
     /// The sheet the main window shows, if any.
     enum Sheet: Identifiable {
         case addLogin(folder: String?)
-        case changePassword(ItemSummary)
+        case editLogin(ItemSummary)
+        case deleteLogin(ItemSummary)
         case shareLogin(ItemSummary)
         case newFolder
         case share(folder: String?, user: User?)
@@ -46,7 +47,8 @@ final class AppModel {
         var id: String {
             switch self {
             case .addLogin(let folder): "add-\(folder ?? "")"
-            case .changePassword(let item): "change-\(item.id)"
+            case .editLogin(let item): "edit-\(item.id)"
+            case .deleteLogin(let item): "delete-\(item.id)"
             case .shareLogin(let item): "share-login-\(item.id)"
             case .newFolder: "new-folder"
             case .share(let folder, let user): "share-\(folder ?? "")-\(user?.userId ?? 0)"
@@ -349,25 +351,63 @@ final class AppModel {
     // MARK: - Changing things (each throws, so the sheet that asked can show why)
 
     /// Adds a login to `folder`, or with none as yours alone until you share it.
-    func addLogin(folder: String?, name: String, username: String, url: String, password: String)
-        async throws
-    {
+    func addLogin(
+        folder: String?, name: String, username: String, url: String, password: String,
+        notes: String
+    ) async throws {
         try await perform {
-            try $0.addLogin(folder: folder, name: name, username: username, url: url, password: password)
+            try $0.addLogin(
+                folder: folder, name: name, username: username, url: url, password: password,
+                notes: notes)
         }
         await reloadLocal()
     }
 
-    /// Returns a note if someone else changed the password first.
-    func changePassword(of item: ItemSummary, to password: String) async throws -> String? {
-        let outcome = try await perform { try $0.changePassword(itemId: item.id, password: password) }
+    /// A login's password and notes, decrypted for showing or editing.
+    func details(of item: ItemSummary) async throws -> LoginDetails {
+        #if DEBUG
+        if isDemo {
+            return LoginDetails(password: "correct-horse-battery", notes: "Recovery codes are in the safe.")
+        }
+        #endif
+        return try await perform { try $0.details(itemId: item.id) }
+    }
+
+    /// Saves all of a login's fields. Returns a note if someone else changed it first, in
+    /// which case nothing was saved.
+    func update(
+        _ item: ItemSummary, name: String, username: String, url: String, password: String,
+        notes: String
+    ) async throws -> String? {
+        let id = item.id
+        let outcome = try await perform {
+            try $0.updateLogin(
+                itemId: id, name: name, username: username, url: url, password: password,
+                notes: notes)
+        }
         await reloadLocal()
+        return conflictNote(outcome, doing: "your changes weren't saved")
+    }
+
+    /// Deletes a login for everyone who can open it. Returns a note if someone else changed
+    /// it first, in which case nothing was deleted.
+    func delete(_ item: ItemSummary) async throws -> String? {
+        let id = item.id
+        let outcome = try await perform { try $0.deleteLogin(itemId: id) }
+        if case .saved = outcome, selectedItemID == id {
+            selectedItemID = nil
+        }
+        await reloadLocal()
+        return conflictNote(outcome, doing: "it wasn't deleted")
+    }
+
+    private func conflictNote(_ outcome: SaveOutcome, doing: String) -> String? {
         switch outcome {
         case .saved:
             return nil
         case .conflict(_, let author):
-            return "\(author) changed this password first, so yours wasn't saved. Copying it "
-                + "now gives you their version; change it again if you still need to."
+            return "\(author) changed this login first, so \(doing). You now have their "
+                + "version; look at it, then try again if you still need to."
         }
     }
 

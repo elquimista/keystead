@@ -89,7 +89,9 @@ keystead share Bank 2
 
 # Bob
 keystead ls
-keystead show "AWS root"
+keystead show "AWS root"             # the password; --notes for the notes
+keystead edit "AWS root"             # new password; or --rename, --username, --url, --notes
+keystead rm Bank                     # delete for everyone who can open it (asks first)
 ```
 
 A login added without `--folder` is yours alone until you share it. `keystead share`

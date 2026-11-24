@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use keystead_ffi::{
-    CoreError, DeviceSigner, PasswordChange, Vault, account_secret_from_recovery_words,
-    new_device_id, parse_invite, recovery_words,
+    CoreError, DeviceSigner, SaveOutcome, Vault, account_secret_from_recovery_words, new_device_id,
+    parse_invite, recovery_words,
 };
 use keystead_server::AppState;
 use p256::ecdsa::signature::Signer as _;
@@ -165,6 +165,7 @@ fn an_owner_sets_up_invites_approves_and_shares() {
             "root@example.com".into(),
             "https://aws.amazon.com".into(),
             "s3cret".into(),
+            String::new(),
         )
         .unwrap();
     assert_eq!(
@@ -187,7 +188,7 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     let change = member
         .change_password(items[0].id.clone(), "rotated".into())
         .unwrap();
-    assert!(matches!(change, PasswordChange::Saved { version: 2 }));
+    assert!(matches!(change, SaveOutcome::Saved { version: 2 }));
     owner.sync().unwrap();
     assert_eq!(owner.password(items[0].id.clone()).unwrap(), "rotated");
 
@@ -199,6 +200,7 @@ fn an_owner_sets_up_invites_approves_and_shares() {
             String::new(),
             String::new(),
             "own".into(),
+            "PIN 1234".into(),
         )
         .unwrap();
     let bank = owner
@@ -224,7 +226,56 @@ fn an_owner_sets_up_invites_approves_and_shares() {
         .unwrap();
     assert!(shared.shared_with_me);
     assert_eq!(shared.owner.as_deref(), Some("Olivia"));
-    assert_eq!(member.password(shared.id).unwrap(), "own");
+    assert_eq!(member.password(shared.id.clone()).unwrap(), "own");
+
+    // The member edits every field; the owner sees the new version, notes included.
+    let details = member.details(shared.id.clone()).unwrap();
+    assert_eq!(details.notes, "PIN 1234");
+    let saved = member
+        .update_login(
+            shared.id.clone(),
+            "Bank (joint)".into(),
+            "mo@example.com".into(),
+            "https://bank.example.com".into(),
+            "new".into(),
+            "PIN 5678".into(),
+        )
+        .unwrap();
+    assert!(matches!(saved, SaveOutcome::Saved { version: 3 }));
+    owner.sync().unwrap();
+    let edited = owner
+        .items()
+        .unwrap()
+        .into_iter()
+        .find(|item| item.id == shared.id)
+        .unwrap();
+    assert_eq!(
+        (edited.name.as_str(), edited.username.as_str()),
+        ("Bank (joint)", "mo@example.com")
+    );
+    assert_eq!(owner.details(shared.id.clone()).unwrap().notes, "PIN 5678");
+
+    // Deleting it removes it for both of them.
+    assert!(matches!(
+        owner.delete_login(shared.id.clone()).unwrap(),
+        SaveOutcome::Saved { version: 4 }
+    ));
+    assert!(
+        owner
+            .items()
+            .unwrap()
+            .iter()
+            .all(|item| item.id != shared.id)
+    );
+    member.sync().unwrap();
+    assert!(
+        member
+            .items()
+            .unwrap()
+            .iter()
+            .all(|item| item.id != shared.id)
+    );
+    assert!(member.details(shared.id).is_err());
 }
 
 #[test]
@@ -250,6 +301,7 @@ fn an_owner_recovers_on_a_new_mac_from_the_kit() {
             String::new(),
             String::new(),
             "s3cret".into(),
+            String::new(),
         )
         .unwrap();
     let identity = owner.identity().unwrap();

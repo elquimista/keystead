@@ -8,8 +8,10 @@ struct SheetContent: View {
         switch sheet {
         case .addLogin(let folder):
             AddLoginSheet(model: model, folder: folder)
-        case .changePassword(let item):
-            ChangePasswordSheet(model: model, item: item)
+        case .editLogin(let item):
+            EditLoginSheet(model: model, item: item)
+        case .deleteLogin(let item):
+            DeleteLoginSheet(model: model, item: item)
         case .shareLogin(let item):
             ShareLoginSheet(model: model, item: item)
         case .newFolder:
@@ -134,6 +136,7 @@ private struct AddLoginSheet: View {
     @State private var username = ""
     @State private var url = ""
     @State private var password = ""
+    @State private var notes = ""
 
     var body: some View {
         SheetScaffold(
@@ -142,7 +145,7 @@ private struct AddLoginSheet: View {
         ) {
             try await model.addLogin(
                 folder: folder, name: name.trimmed, username: username.trimmed, url: url.trimmed,
-                password: password)
+                password: password, notes: notes)
             return true
         } content: {
             Form {
@@ -157,6 +160,7 @@ private struct AddLoginSheet: View {
                 TextField("Username", text: $username, prompt: Text("Optional"))
                 TextField("Website", text: $url, prompt: Text("Optional, https://…"))
                 PasswordField(title: "Password", password: $password)
+                NotesField(notes: $notes)
             }
             Text(folder.map { "Everyone \u{201C}\($0)\u{201D} is shared with will see this login." }
                 ?? "Only you can see this login until you share it.")
@@ -166,36 +170,170 @@ private struct AddLoginSheet: View {
     }
 }
 
-private struct ChangePasswordSheet: View {
+/// Notes on a login: a few lines, kept secret like the password.
+private struct NotesField: View {
+    @Binding var notes: String
+
+    var body: some View {
+        TextField("Notes", text: $notes, prompt: Text("Optional"), axis: .vertical)
+            .lineLimit(3...8)
+    }
+}
+
+/// Changes any of a login's fields. Its folder and who can open it stay as they are.
+private struct EditLoginSheet: View {
     let model: AppModel
     let item: ItemSummary
+    @State private var name: String
+    @State private var username: String
+    @State private var url: String
     @State private var password = ""
+    @State private var notes = ""
+    /// The password and notes as they were, once decrypted; until then there's nothing to
+    /// edit or save.
+    @State private var original: LoginDetails?
+    @State private var loadError: String?
     /// Set when someone else changed it first; the sheet then only offers to close.
     @State private var conflict: String?
 
+    init(model: AppModel, item: ItemSummary) {
+        self.model = model
+        self.item = item
+        _name = State(initialValue: item.name)
+        _username = State(initialValue: item.username)
+        _url = State(initialValue: item.url)
+    }
+
+    private var changed: Bool {
+        name.trimmed != item.name || username.trimmed != item.username || url.trimmed != item.url
+            || password != original?.password || notes != original?.notes
+    }
+
     var body: some View {
         SheetScaffold(
-            title: "Change Password for \u{201C}\(item.name)\u{201D}",
+            title: "Edit \u{201C}\(item.name)\u{201D}",
             actionTitle: conflict == nil ? "Save" : "Close",
-            canAct: conflict != nil || !password.isEmpty,
+            canAct: conflict != nil
+                || (original != nil && changed && !name.trimmed.isEmpty && !password.isEmpty),
             showsCancel: conflict == nil
         ) {
             if conflict != nil { return true }
-            conflict = try await model.changePassword(of: item, to: password)
+            conflict = try await model.update(
+                item, name: name.trimmed, username: username.trimmed, url: url.trimmed,
+                password: password, notes: notes)
             return conflict == nil
         } content: {
             if let conflict {
                 Text(conflict)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let loadError {
+                Label(loadError, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+            } else if original == nil {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
             } else {
                 Form {
-                    PasswordField(title: "New password", password: $password)
+                    LabeledContent("Folder", value: item.folder ?? "None")
+                    TextField("Name", text: $name)
+                    TextField("Username", text: $username, prompt: Text("Optional"))
+                    TextField("Website", text: $url, prompt: Text("Optional, https://…"))
+                    PasswordField(title: "Password", password: $password)
+                    NotesField(notes: $notes)
                 }
-                Text("Change it on the website or service too, if you haven't already.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if password != original?.password {
+                    Text("Change it on the website or service too, if you haven't already.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
+        .task {
+            do {
+                let details = try await model.details(of: item)
+                password = details.password
+                notes = details.notes
+                original = details
+            } catch {
+                loadError = describe(error)
+            }
+        }
+    }
+}
+
+/// Asks before deleting a login, and says who loses it.
+private struct DeleteLoginSheet: View {
+    let model: AppModel
+    let item: ItemSummary
+    @Environment(\.dismiss) private var dismiss
+    @State private var busy = false
+    @State private var note: String?
+
+    /// Who loses the login, and that it's for good, in a sentence.
+    private var consequence: String {
+        let people = ListFormatter.localizedString(byJoining: item.sharedWith)
+        if let folder = item.folder {
+            let who = item.sharedWith.isEmpty
+                ? "everyone in \u{201C}\(folder)\u{201D}"
+                : "everyone in \u{201C}\(folder)\u{201D} and for \(people)"
+            return "It's deleted for \(who), and can't be brought back."
+        }
+        if item.sharedWithMe {
+            let others = ([item.owner].compactMap { $0 } + item.sharedWith)
+            let who = others.isEmpty
+                ? "everyone it's shared with"
+                : ListFormatter.localizedString(byJoining: others)
+            return "It's deleted for \(who) as well as for you, and can't be brought back."
+        }
+        if item.sharedWith.isEmpty {
+            return "Only you have this login. Once deleted, it can't be brought back."
+        }
+        return "It's deleted for you and for \(people), and can't be brought back."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Delete \u{201C}\(item.name)\u{201D}?")
+                .font(.title3.weight(.semibold))
+            if let note {
+                Text(note)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button("Close") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                }
+            } else {
+                Text(consequence)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    if busy {
+                        ProgressView().controlSize(.small)
+                    }
+                    // Return cancels; deleting takes a deliberate click.
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                    Button("Delete", role: .destructive) {
+                        Task { await delete() }
+                    }
+                    .disabled(busy)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private func delete() async {
+        busy = true
+        do {
+            note = try await model.delete(item)
+            if note == nil { dismiss() }
+        } catch {
+            note = describe(error)
+        }
+        busy = false
     }
 }
 

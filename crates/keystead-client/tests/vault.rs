@@ -532,6 +532,71 @@ fn one_login_from_a_folder_can_be_shared_alone() {
     );
     let aws = rows.iter().find(|row| row.name == "AWS root").unwrap();
     assert_eq!(aws.shared_with, ["Bob"]);
+
+    // Deleting removes it for everyone who could open it; after that it can't be saved.
+    alice.delete(old.id).unwrap();
+    assert!(alice.list().unwrap().iter().all(|row| row.id != old.id));
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap().is_empty());
+    let (overview, details) = login("AWS root", "back");
+    assert!(alice.update(old.id, &overview, &details).is_err());
+
+    // A login still in the old format can be deleted too.
+    let (overview, details) = login("Legacy", "pw");
+    let legacy = EncryptedItem::seal_format_1(
+        ItemVersion {
+            id: ItemId::random(),
+            folder_id: Some(folder_id),
+            owner: None,
+            version: 1,
+            author: alice.whoami().user_id,
+        },
+        &folder_key,
+        &keys,
+        &overview,
+        &details,
+    )
+    .unwrap();
+    let _: EncryptedItem = client
+        .put(
+            &format!("/v1/items/{}", legacy.id),
+            &PutItemRequest {
+                base_version: None,
+                item: legacy.clone(),
+            },
+        )
+        .unwrap();
+    alice.sync().unwrap();
+    assert!(matches!(
+        alice.delete(legacy.id).unwrap(),
+        EditOutcome::Saved { version: 2 }
+    ));
+    assert!(alice.list().unwrap().iter().all(|row| row.name != "Legacy"));
+
+    // Editing every field keeps the folder and who it's shared with; a name is required.
+    let database = alice
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.name == "Database")
+        .unwrap();
+    let (mut overview, mut details) = alice.open_item(database.id).unwrap();
+    overview.name = "Database (prod)".into();
+    overview.url = "postgres://db.example.com".into();
+    details.notes = "Rotated monthly".into();
+    assert!(matches!(
+        alice.update(database.id, &overview, &details).unwrap(),
+        EditOutcome::Saved { version: 2 }
+    ));
+    let (overview, details) = alice.open_item(database.id).unwrap();
+    assert_eq!(overview.name, "Database (prod)");
+    assert_eq!(details.notes, "Rotated monthly");
+    assert_eq!(details.password, "db-pass");
+    assert!(
+        alice
+            .update(database.id, &Overview::default(), &details)
+            .is_err()
+    );
 }
 
 fn rand_core_rng() -> impl p256::elliptic_curve::rand_core::CryptoRngCore {

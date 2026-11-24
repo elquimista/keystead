@@ -10,7 +10,9 @@ account back on a new Mac with a Recovery Kit.
 - **Main window:** on first launch, a welcome screen to join a team with an invite, set
   up a new one with the server's setup code, or recover an account with a Recovery Kit. Then folders and people on the left, logins
   and their details on the right. Double-click a login (or press Return) to copy its
-  password.
+  password. Each login can be edited (name, username, website, password and notes; notes
+  stay hidden until shown, like the password), shared with one person, or deleted for
+  everyone who can open it.
 - **Menu bar icon:** a quick panel to search and copy without opening the window.
 - **Dock icon:** shown by default. Settings > General can turn it off, leaving only the
   menu bar icon.

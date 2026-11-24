@@ -166,8 +166,10 @@ private struct LoginList: View {
                         Button("Copy Username") { model.copy(item.username) }
                             .disabled(item.username.isEmpty)
                         Divider()
-                        Button("Change Password…") { model.sheet = .changePassword(item) }
+                        Button("Edit…") { model.sheet = .editLogin(item) }
                         Button("Share…") { model.sheet = .shareLogin(item) }
+                        Divider()
+                        Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
                     }
                 } primaryAction: { ids in
                     // Double-click or Return copies the password.
@@ -235,7 +237,10 @@ private struct LoginList: View {
 private struct LoginDetail: View {
     let model: AppModel
     let item: ItemSummary
-    @State private var revealed: String?
+    /// The password and notes, decrypted only once asked for.
+    @State private var details: LoginDetails?
+    @State private var showsPassword = false
+    @State private var showsNotes = false
     @State private var error: String?
 
     var body: some View {
@@ -258,16 +263,16 @@ private struct LoginDetail: View {
                 }
                 LabeledContent("Password") {
                     HStack {
-                        Text(revealed ?? "••••••••••••")
+                        Text(showsPassword ? details?.password ?? "" : "••••••••••••")
                             .font(.system(.body, design: .monospaced))
                             .textSelection(.enabled)
                         Button {
-                            Task { await toggleReveal() }
+                            Task { await reveal(\.showsPassword) }
                         } label: {
-                            Image(systemName: revealed == nil ? "eye" : "eye.slash")
+                            Image(systemName: showsPassword ? "eye.slash" : "eye")
                         }
                         .buttonStyle(.borderless)
-                        .help(revealed == nil ? "Show password" : "Hide password")
+                        .help(showsPassword ? "Hide password" : "Show password")
                         Button {
                             Task { await model.copyPassword(of: item) }
                         } label: {
@@ -291,6 +296,27 @@ private struct LoginDetail: View {
                         }
                     }
                 }
+                LabeledContent("Notes") {
+                    HStack(alignment: .firstTextBaseline) {
+                        if showsNotes {
+                            let notes = details?.notes ?? ""
+                            Text(notes.isEmpty ? "None" : notes)
+                                .foregroundStyle(notes.isEmpty ? .secondary : .primary)
+                                .textSelection(.enabled)
+                                .multilineTextAlignment(.trailing)
+                        } else {
+                            Text("Hidden")
+                                .foregroundStyle(.secondary)
+                        }
+                        Button {
+                            Task { await reveal(\.showsNotes) }
+                        } label: {
+                            Image(systemName: showsNotes ? "eye.slash" : "eye")
+                        }
+                        .buttonStyle(.borderless)
+                        .help(showsNotes ? "Hide notes" : "Show notes")
+                    }
+                }
                 // A login shared with you may sit in a folder of theirs you can't see.
                 if item.folder != nil || !item.sharedWithMe {
                     LabeledContent("Folder", value: item.folder ?? "None")
@@ -312,8 +338,10 @@ private struct LoginDetail: View {
             }
             Section {
                 HStack {
-                    Button("Change Password…") { model.sheet = .changePassword(item) }
+                    Button("Edit…") { model.sheet = .editLogin(item) }
                     Button("Share…") { model.sheet = .shareLogin(item) }
+                    Spacer()
+                    Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
                 }
             }
             if let error {
@@ -323,8 +351,10 @@ private struct LoginDetail: View {
         }
         .formStyle(.grouped)
         .onChange(of: model.items) {
-            // The password may have changed; don't keep showing the old one.
-            revealed = nil
+            // The login may have changed; don't keep showing the old password or notes.
+            details = nil
+            showsPassword = false
+            showsNotes = false
         }
     }
 
@@ -332,13 +362,17 @@ private struct LoginDetail: View {
         ListFormatter.localizedString(byJoining: item.sharedWith)
     }
 
-    private func toggleReveal() async {
-        if revealed != nil {
-            revealed = nil
+    /// Shows or hides the password or the notes, decrypting both the first time.
+    private func reveal(_ shown: ReferenceWritableKeyPath<LoginDetail, Bool>) async {
+        if self[keyPath: shown] {
+            self[keyPath: shown] = false
             return
         }
         do {
-            revealed = try await model.password(of: item)
+            if details == nil {
+                details = try await model.details(of: item)
+            }
+            self[keyPath: shown] = true
             error = nil
         } catch let failure {
             error = describe(failure)
