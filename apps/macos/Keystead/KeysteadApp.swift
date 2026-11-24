@@ -4,12 +4,15 @@ import SwiftUI
 @main
 struct KeysteadApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var model = AppModel()
+    @State private var model = KeysteadApp.launchModel()
 
     var body: some Scene {
         // The main window: setting up, browsing and adding logins, people and sharing.
         Window(appName, id: MainWindow.id) {
             MainView(model: model)
+            #if DEBUG
+                .task { await DebugSnapshots.runIfRequested(model) }
+            #endif
         }
         .defaultSize(width: 920, height: 580)
         .commands { AppCommands(model: model) }
@@ -32,6 +35,21 @@ struct KeysteadApp: App {
         Settings {
             SettingsView(model: model)
         }
+    }
+}
+
+extension KeysteadApp {
+    /// The model to start with. Debug builds launched with `-demo` get made-up data.
+    @MainActor
+    static func launchModel() -> AppModel {
+        #if DEBUG
+        let arguments = CommandLine.arguments
+        if let index = arguments.firstIndex(of: "-demo") {
+            let alone = arguments.dropFirst(index + 1).first == "alone"
+            return AppModel.demo(alone: alone)
+        }
+        #endif
+        return AppModel()
     }
 }
 
@@ -80,6 +98,15 @@ private struct AppCommands: Commands {
             Button("New Folder…") { model.sheet = .newFolder }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(model.phase != .unlocked)
+        }
+        CommandGroup(before: .sidebar) {
+            Button("All Logins") { model.section = .allLogins }
+                .keyboardShortcut("1")
+                .disabled(model.phase != .unlocked)
+            Button("People") { model.section = .people }
+                .keyboardShortcut("2")
+                .disabled(model.phase != .unlocked)
+            Divider()
         }
         CommandMenu("Vault") {
             Button("Sync") { Task { await model.refresh() } }

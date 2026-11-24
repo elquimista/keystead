@@ -2,40 +2,31 @@ import SwiftUI
 
 /// The unlocked vault: folders and people on the left, then a list, then the details.
 struct VaultView: View {
-    enum SidebarItem: Hashable {
-        case all
-        case folder(String)
-        case people
-    }
-
-    let model: AppModel
-    @State private var sidebar: SidebarItem? = .all
-    @State private var selectedItem: ItemSummary.ID?
-    @State private var selectedUser: User.ID?
+    @Bindable var model: AppModel
     @State private var search = ""
 
     var body: some View {
         NavigationSplitView {
-            Sidebar(model: model, selection: $sidebar)
+            Sidebar(model: model, selection: $model.section)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210)
         } content: {
-            switch sidebar ?? .all {
-            case .all:
-                LoginList(model: model, folder: nil, search: $search, selection: $selectedItem)
+            switch model.section ?? .allLogins {
+            case .allLogins:
+                LoginList(model: model, folder: nil, search: $search, selection: $model.selectedItemID)
             case .folder(let folder):
-                LoginList(model: model, folder: folder, search: $search, selection: $selectedItem)
+                LoginList(model: model, folder: folder, search: $search, selection: $model.selectedItemID)
             case .people:
-                PeopleList(model: model, selection: $selectedUser)
+                PeopleList(model: model, selection: $model.selectedUserID)
             }
         } detail: {
-            if sidebar == .people {
-                if let user = model.users.first(where: { $0.id == selectedUser }) {
+            if model.section == .people {
+                if let user = model.users.first(where: { $0.id == model.selectedUserID }) {
                     PersonDetail(model: model, user: user)
                 } else {
                     Text("Select a person")
                         .foregroundStyle(.secondary)
                 }
-            } else if let item = model.items.first(where: { $0.id == selectedItem }) {
+            } else if let item = model.items.first(where: { $0.id == model.selectedItemID }) {
                 LoginDetail(model: model, item: item)
                     .id(item.id)
             } else {
@@ -64,8 +55,8 @@ struct VaultView: View {
         }
         .onChange(of: model.folders) {
             // A folder that's gone (renamed, or access removed) can't stay selected.
-            if case .folder(let folder) = sidebar, !model.folders.contains(folder) {
-                sidebar = .all
+            if case .folder(let folder) = model.section, !model.folders.contains(folder) {
+                model.section = .allLogins
             }
         }
     }
@@ -73,16 +64,16 @@ struct VaultView: View {
 
 private struct Sidebar: View {
     let model: AppModel
-    @Binding var selection: VaultView.SidebarItem?
+    @Binding var selection: AppModel.Section?
 
     var body: some View {
         List(selection: $selection) {
             Label("All Logins", systemImage: "key")
-                .tag(VaultView.SidebarItem.all)
+                .tag(AppModel.Section.allLogins)
             Section("Folders") {
                 ForEach(model.folders, id: \.self) { folder in
                     Label(folder, systemImage: "folder")
-                        .tag(VaultView.SidebarItem.folder(folder))
+                        .tag(AppModel.Section.folder(folder))
                         .contextMenu {
                             Button("New Login in \u{201C}\(folder)\u{201D}…") {
                                 model.sheet = .addLogin(folder: folder)
@@ -103,7 +94,7 @@ private struct Sidebar: View {
             Section("Team") {
                 Label("People", systemImage: "person.2")
                     .badge(model.isOwner ? model.users.filter { !$0.approved }.count : 0)
-                    .tag(VaultView.SidebarItem.people)
+                    .tag(AppModel.Section.people)
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -315,19 +306,33 @@ private struct PeopleList: View {
     @Binding var selection: User.ID?
 
     var body: some View {
-        List(model.users, selection: $selection) { user in
-            HStack(spacing: 8) {
-                Image(systemName: "person.crop.circle")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(user.userId == model.identity?.userId ? "\(user.name) (you)" : user.name)
-                    Text(status(of: user))
-                        .font(.caption)
-                        .foregroundStyle(user.approved ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+        List(selection: $selection) {
+            ForEach(model.users) { user in
+                HStack(spacing: 8) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(user.userId == model.identity?.userId ? "\(user.name) (you)" : user.name)
+                        Text(status(of: user))
+                            .font(.caption)
+                            .foregroundStyle(user.approved ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+                    }
                 }
+                .padding(.vertical, 2)
             }
-            .padding(.vertical, 2)
+            if model.isOwner && model.users.count <= 1 {
+                // An ordinary row, not a bottom inset: wrapping text in a List's inset
+                // breaks the split view's layout, blanking the sidebar too.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("It's just you so far. Invite your team; they'll show up here once "
+                        + "they've joined, ready for you to approve.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("Invite Someone…") { model.sheet = .invite }
+                }
+                .padding(.vertical, 8)
+            }
         }
         .navigationTitle("People")
         .toolbar {
@@ -340,19 +345,6 @@ private struct PeopleList: View {
                     }
                     .help("Invite someone to your team")
                 }
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if model.isOwner && model.users.count <= 1 {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("It's just you so far. Invite your team; they'll show up here once "
-                        + "they've joined, ready for you to approve.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Invite Someone…") { model.sheet = .invite }
-                }
-                .padding()
             }
         }
     }

@@ -18,6 +18,13 @@ final class AppModel {
         case unlocked
     }
 
+    /// What the main window shows, chosen in its sidebar or the Go menu.
+    enum Section: Hashable {
+        case allLogins
+        case folder(String)
+        case people
+    }
+
     /// The sheet the main window shows, if any.
     enum Sheet: Identifiable {
         case addLogin(folder: String?)
@@ -52,6 +59,10 @@ final class AppModel {
     /// The login whose password is on the clipboard, until it's cleared.
     private(set) var copiedName: String?
     var sheet: Sheet?
+    var section: Section? = .allLogins
+    /// The login or person selected in the main window's list.
+    var selectedItemID: ItemSummary.ID?
+    var selectedUserID: User.ID?
     /// The menu bar panel's search.
     var search = ""
 
@@ -188,6 +199,9 @@ final class AppModel {
         users = []
         search = ""
         sheet = nil
+        section = .allLogins
+        selectedItemID = nil
+        selectedUserID = nil
         copiedName = nil
         message = nil
         phase = .locked
@@ -308,6 +322,45 @@ final class AppModel {
         return try await Task.detached { try work(vault) }.value
     }
 }
+
+#if DEBUG
+extension AppModel {
+    /// A model filled with made-up data and no vault, for looking at the main window
+    /// without a server or Touch ID. Debug builds only: launch with `-demo`, or with
+    /// `-demo alone` for an owner who hasn't invited anyone yet. Actions that need the
+    /// vault fail with "Keystead is locked."
+    static func demo(alone: Bool) -> AppModel {
+        let model = AppModel()
+        model.phase = .unlocked
+        model.identity = Identity(
+            name: "Olivia", userId: 1, fingerprint: "ab12-cd34-ef56-7890-abcd",
+            server: "https://keys.example.com", isOwner: true)
+        model.users = [User(userId: 1, name: "Olivia", approved: true, isOwner: true)]
+        if !alone {
+            model.users += [
+                User(userId: 2, name: "Mo", approved: true, isOwner: false),
+                User(userId: 3, name: "Sam", approved: false, isOwner: false),
+            ]
+            model.folders = ["Production", "Staging"]
+            model.items = [
+                ItemSummary(
+                    id: "00000000-0000-4000-8000-000000000001", folder: "Production",
+                    name: "AWS root", username: "root@example.com", url: "https://aws.amazon.com"),
+                ItemSummary(
+                    id: "00000000-0000-4000-8000-000000000002", folder: "Staging",
+                    name: "Database", username: "admin", url: ""),
+            ]
+        }
+        return model
+    }
+
+    /// Shows both notices at the bottom of the window, as after a failed sync and a copy.
+    func showDemoNotices() {
+        message = "Couldn't sync (couldn't reach the server). Showing the copy on this Mac."
+        copiedName = "AWS root"
+    }
+}
+#endif
 
 extension ItemSummary: Identifiable {}
 

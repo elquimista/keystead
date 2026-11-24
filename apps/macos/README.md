@@ -54,6 +54,18 @@ The script writes `Frameworks/KeysteadCore.xcframework` (a universal static libr
 its C header) and `Keystead/Generated/keystead_ffi.swift` (the Swift API). Both are
 generated, so git ignores them.
 
+## Looking at the UI without a server
+
+Debug builds have a demo mode with made-up data, no server and no Touch ID. `-demo` shows
+a team of three; `-demo alone` shows an owner who hasn't invited anyone yet. Add
+`-snapshot` to step the window through its sections, save a picture of each plus how its
+columns are laid out, and quit:
+
+```sh
+build/DerivedData/Build/Products/Debug/Keystead.app/Contents/MacOS/Keystead -demo -snapshot
+open ~/Library/Containers/io.github.elquimista.Keystead.dev/Data/tmp/snapshots
+```
+
 ## Icons
 
 `scripts/make-icons.swift` draws every icon into `Keystead/Assets.xcassets`: the app icon

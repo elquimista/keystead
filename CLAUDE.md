@@ -18,6 +18,10 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
   ad hoc and never trigger a keychain prompt.
 - Launching the app or unlocking shows UI or a Touch ID prompt on the user's screen; say
   so before doing it
+- To check the main window without a server or Touch ID, run the Debug app with
+  `-demo [alone] -snapshot` (see apps/macos/README.md); it writes pictures to
+  `~/Library/Containers/io.github.elquimista.Keystead.dev/Data/tmp/snapshots` and quits.
+  Its window still shows on screen briefly, so say so first.
 - Server in Docker: `docker compose up -d`, setup code in `docker compose logs server`.
   For throwaway checks use another project and port
   (`KEYSTEAD_PORT=18090 docker compose -p keystead-check up -d`, then `down -v`) so the
