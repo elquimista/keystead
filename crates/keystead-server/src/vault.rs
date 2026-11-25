@@ -19,9 +19,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use keystead_core::api::{
     AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, DeletedItem, DeletedItems,
-    Exposure, Exposures, FolderMember, FolderRole, GroupMember, GroupShare, ItemHistory, ItemRole,
-    KeyLink, Member, Members, PutItemRequest, RekeyRequest, Restore, RestoreFolderKeyRequest, Role,
-    RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage, ViaGroup,
+    EscrowedFolder, Exposure, Exposures, FolderEscrowRequest, FolderMember, FolderRole,
+    GroupMember, GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members, PutItemRequest,
+    RekeyRequest, Restore, RestoreFolderKeyRequest, Role, RoleRequest, Roles, SavedVersion,
+    SyncEntry, SyncPage, ViaGroup,
 };
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
@@ -336,7 +337,9 @@ pub(crate) async fn rekey(
 
 /// `PUT /v1/folders/{folder_id}/members/{user_id}/key`: anyone who can open the folder
 /// gives a member who recovered a copy of its current key for their new keys, so they
-/// have it back without waiting for a manager. Only for members waiting for one.
+/// have it back without waiting for a manager. Only for members waiting for one. A member
+/// gives it to themselves only from the copy of its current key they put in escrow, for a
+/// folder nobody else could open.
 pub(crate) async fn restore_folder_key(
     State(state): State<AppState>,
     auth: Auth,
@@ -345,11 +348,28 @@ pub(crate) async fn restore_folder_key(
 ) -> Result<StatusCode, ApiError> {
     let user = UserId(user_id);
     let mut tx = state.writer.begin().await?;
-    require(
-        folder_role(&mut tx, auth.user_id, folder_id).await?,
-        Role::View,
-        "give someone this folder's key",
-    )?;
+    if user == auth.user_id {
+        let escrowed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM folder_escrow
+                            WHERE user_id = ? AND folder_id = ? AND generation = ?)",
+        )
+        .bind(user.0)
+        .bind(folder_id.to_string())
+        .bind(request.generation)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !escrowed {
+            return Err(ApiError::Forbidden(
+                "only someone who can open this folder can give it back to you".into(),
+            ));
+        }
+    } else {
+        require(
+            folder_role(&mut tx, auth.user_id, folder_id).await?,
+            Role::View,
+            "give someone this folder's key",
+        )?;
+    }
     let waiting: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM members WHERE user_id = ? AND folder_id = ? AND pending)",
     )
@@ -375,7 +395,74 @@ pub(crate) async fn restore_folder_key(
     .bind(folder_id.to_string())
     .execute(&mut *tx)
     .await?;
+    // The copy in escrow was sealed with their earlier personal key; a new one follows.
+    sqlx::query("DELETE FROM folder_escrow WHERE user_id = ? AND folder_id = ?")
+        .bind(user.0)
+        .bind(folder_id.to_string())
+        .execute(&mut *tx)
+        .await?;
     reconcile(&mut tx, user).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /v1/folders/{folder_id}/escrow`: a member with escrow on keeps a copy of the
+/// folder's current key, sealed with their personal key, for a folder nobody else can
+/// open, so it can come back after a recovery. Conflict if nobody needs it now.
+pub(crate) async fn put_folder_escrow(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(folder_id): Path<FolderId>,
+    Json(request): Json<FolderEscrowRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    let escrow_on: bool = sqlx::query_scalar("SELECT escrow_on FROM users WHERE id = ?")
+        .bind(auth.user_id.0)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !escrow_on {
+        return Err(ApiError::Conflict("your escrow is off".into()));
+    }
+    let member: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM members WHERE user_id = ? AND folder_id = ? AND NOT pending)",
+    )
+    .bind(auth.user_id.0)
+    .bind(folder_id.to_string())
+    .fetch_one(&mut *tx)
+    .await?;
+    if !member {
+        return Err(ApiError::Forbidden(
+            "you aren't in this folder yourself".into(),
+        ));
+    }
+    let shared: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM access WHERE folder_id = ? AND user_id != ?)",
+    )
+    .bind(folder_id.to_string())
+    .bind(auth.user_id.0)
+    .fetch_one(&mut *tx)
+    .await?;
+    if shared {
+        return Err(ApiError::Conflict(
+            "someone else can open this folder, and can give it back to you".into(),
+        ));
+    }
+    if request.generation != generation(&mut tx, folder_id).await? {
+        return Err(ApiError::Conflict(
+            "the folder's key changed; sync and try again".into(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO folder_escrow (user_id, folder_id, generation, sealed) VALUES (?, ?, ?, ?)
+         ON CONFLICT (user_id, folder_id)
+         DO UPDATE SET generation = excluded.generation, sealed = excluded.sealed",
+    )
+    .bind(auth.user_id.0)
+    .bind(folder_id.to_string())
+    .bind(request.generation)
+    .bind(serde_json::to_string(&request.sealed)?)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1388,6 +1475,22 @@ pub(crate) async fn sync(
     .bind(user)
     .fetch_one(&mut *tx)
     .await?;
+    // Folders only this user can open, with no copy of their current key in escrow.
+    let escrow_folders: Vec<String> = sqlx::query_scalar(
+        "SELECT m.folder_id FROM members m
+         JOIN users u ON u.id = m.user_id
+         JOIN folders f ON f.id = m.folder_id
+         WHERE m.user_id = ?1 AND NOT m.pending AND u.escrow_on
+           AND NOT EXISTS (SELECT 1 FROM access a
+                           WHERE a.folder_id = m.folder_id AND a.user_id != ?1)
+           AND NOT EXISTS (SELECT 1 FROM folder_escrow e
+                           WHERE e.user_id = ?1 AND e.folder_id = m.folder_id
+                             AND e.generation = f.generation)
+         ORDER BY m.folder_id",
+    )
+    .bind(user)
+    .fetch_all(&mut *tx)
+    .await?;
     let roles = if more {
         None
     } else {
@@ -1408,12 +1511,17 @@ pub(crate) async fn sync(
             .map(serde_json::from_str)
             .transpose()?,
         escrow_needed,
+        escrow_folders: escrow_folders
+            .iter()
+            .map(|folder_id| parse_folder(folder_id))
+            .collect::<Result<_, _>>()?,
     }))
 }
 
 /// Copies people who recovered are waiting for, that `user` can make them: of the key of
 /// a folder `user` can open, of the secret of a group `user` is in, and of logins `user`
-/// can change, by saving them again.
+/// can change, by saving them again. And after `user` recovered, the folders only they
+/// could open, from the copies of their keys they put in escrow.
 async fn restore_needed(conn: &mut SqliteConnection, user: UserId) -> Result<Restore, ApiError> {
     let folders: Vec<(String, i64)> = sqlx::query_as(
         "SELECT m.folder_id, m.user_id FROM members m
@@ -1444,7 +1552,27 @@ async fn restore_needed(conn: &mut SqliteConnection, user: UserId) -> Result<Res
             items.push(item.id);
         }
     }
+    let escrowed: Vec<(String, u32, String)> = sqlx::query_as(
+        "SELECT e.folder_id, e.generation, e.sealed FROM folder_escrow e
+         JOIN members m ON m.user_id = e.user_id AND m.folder_id = e.folder_id
+         JOIN folders f ON f.id = e.folder_id
+         WHERE e.user_id = ? AND m.pending AND e.generation = f.generation
+         ORDER BY e.folder_id",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
     Ok(Restore {
+        escrowed: escrowed
+            .into_iter()
+            .map(|(folder_id, generation, sealed)| {
+                Ok(EscrowedFolder {
+                    folder_id: parse_folder(&folder_id)?,
+                    generation,
+                    sealed: serde_json::from_str(&sealed)?,
+                })
+            })
+            .collect::<Result<_, ApiError>>()?,
         folders: folders
             .into_iter()
             .map(|(folder_id, user_id)| {
@@ -1918,6 +2046,12 @@ async fn reconcile_with(
             .bind(user.0)
             .bind(folder_id)
             .bind(seq)
+            .execute(&mut *conn)
+            .await?;
+        // Whoever had it in escrow no longer needs to: this user can give it back.
+        sqlx::query("DELETE FROM folder_escrow WHERE folder_id = ? AND user_id != ?")
+            .bind(folder_id)
+            .bind(user.0)
             .execute(&mut *conn)
             .await?;
         sqlx::query(

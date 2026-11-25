@@ -205,16 +205,32 @@ someone leaves, since the old keys were on a lost device. A save always wraps ea
 person's copy again for their current keys. Until a copy is made, it gives no access.
 Nothing goes on passwords to change: it's the same person.
 
-**Escrow** (opt-in, not for the owner) lets the person's own items outside folders come
-back too: their app wraps the account's personal key for the owner
-(`PUT /v1/escrow`, `DELETE /v1/escrow` to stop), with HPKE, info
-`keystead/personal-key/v1` and associated data
+**Escrow** (opt-in, not for the owner) lets what only the person could open come back
+too: their own items outside folders, and folders nobody else can open. Their app wraps
+the account's personal key for the owner (`PUT /v1/escrow`, `DELETE /v1/escrow` to stop),
+with HPKE, info `keystead/personal-key/v1` and associated data
 `transcript("keystead/personal-key/v1", user id)`. When approving, the owner's app opens
 it and wraps it the same way for the new keys; the person's sync gets it as
 `recovered_key`, opens their own items with it and saves them again under the new
-personal key, and escrows the new one (`escrow_needed`). The owner can open an escrowed
-account's own items at any time; apps say so. Without escrow, those items don't come back
-for them.
+personal key, and escrows the new one (`escrow_needed`).
+
+For each folder they're in themselves that nobody else can open, directly or through a
+group, their app also puts a copy of the folder's current key in escrow, sealed with
+XChaCha20-Poly1305 under the personal key with associated data
+`transcript("keystead/folder-key/escrow/v1", folder id, generation, user id)`
+(`PUT /v1/folders/{id}/escrow`). Each sync's `escrow_folders` lists the folders whose
+current key has no copy yet: new ones, and ones with a new key. The server drops a
+folder's copy as soon as anyone else can open the folder, since they can give it back,
+and when the person leaves it or turns escrow off. After a recovery, `restore.escrowed`
+lists these folders with their copies. The person's app opens each with the earlier
+personal key and gives itself the folder back with the same
+`PUT /v1/folders/{id}/members/{user}/key`, which the server allows for oneself only with a
+copy at the folder's current generation. The folder then gets a new key like any other
+the old keys opened, and a copy of that goes back in escrow. Folders reached only through
+a group stay out of escrow.
+
+The owner can open an escrowed account's own items and those folders at any time; apps
+say so. Without escrow, they don't come back for them.
 
 ## Items
 
@@ -470,6 +486,7 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/recovery/state` | `RecoveryTokenRequest` | `RecoveryState` | The new device, with the token |
 | `PUT /v1/escrow` | `EscrowRequest` | 204 | Anyone but the owner, for themselves |
 | `DELETE /v1/escrow` | | 204 | Anyone, for themselves |
+| `PUT /v1/folders/{id}/escrow` | `FolderEscrowRequest` | 204 | Anyone with escrow on, for a folder only they can open |
 | `POST /v1/device-transfers` | | `DeviceTransfer` | Any signed-in device |
 | `POST /v1/device-transfers/join` | `JoinDeviceTransferRequest` | 204 | The new device, with the token |
 | `GET /v1/device-transfers/{id}` | | `DeviceTransferState` | The account that started it |
@@ -481,7 +498,7 @@ codes (400, 401, 403, 404, 409).
 | `GET /v1/folders/{id}/members` | | `Members` | Folder members |
 | `PUT /v1/folders/{id}/members/{user}` | `RoleRequest` | 204 | Folder managers |
 | `DELETE /v1/folders/{id}/members/{user}` | | 204 | Folder managers, or the member themselves |
-| `PUT /v1/folders/{id}/members/{user}/key` | `RestoreFolderKeyRequest` | 204 | Folder members, for someone who recovered |
+| `PUT /v1/folders/{id}/members/{user}/key` | `RestoreFolderKeyRequest` | 204 | Folder members, for someone who recovered; themselves, from escrow |
 | `DELETE /v1/folders/{id}?logins=N` | | 204 | Folder managers |
 | `POST /v1/folders/{id}/rekey` | `RekeyRequest` | 204 | Folder managers |
 | `POST /v1/folders/{id}/groups` | `AddFolderGroupRequest` | 204 | Folder managers |
@@ -666,8 +683,8 @@ consistent snapshot:
 
 The last page also carries the user's `roles` (in each folder, and on each item shared
 with them or their groups directly, the highest of the ways in), and every page
-`rekey_needed` and `group_rekey_needed`, plus, from 0.13.0, `restore`, `recovered_key`
-and `escrow_needed` (see Recovering with the owner's help). The prototype in
+`rekey_needed` and `group_rekey_needed`, plus, from 0.13.0, `restore`, `recovered_key`,
+`escrow_needed` and `escrow_folders` (see Recovering with the owner's help). The prototype in
 `prototypes/change-feed` shows why each item arrives exactly once.
 
 ## Not in this format yet

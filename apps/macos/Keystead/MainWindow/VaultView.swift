@@ -874,11 +874,11 @@ private struct PersonDetail: View {
                 }
                 if !identity.isOwner {
                     Section("If you lose everything") {
-                        Toggle("Let the owner recover my own logins", isOn: escrow(identity))
+                        Toggle("Let the owner recover my own logins and folders", isOn: escrow(identity))
                         Text("If you lose every device and your Recovery Kit, the owner can help you "
                             + "back in, and what's shared with you comes back. With this on, your "
-                            + "own logins outside folders come back too, but the owner can open "
-                            + "them at any time.")
+                            + "own logins and the folders only you are in come back too, but the "
+                            + "owner can open them at any time.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -939,8 +939,10 @@ private struct PersonDetail: View {
                                 + "help them back in with new keys.")
                             .fixedSize(horizontal: false, vertical: true)
                         Text(user.escrow
-                            ? "Their own logins would come back too: they keep them in escrow with you."
-                            : "Their own logins outside folders wouldn't come back: escrow is off.")
+                            ? "Their own logins and folders would come back too: they keep them "
+                                + "in escrow with you."
+                            : "Their own logins and the folders only they're in wouldn't come "
+                                + "back: escrow is off.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Button(user.recovering ? "Continue Recovery…" : "Help Recover…") {

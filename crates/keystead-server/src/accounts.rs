@@ -876,6 +876,13 @@ pub(crate) async fn approve_recovery(
         .bind(user.0)
         .execute(&mut *tx)
         .await?;
+    // Folders in escrow open with the earlier personal key; without it they can't.
+    if request.personal_key.is_none() {
+        sqlx::query("DELETE FROM folder_escrow WHERE user_id = ?")
+            .bind(user.0)
+            .execute(&mut *tx)
+            .await?;
+    }
     recovered(&mut tx, user).await?;
     tx.commit().await?;
     state
@@ -909,15 +916,22 @@ pub(crate) async fn put_escrow(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `DELETE /v1/escrow`: turns escrow off and forgets the escrowed key.
+/// `DELETE /v1/escrow`: turns escrow off and forgets the escrowed key, and the folder
+/// keys sealed with it.
 pub(crate) async fn delete_escrow(
     State(state): State<AppState>,
     auth: Auth,
 ) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
     sqlx::query("UPDATE users SET escrow = NULL, escrow_on = 0 WHERE id = ?")
         .bind(auth.user_id.0)
-        .execute(&state.writer)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM folder_escrow WHERE user_id = ?")
+        .bind(auth.user_id.0)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

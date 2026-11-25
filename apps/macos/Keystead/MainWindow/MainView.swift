@@ -298,8 +298,8 @@ struct WelcomeView: View {
         AnyView(VStack(alignment: .leading, spacing: 10) {
             Text("Lost every device and your Recovery Kit? Ask your team's owner to help you "
                 + "recover, then paste the line they send you. You'll get new keys: what's "
-                + "shared with you comes back, and your own logins too if you let the owner "
-                + "keep them in escrow.")
+                + "shared with you comes back, and your own logins and folders too if you let "
+                + "the owner keep them in escrow.")
                 .fixedSize(horizontal: false, vertical: true)
             TextField(
                 "", text: $recoveryLine,

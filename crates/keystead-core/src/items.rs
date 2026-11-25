@@ -56,12 +56,62 @@ impl FolderKey {
             .map_err(|_| Error::Decrypt)?;
         Ok(FolderKey::from_bytes(bytes))
     }
+
+    /// A copy of this key, the key of `generation`, sealed with `me`'s personal key for
+    /// escrow: for a folder only they can open, so it comes back with their own logins
+    /// after a recovery.
+    pub fn seal_for_escrow(
+        &self,
+        account: &AccountKeys,
+        folder: FolderId,
+        generation: u32,
+        me: UserId,
+    ) -> Sealed {
+        seal_part(
+            &account.personal_cipher(),
+            &escrow_aad(folder, generation, me),
+            self.as_bytes(),
+        )
+    }
+}
+
+impl PersonalKey {
+    /// Opens a folder key `me` sealed with this personal key for escrow.
+    pub fn open_escrowed_folder_key(
+        &self,
+        sealed: &Sealed,
+        folder: FolderId,
+        generation: u32,
+        me: UserId,
+    ) -> Result<FolderKey, Error> {
+        let plaintext = Zeroizing::new(open_part(
+            &self.cipher(),
+            &escrow_aad(folder, generation, me),
+            sealed,
+        )?);
+        let bytes: [u8; 32] = plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Decrypt)?;
+        Ok(FolderKey::from_bytes(bytes))
+    }
 }
 
 fn chain_aad(folder: FolderId, generation: u32) -> Vec<u8> {
     transcript(
         "keystead/folder-key-chain/v1",
         &[folder.as_bytes(), &generation.to_be_bytes()],
+    )
+}
+
+fn escrow_aad(folder: FolderId, generation: u32, me: UserId) -> Vec<u8> {
+    transcript(
+        "keystead/folder-key/escrow/v1",
+        &[
+            folder.as_bytes(),
+            &generation.to_be_bytes(),
+            &me.to_be_bytes(),
+        ],
     )
 }
 
@@ -963,6 +1013,41 @@ mod tests {
         assert!(old.open_previous(&link, folder, 1).is_err());
         assert!(new.open_previous(&link, folder, 2).is_err());
         assert!(new.open_previous(&link, FolderId::random(), 1).is_err());
+    }
+
+    #[test]
+    fn an_escrowed_folder_key_opens_with_its_owners_personal_key_only() {
+        let f = fixture();
+        let folder = FolderId::random();
+        let key = FolderKey::generate();
+        let me = UserId(2);
+        let sealed = key.seal_for_escrow(&f.alice, folder, 3, me);
+        let personal = f.alice.personal_key();
+        let opened = personal
+            .open_escrowed_folder_key(&sealed, folder, 3, me)
+            .unwrap();
+        assert_eq!(opened.as_bytes(), key.as_bytes());
+        assert!(
+            personal
+                .open_escrowed_folder_key(&sealed, folder, 2, me)
+                .is_err()
+        );
+        assert!(
+            personal
+                .open_escrowed_folder_key(&sealed, FolderId::random(), 3, me)
+                .is_err()
+        );
+        assert!(
+            personal
+                .open_escrowed_folder_key(&sealed, folder, 3, UserId(3))
+                .is_err()
+        );
+        assert!(
+            f.bob
+                .personal_key()
+                .open_escrowed_folder_key(&sealed, folder, 3, me)
+                .is_err()
+        );
     }
 
     #[test]

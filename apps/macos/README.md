@@ -60,8 +60,9 @@ account back on a new Mac with a Recovery Kit.
   the line it shows; on a new Mac they choose Recover an Account › No Recovery Kit?, paste
   it, and read the new fingerprint to the owner, who approves it. Their old devices stop
   working, and what's shared with them comes back as everyone's Keystead syncs. Under
-  People › You, "Let the owner recover my own logins" (escrow) brings their own logins
-  back too, at the cost of the owner being able to open them. A device they still have
+  People › You, "Let the owner recover my own logins and folders" (escrow) brings back
+  their own logins and the folders only they are in too, at the cost of the owner being
+  able to open them. A device they still have
   warns them and can cancel a recovery they didn't ask for. Needs a 0.13.0 server, and
   every app updated first.
 - **Exporting:** File › Export Logins… saves every login you can open to a KeePass file

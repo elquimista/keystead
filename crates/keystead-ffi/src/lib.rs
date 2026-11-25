@@ -87,7 +87,8 @@ pub struct Identity {
     pub is_owner: bool,
     /// The owner's fingerprint, as this device pinned it. Recovery kits carry it.
     pub owner_fingerprint: String,
-    /// The owner keeps this account's personal key in escrow, to recover its own logins.
+    /// The owner keeps this account's personal key in escrow, to recover its own logins and
+    /// the folders only it is in.
     pub escrow: bool,
     /// The owner has started a recovery for this account; cancel it if it wasn't asked for.
     pub recovering: bool,
@@ -98,7 +99,7 @@ pub struct Identity {
 pub struct PendingRecovery {
     /// The new keys' fingerprint, once the person has used the line on their new device.
     pub fingerprint: Option<String>,
-    /// Their own logins come back too: their personal key is in escrow.
+    /// Their own logins and folders come back too: their personal key is in escrow.
     pub escrow: bool,
 }
 
@@ -106,7 +107,7 @@ pub struct PendingRecovery {
 #[derive(uniffi::Record)]
 pub struct RecoveryApproval {
     pub name: String,
-    /// Their own logins come back: their personal key was in escrow.
+    /// Their own logins and folders come back: their personal key was in escrow.
     pub own_logins: bool,
 }
 
@@ -169,7 +170,7 @@ pub struct User {
     pub is_owner: bool,
     /// The owner removed them from the team.
     pub removed: bool,
-    /// They let the owner recover their own logins (escrow).
+    /// They let the owner recover their own logins and folders (escrow).
     pub escrow: bool,
     /// The owner has started a recovery for them that isn't approved yet.
     pub recovering: bool,
@@ -739,7 +740,8 @@ impl Vault {
         Ok(self.vault()?.cancel_recovery(UserId(user_id))?)
     }
 
-    /// Lets the owner recover this account's own logins (escrow), or stops it.
+    /// Lets the owner recover this account's own logins and the folders only it is in
+    /// (escrow), or stops it. Turning it on syncs, to put those folders in escrow.
     pub fn set_escrow(&self, on: bool) -> Result<(), CoreError> {
         Ok(self.vault()?.set_escrow(on)?)
     }

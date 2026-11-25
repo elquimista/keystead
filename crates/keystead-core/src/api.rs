@@ -271,6 +271,14 @@ pub struct RestoreGroupSecretRequest {
     pub wrapped_secret: WrappedKey,
 }
 
+/// `PUT /v1/folders/{folder_id}/escrow`: the folder's current key sealed with the caller's
+/// personal key, for a folder nobody else can open, while the caller has escrow on.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FolderEscrowRequest {
+    pub generation: u32,
+    pub sealed: Sealed,
+}
+
 /// Copies someone who recovered is waiting for, that this user can give them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Restore {
@@ -281,12 +289,27 @@ pub struct Restore {
     /// Logins shared with them directly, to save again with a copy for their new keys.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<ItemId>,
+    /// After this user recovered: folders only they could open, with the copy of each
+    /// one's key they put in escrow, to give themselves back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escrowed: Vec<EscrowedFolder>,
 }
 
 impl Restore {
     pub fn is_empty(&self) -> bool {
-        self.folders.is_empty() && self.groups.is_empty() && self.items.is_empty()
+        self.folders.is_empty()
+            && self.groups.is_empty()
+            && self.items.is_empty()
+            && self.escrowed.is_empty()
     }
+}
+
+/// A folder's key at `generation`, sealed with its member's personal key for escrow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EscrowedFolder {
+    pub folder_id: FolderId,
+    pub generation: u32,
+    pub sealed: Sealed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -635,6 +658,10 @@ pub struct SyncPage {
     /// This user has escrow on, but no personal key is in escrow (after a recovery).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub escrow_needed: bool,
+    /// This user has escrow on, and these folders only they can open have no copy of
+    /// their current key in escrow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escrow_folders: Vec<FolderId>,
 }
 
 /// A user's role in each folder they're in and on each login shared with them directly,

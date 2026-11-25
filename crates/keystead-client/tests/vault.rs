@@ -2004,3 +2004,103 @@ fn without_escrow_only_what_was_shared_comes_back_and_a_recovery_can_be_cancelle
         .collect();
     assert_eq!(names, ["Database"]);
 }
+
+#[test]
+fn escrow_brings_back_folders_only_they_could_open_after_every_recovery() {
+    use keystead_client::{claim_recovery, finish_recovery};
+
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let alice_id = alice.whoami().user_id;
+
+    // Bob keeps Personal and Notes to himself, and shares Team with Alice. Personal is
+    // older than his escrow and Notes newer; renaming Personal gives it a new key.
+    bob.create_folder("Personal").unwrap();
+    let (overview, details) = login("Router", "router-pw");
+    bob.add(Some("Personal"), overview, details).unwrap();
+    bob.set_escrow(true).unwrap();
+    bob.create_folder("Notes").unwrap();
+    let (overview, details) = login("Locker", "locker-pw");
+    bob.add(Some("Notes"), overview, details).unwrap();
+    bob.create_folder("Team").unwrap();
+    let (overview, details) = login("Printer", "printer-pw");
+    bob.add(Some("Team"), overview, details).unwrap();
+    bob.sync().unwrap();
+    bob.share_folder("Team", alice_id, Role::Edit).unwrap();
+    bob.rename_folder("Personal", "Home").unwrap();
+    bob.sync().unwrap();
+
+    // A recovery, and how many folders the new device gave new keys on its first sync.
+    let recover = |alice: &mut Vault, profile: &str, escrow: bool| -> (Vault, usize) {
+        let line = alice.start_recovery(bob_id).unwrap();
+        let secret = AccountSecret::generate();
+        let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
+        let device_id = DeviceId::random();
+        let claim = claim_recovery(
+            &line,
+            &new_device(&fixture, &secret, device_id, signer.clone()),
+        )
+        .unwrap();
+        let approved = alice.approve_recovery(bob_id, &claim.fingerprint).unwrap();
+        assert_eq!(approved.own_logins, escrow);
+        let mut vault = finish_recovery(
+            &fixture.profile(profile),
+            new_device(&fixture, &secret, device_id, signer),
+            &line,
+        )
+        .unwrap();
+        let rekeyed = vault.sync().unwrap().rekeyed;
+        (vault, rekeyed)
+    };
+    let names = |vault: &Vault| {
+        let mut names: Vec<String> = vault
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        names.sort();
+        names
+    };
+    let password = |vault: &Vault, name: &str| {
+        let id = vault.find_item(name, None).unwrap();
+        vault.open_item(id).unwrap().1.password.clone()
+    };
+
+    // He loses everything. His own folders are back on the new device at once, under
+    // their new name, with new keys, as the lost device had the old ones. Team, which
+    // Alice can open, waits for her app to give it back.
+    let (mut new_bob, rekeyed) = recover(&mut alice, "new-bob", true);
+    assert_eq!(new_bob.folders().unwrap(), ["Home", "Notes"]);
+    assert_eq!(rekeyed, 2);
+    assert_eq!(names(&new_bob), ["Locker", "Router"]);
+    assert_eq!(password(&new_bob, "Router"), "router-pw");
+    assert_eq!(password(&new_bob, "Locker"), "locker-pw");
+    alice.sync().unwrap();
+    new_bob.sync().unwrap();
+    assert_eq!(new_bob.folders().unwrap(), ["Home", "Notes", "Team"]);
+    assert_eq!(password(&new_bob, "Printer"), "printer-pw");
+
+    // They got new keys, and those went back in escrow, sealed with his new personal key:
+    // they come back after another recovery too.
+    let (mut newer_bob, _) = recover(&mut alice, "newer-bob", true);
+    assert_eq!(newer_bob.folders().unwrap(), ["Home", "Notes"]);
+    assert_eq!(password(&newer_bob, "Router"), "router-pw");
+    assert!(
+        alice.to_change().unwrap().is_empty(),
+        "it's the same person"
+    );
+
+    // Without escrow they don't.
+    alice.sync().unwrap();
+    newer_bob.sync().unwrap();
+    newer_bob.set_escrow(false).unwrap();
+    let (mut last_bob, _) = recover(&mut alice, "last-bob", false);
+    assert!(last_bob.folders().unwrap().is_empty());
+    alice.sync().unwrap();
+    last_bob.sync().unwrap();
+    assert_eq!(last_bob.folders().unwrap(), ["Team"]);
+}

@@ -829,16 +829,37 @@ impl Vault {
             }
             (folders, _, duties) = self.pull(&mut summary)?;
         }
-        // Someone lost access to these folders: give each a new key, so what's saved from
-        // now on is out of their reach. If it fails, the next sync asks again.
+        let rekeyed = self.rekey_folders(folders, &mut summary);
+        // This account's own folders came back from escrow after a recovery: take them,
+        // give them new keys too, as the lost device had the old ones, and put those in
+        // escrow.
+        if self.do_recovery_duties(duties, &rekeyed, &mut summary) {
+            let (folders, _, duties) = self.pull(&mut summary)?;
+            let rekeyed = self.rekey_folders(folders, &mut summary);
+            self.put_folders_in_escrow(duties.escrow_folders, &rekeyed, &mut summary);
+        }
+        Ok(summary)
+    }
+
+    /// Someone lost access to these folders: gives each a new key, so what's saved from now
+    /// on is out of their reach. If it fails, the next sync asks again. Returns the folders
+    /// that got one.
+    fn rekey_folders(
+        &mut self,
+        folders: Vec<FolderId>,
+        summary: &mut SyncSummary,
+    ) -> Vec<FolderId> {
+        let mut rekeyed = Vec::new();
         for folder_id in folders {
             match self.rekey(folder_id) {
-                Ok(()) => summary.rekeyed += 1,
+                Ok(()) => {
+                    summary.rekeyed += 1;
+                    rekeyed.push(folder_id);
+                }
                 Err(error) => summary.rekey_problems.push(format!("{error:#}")),
             }
         }
-        self.do_recovery_duties(duties, &mut summary);
-        Ok(summary)
+        rekeyed
     }
 
     /// The directory, the team's groups, and the feed until caught up; then saves. Returns
@@ -881,6 +902,7 @@ impl Vault {
                     restore: page.restore,
                     recovered_key: page.recovered_key,
                     escrow_needed: page.escrow_needed,
+                    escrow_folders: page.escrow_folders,
                 };
                 break (page.rekey_needed, page.group_rekey_needed, duties);
             }

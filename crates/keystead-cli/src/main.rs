@@ -71,7 +71,7 @@ enum Command {
     /// Help someone recover who lost every device and their recovery kit (owner only)
     #[command(subcommand)]
     Recovery(RecoveryCommand),
-    /// Whether the owner can recover your own logins if you lose everything (escrow)
+    /// Whether the owner can recover your own logins and folders if you lose everything (escrow)
     Escrow {
         #[arg(value_enum)]
         set: Option<OnOff>,
@@ -577,9 +577,9 @@ fn run(cli: Cli) -> Result<()> {
                     println!(
                         "{}",
                         if request.escrow {
-                            "Their own logins come back too: they turned escrow on."
+                            "Their own logins and folders come back too: they turned escrow on."
                         } else {
-                            "Their own logins won't come back: escrow is off."
+                            "Their own logins and the folders only they're in won't come back: escrow is off."
                         }
                     );
                 }
@@ -596,7 +596,10 @@ fn run(cli: Cli) -> Result<()> {
                 approved.name
             );
             if !approved.own_logins {
-                println!("Their own logins outside folders don't come back: escrow was off.");
+                println!(
+                    "Their own logins and the folders only they were in don't come back: \
+                     escrow was off."
+                );
             }
         }
         Command::Recovery(RecoveryCommand::Cancel { user_id }) => {
@@ -608,10 +611,14 @@ fn run(cli: Cli) -> Result<()> {
             if on {
                 println!(
                     "Escrow is on: if you lose every device and your recovery kit, the owner can \
-                     bring back your own logins. The owner can open them at any time."
+                     bring back your own logins and the folders only you are in. The owner can \
+                     open them at any time."
                 );
             } else {
-                println!("Escrow is off: only your recovery kit can bring back your own logins.");
+                println!(
+                    "Escrow is off: only your recovery kit can bring back your own logins and \
+                     the folders only you are in."
+                );
             }
         }
         Command::Recover { server, owner } => {

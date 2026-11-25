@@ -788,7 +788,8 @@ private struct HelpRecoverSheet: View {
                     + "work. What's shared with them comes back as everyone's Keystead syncs.")
                     .fixedSize(horizontal: false, vertical: true)
                 if !approved.ownLogins {
-                    Text("Their own logins outside folders don't come back: escrow was off.")
+                    Text("Their own logins and the folders only they were in don't come back: "
+                        + "escrow was off.")
                         .foregroundStyle(.secondary)
                 }
             } else if !loaded {
@@ -803,8 +804,9 @@ private struct HelpRecoverSheet: View {
                     .font(.system(.body, design: .monospaced))
                     .autocorrectionDisabled()
                 Text(request.escrow
-                    ? "Their own logins come back too: they're in escrow."
-                    : "Their own logins outside folders won't come back: escrow is off.")
+                    ? "Their own logins and folders come back too: they're in escrow."
+                    : "Their own logins and the folders only they're in won't come back: "
+                        + "escrow is off.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {

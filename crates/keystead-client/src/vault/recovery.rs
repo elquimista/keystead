@@ -2,16 +2,17 @@
 //! recovery kit. The owner starts it and sends a one-time line; the new device makes new
 //! keys and sends them; the owner approves them after checking their fingerprint with the
 //! person. Then everyone's apps make the person copies, for the new keys, of what was
-//! shared with them, and the person's own logins come back if they let the owner keep
-//! their personal key in escrow.
+//! shared with them. If they let the owner keep their personal key in escrow, their own
+//! logins come back too, and the folders only they could open, whose keys their app kept
+//! in escrow sealed with that personal key.
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{
-    ApproveRecoveryRequest, ClaimRecoveryRequest, Directory, EscrowRequest, RecoveryClaimed,
-    RecoveryInProgress, RecoveryStarted, RecoveryState, RecoveryTokenRequest, Restore,
-    RestoreFolderKeyRequest, RestoreGroupSecretRequest,
+    ApproveRecoveryRequest, ClaimRecoveryRequest, Directory, EscrowRequest, EscrowedFolder,
+    FolderEscrowRequest, RecoveryClaimed, RecoveryInProgress, RecoveryStarted, RecoveryState,
+    RecoveryTokenRequest, Restore, RestoreFolderKeyRequest, RestoreGroupSecretRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
@@ -89,7 +90,8 @@ pub struct RecoveryClaim {
 pub struct RecoveryRequest {
     /// The new keys' fingerprint, once the person has used the line on their new device.
     pub fingerprint: Option<String>,
-    /// Their personal key is in escrow, so their own logins can come back.
+    /// Their personal key is in escrow, so their own logins and the folders only they
+    /// could open can come back.
     pub escrow: bool,
 }
 
@@ -97,7 +99,8 @@ pub struct RecoveryRequest {
 #[derive(Debug)]
 pub struct ApprovedRecovery {
     pub name: String,
-    /// Their own logins come back: their personal key was in escrow, and opened.
+    /// Their own logins and the folders only they could open come back: their personal
+    /// key was in escrow, and opened.
     pub own_logins: bool,
 }
 
@@ -108,6 +111,8 @@ pub(super) struct RecoveryDuties {
     pub restore: Restore,
     pub recovered_key: Option<WrappedKey>,
     pub escrow_needed: bool,
+    /// Folders only this account can open, whose current key isn't in escrow yet.
+    pub escrow_folders: Vec<FolderId>,
 }
 
 /// Sends a new account's keys and this device's key for a recovery the owner started.
@@ -282,26 +287,40 @@ impl Vault {
         }
     }
 
-    /// Lets the team owner recover this account's own logins after a recovery (escrow),
-    /// or stops it. The owner could then open them at any time. Not for the owner.
+    /// Lets the team owner recover this account's own logins, and the folders only it can
+    /// open, after a recovery (escrow), or stops it. The owner could then open them at any
+    /// time. Not for the owner. Turning it on syncs, to put those folders in escrow.
     pub fn set_escrow(&mut self, on: bool) -> Result<()> {
+        if on {
+            self.escrow_personal_key()?;
+            self.sync()?;
+            return Ok(());
+        }
+        match self.call(|client| client.delete::<()>("/v1/escrow"))? {
+            Ok(()) => {}
+            Err(Failure::Status {
+                code: 404 | 405, ..
+            }) => bail!(NEEDS_0_13),
+            Err(error) => return Err(error.into()),
+        }
+        self.users()?;
+        Ok(())
+    }
+
+    /// Wraps this account's personal key for the owner, and turns escrow on.
+    fn escrow_personal_key(&mut self) -> Result<()> {
         if self.profile.user_id == OWNER {
             bail!(
                 "the owner's own logins can't be in escrow; the owner's recovery kit is the way \
                  back"
             );
         }
-        let result = if on {
-            let request = EscrowRequest {
-                wrapped_key: self
-                    .keys
-                    .wrap_personal_key_for(&self.profile.owner, self.profile.user_id)?,
-            };
-            self.call(|client| client.put::<_, ()>("/v1/escrow", &request))?
-        } else {
-            self.call(|client| client.delete::<()>("/v1/escrow"))?
+        let request = EscrowRequest {
+            wrapped_key: self
+                .keys
+                .wrap_personal_key_for(&self.profile.owner, self.profile.user_id)?,
         };
-        match result {
+        match self.call(|client| client.put::<_, ()>("/v1/escrow", &request))? {
             Ok(()) => {}
             Err(Failure::Status {
                 code: 404 | 405, ..
@@ -313,10 +332,18 @@ impl Vault {
     }
 
     /// Does what a sync asked: gives people who recovered copies for their new keys, and
-    /// after this account recovered, takes its earlier personal key and seals its own
-    /// logins with the new one, and puts the new one in escrow if escrow is on. Failures
-    /// are reported; the next sync asks again.
-    pub(super) fn do_recovery_duties(&mut self, duties: RecoveryDuties, summary: &mut SyncSummary) {
+    /// after this account recovered, takes its earlier personal key, gives itself back the
+    /// folders it had in escrow, seals its own logins with the new key, and puts the new
+    /// one in escrow if escrow is on. Then puts folders only this account can open in
+    /// escrow: those the sync listed, and those that just got a new key here. Failures are
+    /// reported; the next sync asks again. Returns whether any folder came back, which the
+    /// next sync brings.
+    pub(super) fn do_recovery_duties(
+        &mut self,
+        duties: RecoveryDuties,
+        rekeyed: &[FolderId],
+        summary: &mut SyncSummary,
+    ) -> bool {
         for share in duties.restore.folders {
             let name = self.profile.user_name(share.user_id);
             match self.restore_folder(share.folder_id, share.user_id) {
@@ -356,6 +383,15 @@ impl Vault {
                 summary.rekey_problems.push(format!("{error:#}"));
             }
         }
+        let mut came_back = false;
+        for escrowed in &duties.restore.escrowed {
+            match self.restore_own_folder(escrowed) {
+                Ok(()) => came_back = true,
+                Err(error) => summary.rekey_problems.push(format!(
+                    "couldn't get one of your folders back from escrow ({error:#})"
+                )),
+            }
+        }
         for item_id in self.own_items_under_earlier_keys() {
             if let Err(error) = self.resave(item_id) {
                 summary.rekey_problems.push(format!(
@@ -364,12 +400,97 @@ impl Vault {
             }
         }
         if duties.escrow_needed
-            && let Err(error) = self.set_escrow(true)
+            && let Err(error) = self.escrow_personal_key()
         {
             summary.rekey_problems.push(format!(
                 "couldn't put your personal key in escrow ({error:#})"
             ));
         }
+        self.put_folders_in_escrow(duties.escrow_folders, rekeyed, summary);
+        came_back
+    }
+
+    /// Puts a copy of each folder's current key, sealed with this account's personal key,
+    /// in escrow: the folders a sync listed, and if escrow is on, those that just got a new
+    /// key here, whose copy in escrow is for the old one. The server takes it only for a
+    /// folder nobody else can open, and says so otherwise; that's not a problem.
+    pub(super) fn put_folders_in_escrow(
+        &mut self,
+        mut folders: Vec<FolderId>,
+        rekeyed: &[FolderId],
+        summary: &mut SyncSummary,
+    ) {
+        if self.whoami().escrow {
+            for folder_id in rekeyed {
+                if !folders.contains(folder_id) {
+                    folders.push(*folder_id);
+                }
+            }
+        }
+        for folder_id in folders {
+            match self.put_folder_in_escrow(folder_id) {
+                Ok(()) => {}
+                Err(error) => summary
+                    .rekey_problems
+                    .push(format!("couldn't put a folder's key in escrow ({error:#})")),
+            }
+        }
+    }
+
+    fn put_folder_in_escrow(&mut self, folder_id: FolderId) -> Result<()> {
+        let Some(record) = self.profile.folders.get(&folder_id) else {
+            // Not here yet; the next sync asks again.
+            return Ok(());
+        };
+        let generation = record.generation;
+        let key = self
+            .profile
+            .folder_key(&self.keys, &self.groups, folder_id)?;
+        let request = FolderEscrowRequest {
+            generation,
+            sealed: key.seal_for_escrow(&self.keys, folder_id, generation, self.profile.user_id),
+        };
+        let path = format!("/v1/folders/{folder_id}/escrow");
+        match self.call(|client| client.put::<_, ()>(&path, &request))? {
+            // Someone else can open it, or this account isn't in it itself.
+            Ok(())
+            | Err(Failure::Status {
+                code: 403 | 409, ..
+            }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Gives this account back a folder only it could open, from the copy of its key it put
+    /// in escrow before recovering, sealed with its earlier personal key.
+    fn restore_own_folder(&mut self, escrowed: &EscrowedFolder) -> Result<()> {
+        let me = self.profile.user_id;
+        let key = self
+            .profile
+            .recovered_personal_keys
+            .iter()
+            .filter_map(|wrapped| self.keys.unwrap_personal_key(wrapped, me).ok())
+            .find_map(|personal| {
+                personal
+                    .open_escrowed_folder_key(
+                        &escrowed.sealed,
+                        escrowed.folder_id,
+                        escrowed.generation,
+                        me,
+                    )
+                    .ok()
+            })
+            .context("its key in escrow doesn't open with your earlier personal key")?;
+        let request = RestoreFolderKeyRequest {
+            generation: escrowed.generation,
+            wrapped_key: self
+                .keys
+                .public()
+                .wrap_folder_key(&key, escrowed.folder_id)?,
+        };
+        let path = format!("/v1/folders/{}/members/{me}/key", escrowed.folder_id);
+        let () = self.call(|client| client.put(&path, &request))??;
+        Ok(())
     }
 
     /// The key of one of this account's own items whose owner's copy is sealed with an

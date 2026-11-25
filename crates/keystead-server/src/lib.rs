@@ -187,6 +187,8 @@ const MIGRATIONS: &[&str] = &[
     // 8 (0.12.0): moving items between folders. Members of the folder an item left are
     // told it moved, so their devices drop the copy that still says it's theirs.
     "ALTER TABLE item_leave_log ADD COLUMN moved INTEGER NOT NULL DEFAULT 0;",
+    // 9 (0.13.0): recovering with the owner's help. Retired keys keep old signatures
+    // checkable; copies wrapped for someone's old keys wait, pending, for new ones.
     "ALTER TABLE users ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE users ADD COLUMN escrow_on INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE users ADD COLUMN escrow TEXT;
@@ -214,6 +216,18 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE members ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE group_members ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE item_access ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;",
+    // 10 (0.13.0): escrow of folders only one person can open: their key sealed with that
+    // person's personal key. A copy goes when its member leaves the folder.
+    "CREATE TABLE folder_escrow (
+         user_id INTEGER NOT NULL,
+         folder_id TEXT NOT NULL,
+         generation INTEGER NOT NULL,
+         sealed TEXT NOT NULL,
+         PRIMARY KEY (user_id, folder_id),
+         FOREIGN KEY (user_id, folder_id) REFERENCES members (user_id, folder_id)
+             ON DELETE CASCADE
+     ) WITHOUT ROWID;
+     CREATE INDEX folder_escrow_folder ON folder_escrow (folder_id);",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -334,6 +348,10 @@ pub fn router(state: AppState) -> Router {
             put(vault::restore_folder_key),
         )
         .route("/v1/folders/{folder_id}/rekey", post(vault::rekey))
+        .route(
+            "/v1/folders/{folder_id}/escrow",
+            put(vault::put_folder_escrow),
+        )
         .route(
             "/v1/folders/{folder_id}/groups",
             post(vault::add_folder_group),

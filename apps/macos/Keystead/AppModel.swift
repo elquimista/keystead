@@ -456,7 +456,7 @@ final class AppModel {
         await refresh()
     }
 
-    /// Lets the owner recover your own logins if you lose everything, or stops it.
+    /// Lets the owner recover your own logins and folders if you lose everything, or stops it.
     func setEscrow(_ on: Bool) async throws {
         try await perform { try $0.setEscrow(on: on) }
         identity = try await perform { try $0.identity() }
