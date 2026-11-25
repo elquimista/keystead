@@ -12,6 +12,7 @@ mod vault;
 
 pub mod export;
 pub mod import;
+pub mod updates;
 
 pub use export::MIN_EXPORT_PASSPHRASE;
 pub use import::{ImportedLogin, read_kdbx};

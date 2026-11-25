@@ -228,6 +228,8 @@ final class AppModel {
     private let store = DeviceStore()
     private let clipboard = SecureClipboard()
     private var copiedNoticeTask: Task<Void, Never>?
+    /// Whether a newer Keystead is out.
+    let updates = Updates()
     #if DEBUG
     /// Demo mode: made-up data, no vault and no Touch ID.
     private(set) var isDemo = false
@@ -1791,6 +1793,7 @@ extension AppModel {
     func showDemoNotices() {
         message = "Couldn't sync (couldn't reach the server). Showing the copy on this Mac."
         copiedName = "AWS root"
+        updates.showDemo()
     }
 }
 #endif

@@ -13,6 +13,12 @@ struct KeysteadApp: App {
         _model = State(initialValue: model)
         autoLock = AutoLock(model: model)
         quickSearch = QuickSearch(model: model)
+        #if DEBUG
+        // Demo mode never asks GitHub.
+        if !model.isDemo { model.updates.startAutomaticChecks() }
+        #else
+        model.updates.startAutomaticChecks()
+        #endif
     }
 
     var body: some Scene {
@@ -101,6 +107,10 @@ private struct AppCommands: Commands {
     let model: AppModel
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates\u{2026}") { Task { await model.updates.checkFromMenu() } }
+                .disabled(model.updates.isChecking)
+        }
         CommandGroup(replacing: .newItem) {
             Button("New Login…") { model.sheet = .addLogin(folder: nil) }
                 .keyboardShortcut("n")

@@ -90,6 +90,13 @@ account back on a new Mac with a Recovery Kit.
   still in front to paste into. It
   unlocks with Touch ID first if needed. It uses Carbon's hot key API, which needs no
   Accessibility permission and works in the App Sandbox.
+- **Updates:** once a day (Settings › Updates, on by default) and from Keystead › Check for
+  Updates…, the app asks GitHub for this repository's latest release, sending only its name
+  and version as the user agent (`Keystead-macOS/0.13.1`). When a newer release has the Mac
+  app attached, the window, the menu bar panel and Settings say so, with Download… opening
+  the release's page; a closed notice stays closed until a newer version. Nothing is
+  downloaded or installed by the app itself. The check lives in `keystead-client`
+  (`updates.rs`); `cargo test -p keystead-client updates -- --ignored` asks GitHub for real.
 - **Menu bar icon:** a quick panel to search and copy without opening the window. Clicking
   a login copies its password, and so does Return for the first match.
 - **Dock icon:** shown by default. Settings > General can turn it off, leaving only the

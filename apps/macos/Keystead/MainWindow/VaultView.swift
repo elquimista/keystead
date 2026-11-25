@@ -1539,11 +1539,29 @@ private struct Notices: View {
                       systemImage: "checkmark.circle.fill")
                     .notice()
             }
+            if model.updates.showsNotice, let update = model.updates.available {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.tint)
+                    Text("\(appName) \(update.version) is available.")
+                    Button("Download\u{2026}") { model.updates.openPage() }
+                        .help("Open its page, with the app and what changed")
+                    Button {
+                        model.updates.dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Hide until a newer version is out")
+                }
+                .notice()
+            }
         }
         .frame(maxWidth: 520)
         .padding(.bottom, 16)
         .animation(.default, value: model.copiedName)
         .animation(.default, value: model.message)
+        .animation(.default, value: model.updates.showsNotice)
     }
 }
 

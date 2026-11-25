@@ -31,6 +31,20 @@ struct PanelView: View {
                 }
             }
             .padding(.horizontal, 10)
+            if model.updates.showsNotice, let update = model.updates.available {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.tint)
+                    Text("\(appName) \(update.version) is available")
+                        .font(.callout)
+                    Spacer()
+                    Button("Download\u{2026}") { model.updates.openPage() }
+                        .controlSize(.small)
+                        .help("Open its page, with the app and what changed")
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+            }
             if let message = model.message {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)

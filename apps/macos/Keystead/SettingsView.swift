@@ -9,7 +9,7 @@ struct SettingsView: View {
     }
 
     enum Tab: String {
-        case general, security, account
+        case general, security, account, updates
     }
 
     /// Where the last tab chosen is kept, so Settings opens on it again.
@@ -76,6 +76,11 @@ struct SettingsView: View {
                 .settingsTab()
                 .tabItem { Label("Account", systemImage: "person.crop.circle") }
                 .tag(Tab.account)
+
+            UpdateSettings(updates: model.updates)
+                .settingsTab()
+                .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+                .tag(Tab.updates)
         }
         .sheet(item: $sheet) { sheet in
             Group {
@@ -108,6 +113,73 @@ extension View {
             .scrollDisabled(true)
             .frame(width: 500)
             .windowFollowsHeight()
+    }
+}
+
+/// Which version this is, whether a newer one is out, and checking on its own: the app's
+/// own Software Update.
+private struct UpdateSettings: View {
+    let updates: Updates
+    @AppStorage(Updates.automaticKey) private var automatic = true
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent {
+                    if updates.isChecking {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else if updates.available != nil {
+                        Button("Download\u{2026}") { updates.openPage() }
+                            .help("Open its page, with the app and what changed")
+                    } else {
+                        Button("Check Now") { Task { await updates.checkNow() } }
+                    }
+                } label: {
+                    status
+                }
+                Toggle("Check for updates automatically", isOn: $automatic)
+            } header: {
+                PageHeader(title: appName, subtitle: "Version \(Updates.current)") {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 52, height: 52)
+                        .padding(-4)
+                }
+            } footer: {
+                SettingsFooter("Once a day, \(appName) asks GitHub whether a newer release is out, "
+                    + "sending only its version. Nothing is downloaded until you choose Download.")
+            }
+        }
+        .onChange(of: automatic) {
+            if automatic { Task { await updates.checkIfDue() } }
+        }
+    }
+
+    /// What the last check found, as System Settings' Software Update says it.
+    @ViewBuilder
+    private var status: some View {
+        if updates.isChecking {
+            Text("Checking for updates\u{2026}")
+            Text("Asking GitHub for the latest release.")
+        } else if let update = updates.available {
+            Text("\(appName) \(update.version) is available")
+            Text("Its page has the app and what changed.")
+        } else if let failure = updates.failure {
+            Text("Couldn't check for updates")
+            Text(failure)
+                .foregroundStyle(.orange)
+        } else if let lastChecked = updates.lastChecked {
+            Text("\(appName) is up to date")
+            // Kept current while the tab is open.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                Text(context.date.timeIntervalSince(lastChecked) < 60
+                    ? "Checked just now."
+                    : "Checked \(lastChecked, format: .relative(presentation: .named)).")
+            }
+        } else {
+            Text("Not checked yet")
+        }
     }
 }
 

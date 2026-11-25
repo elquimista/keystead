@@ -181,7 +181,7 @@ enum DebugSnapshots {
             }
         }
         if model.users.count > 1 {
-            report += await captureSettings(to: directory)
+            report += await captureSettings(model, to: directory)
             report += await capturePanel(model, to: directory)
             report += await probeSheets(model, to: directory)
         }
@@ -204,12 +204,12 @@ enum DebugSnapshots {
 
     /// Opens Settings from the app menu, as a person would, and saves each tab.
     @MainActor
-    private static func captureSettings(to directory: URL) async -> String {
+    private static func captureSettings(_ model: AppModel, to directory: URL) async -> String {
         guard let menu = NSApp.mainMenu?.items.first?.submenu,
             let index = menu.items.firstIndex(where: { $0.keyEquivalent == "," })
         else { return "settings: no Settings menu item\n" }
-        let tabs: [SettingsView.Tab] = [.general, .security, .account]
-        let titles = ["General", "Security", "Account"]
+        let tabs: [SettingsView.Tab] = [.general, .security, .account, .updates]
+        let titles = ["General", "Security", "Account", "Updates"]
         let earlier = UserDefaults.standard.string(forKey: SettingsView.tabKey)
         func settingsWindow() -> NSWindow? {
             NSApp.windows.first { $0.isVisible && titles.contains($0.title) }
@@ -226,6 +226,20 @@ enum DebugSnapshots {
             report += "settings-\(tab.rawValue): window \(Int(window.frame.width))x\(Int(window.frame.height))\n"
             save(window, to: directory.appending(path: "s-settings-\(tab.rawValue).png"))
         }
+        // The Updates tab, still showing, in each state a check can leave it in.
+        let hadUpdate = model.updates.available != nil
+        let states: [(String, Updates.DemoState)] = [
+            ("up-to-date", .upToDate), ("checking", .checking), ("failed", .failed),
+            ("unchecked", .unchecked), ("available", .available),
+        ]
+        for (name, state) in states {
+            model.updates.showDemo(state)
+            try? await Task.sleep(for: .seconds(0.6))
+            guard let window = settingsWindow() else { continue }
+            report += "settings-updates-\(name): window \(Int(window.frame.width))x\(Int(window.frame.height))\n"
+            save(window, to: directory.appending(path: "s-settings-updates-\(name).png"))
+        }
+        model.updates.showDemo(hadUpdate ? .available : .upToDate)
         if let window = settingsWindow() {
             report += "settings window: \(type(of: window)), controller "
                 + "\(window.contentViewController.map { String(describing: type(of: $0)) } ?? "none"), "
@@ -234,6 +248,7 @@ enum DebugSnapshots {
             // Tall to short and back, clicked as a person would.
             report += await probeResize(window, clicking: "General")
             report += await probeResize(window, clicking: "Account")
+            report += await probeResize(window, clicking: "Updates")
         }
         settingsWindow()?.close()
         UserDefaults.standard.set(earlier, forKey: SettingsView.tabKey)

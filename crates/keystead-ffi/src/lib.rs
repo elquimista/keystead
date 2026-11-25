@@ -1521,6 +1521,30 @@ pub fn core_version() -> String {
     keystead_core::VERSION.to_owned()
 }
 
+/// A newer Keystead, with the Mac app attached to its GitHub release.
+#[derive(uniffi::Record)]
+pub struct AppUpdate {
+    /// "0.14.0".
+    pub version: String,
+    /// The release's page: what changed, and how to install it.
+    pub page: String,
+    /// The Mac app's zip.
+    pub download: String,
+}
+
+/// Asks GitHub whether a newer Keystead than `current` (the app's version) is out with the
+/// Mac app, sending only the app's name and version. Blocks on the network.
+#[uniffi::export]
+pub fn check_for_app_update(current: String) -> Result<Option<AppUpdate>, CoreError> {
+    let user_agent = format!("Keystead-macOS/{current}");
+    let update = keystead_client::updates::check(&current, &user_agent)?;
+    Ok(update.map(|update| AppUpdate {
+        version: update.version,
+        page: update.page,
+        download: update.download,
+    }))
+}
+
 /// A fresh random device id.
 #[uniffi::export]
 pub fn new_device_id() -> String {
