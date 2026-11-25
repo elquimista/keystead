@@ -1,12 +1,22 @@
 name: macOS app
 
-# Builds the Mac app and checks it's ready for notarization. It publishes nothing, so
-# releases don't wait for it: GitHub's macOS runners are sometimes short of capacity, and a
-# job queued there once held back a server image. Runs on pull requests, beside every
-# release (on the tagged commit), and by hand from the Actions tab.
+# Builds the Mac app and checks it's ready for notarization. Runs on pull requests, beside
+# every release (on the tagged commit), and by hand from the Actions tab.
+#
+# Releases don't wait for it to publish the server image: GitHub's macOS runners are
+# sometimes short of capacity, and a job queued there once held back a server image. On a
+# release it signs the app with the owner's Apple Development certificate, from repository
+# secrets, so every version is recognised as the same app, and zips it for the release
+# workflow, which attaches it to the tag's GitHub release once CI has passed. Other builds
+# are signed ad hoc.
 on:
   pull_request:
   workflow_call:
+    inputs:
+      publish:
+        description: Zip the app and keep it for the release workflow.
+        type: boolean
+        default: false
   workflow_dispatch:
 
 jobs:
@@ -16,6 +26,8 @@ jobs:
     defaults:
       run:
         working-directory: apps/macos
+    env:
+      APP: build/DerivedData/Build/Products/Release/Keystead.app
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -23,13 +35,60 @@ jobs:
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build the Rust core
         run: scripts/build-core.sh
-      - name: Build the app (Release, signed ad hoc)
+        env:
+          # The profile Xcode's Release build asks for, so it isn't built twice.
+          CONFIGURATION: Release
+      - name: Get the signing certificate ready
+        if: inputs.publish
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$CERTIFICATE" ] || [ -z "$CERTIFICATE_PASSWORD" ]; then
+            echo "::error::Set the MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD repository secrets to sign the app; see Publishing the Mac app in README.md."
+            exit 1
+          fi
+          # A keychain of its own, with a random password, deleted at the end.
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -f pkcs12 \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # The team is the certificate's organizational unit, as Apple issues them.
+          # Not found fails the pipe; the check below says why.
+          TEAM_ID=$(security find-certificate -c "Apple Development" -p "$KEYCHAIN" \
+            | openssl x509 -noout -subject -nameopt RFC2253 \
+            | sed -nE 's/^subject= *//; s/(^|.*,)OU=([A-Z0-9]{10})(,.*|$)/\2/p') || true
+          if [ -z "$TEAM_ID" ]; then
+            echo "::error::MACOS_CERTIFICATE_P12 isn't an Apple Development certificate with its key."
+            exit 1
+          fi
+          echo "TEAM_ID=$TEAM_ID" >> "$GITHUB_ENV"
+          # Apple Development certificates are issued by this intermediate.
+          curl -fsSL https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer -o "$RUNNER_TEMP/wwdr-g3.cer"
+          security import "$RUNNER_TEMP/wwdr-g3.cer" -k "$KEYCHAIN" || true
+          # Lets codesign use the key without asking.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          # As Signing.local.xcconfig does on the owner's Mac, plus a secure timestamp, so
+          # the signature stays valid after the certificate expires.
+          cat > Config/Signing.local.xcconfig <<EOF
+          DEVELOPMENT_TEAM = $TEAM_ID
+          CODE_SIGN_IDENTITY = Apple Development
+          OTHER_CODE_SIGN_FLAGS = --keychain $KEYCHAIN --timestamp
+          EOF
+      - name: Build the app (Release)
         run: >
           xcodebuild -project Keystead.xcodeproj -scheme Keystead -configuration Release
           -derivedDataPath build/DerivedData build
       - name: Check the signature is ready for notarization
         run: |
-          APP=build/DerivedData/Build/Products/Release/Keystead.app
           codesign --verify --strict --deep "$APP"
           codesign -dv "$APP" 2>&1 | grep -q 'runtime'
           ENTITLEMENTS=$(codesign -d --entitlements - --xml "$APP")
@@ -38,3 +97,51 @@ jobs:
       - name: Secure Enclave prototype tests
         run: swift test
         working-directory: prototypes/secure-enclave
+
+      - name: Check the app is the tag's version, for Intel and Apple silicon, signed by the team
+        if: inputs.publish
+        run: |
+          SIGNATURE=$(codesign -dvv "$APP" 2>&1)
+          if ! grep -q '^Authority=Apple Development: ' <<< "$SIGNATURE" \
+            || ! grep -qx "TeamIdentifier=$TEAM_ID" <<< "$SIGNATURE" \
+            || ! grep -q '^Timestamp=' <<< "$SIGNATURE"; then
+            echo "::error::The app isn't signed with the team's Apple Development certificate and a secure timestamp."
+            exit 1
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Apps carry only the numbers: 0.3.0 for v0.3.0-rc.1.
+          SHORT="${VERSION%%-*}"
+          APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          if [ "$APP_VERSION" != "$SHORT" ]; then
+            echo "::error::The app is $APP_VERSION but the tag is $GITHUB_REF_NAME; set MARKETING_VERSION in apps/macos/Config/Base.xcconfig."
+            exit 1
+          fi
+          ARCHS=$(lipo -archs "$APP/Contents/MacOS/Keystead")
+          for arch in arm64 x86_64; do
+            if [[ " $ARCHS " != *" $arch "* ]]; then
+              echo "::error::The app has only $ARCHS; it should run on arm64 and x86_64."
+              exit 1
+            fi
+          done
+      - name: Zip the app, with its checksum
+        if: inputs.publish
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p build/publish
+          ditto -c -k --keepParent "$APP" "build/publish/Keystead-$VERSION.zip"
+          cd build/publish
+          shasum -a 256 "Keystead-$VERSION.zip" > "Keystead-$VERSION.zip.sha256"
+          cat "Keystead-$VERSION.zip.sha256"
+      - name: Keep it for the release workflow
+        if: inputs.publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-app
+          path: apps/macos/build/publish/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Delete the signing keychain
+        if: always() && inputs.publish
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+          rm -f Config/Signing.local.xcconfig

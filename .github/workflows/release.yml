@@ -2,8 +2,10 @@ name: Release
 
 # Pushing a version tag (v0.1.0) publishes the server image to the GitHub Container
 # Registry as ghcr.io/<owner>/keystead-server, for linux/amd64 and linux/arm64, tagged
-# 0.1.0, 0.1 and latest. The tag must match the version in Cargo.toml, and CI must pass on
-# the tagged commit first. The Mac app's check runs beside it, without holding it up.
+# 0.1.0, 0.1 and latest, and attaches the Mac app to the tag's GitHub release. The tag must
+# match the version in all three places the release checklist names, and CI must pass on
+# the tagged commit first. The image doesn't wait for the Mac app, whose macOS runner can
+# queue for a long time.
 
 on:
   push:
@@ -17,22 +19,100 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check the tag matches the version in Cargo.toml
+      - name: Check the tag matches the version everywhere it's kept
         run: |
           VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
             echo "::error::The tag is $GITHUB_REF_NAME but Cargo.toml says $VERSION; tag v$VERSION instead."
             exit 1
           fi
+          # Apps carry only the numbers: 0.3.0 for 0.3.0-rc.1.
+          APP_VERSION=$(sed -n 's/^MARKETING_VERSION = *//p' apps/macos/Config/Base.xcconfig)
+          if [ "$APP_VERSION" != "${VERSION%%-*}" ]; then
+            echo "::error::apps/macos/Config/Base.xcconfig says MARKETING_VERSION = $APP_VERSION, not ${VERSION%%-*}."
+            exit 1
+          fi
+          # Servers are pointed at final releases only.
+          DEPLOY_VERSION=$(sed -n 's/^KEYSTEAD_VERSION=//p' deploy/.env.example)
+          if [[ "$VERSION" != *-* && "$DEPLOY_VERSION" != "$VERSION" ]]; then
+            echo "::error::deploy/.env.example says KEYSTEAD_VERSION=$DEPLOY_VERSION, not $VERSION."
+            exit 1
+          fi
 
   ci:
     uses: ./.github/workflows/ci.yml
 
-  # The Mac app on the tagged commit. Nothing here waits for it: the app isn't published by
-  # this workflow, and macOS runners can queue for a long time.
+  # The Mac app on the tagged commit, zipped for the mac-release job. The server image
+  # doesn't wait for it.
   macos:
     needs: version
     uses: ./.github/workflows/macos.yml
+    with:
+      publish: true
+    # The signing certificate: MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD.
+    secrets: inherit
+
+  # Attaches the Mac app and its checksum to the tag's GitHub release once CI has passed,
+  # making the release, with install notes, if there isn't one yet. Its build provenance is
+  # recorded too, so anyone can check this workflow built the zip from the tag. Signed with
+  # the owner's Apple Development certificate, not notarized, until there's a Developer ID
+  # certificate: see README.md.
+  mac-release:
+    needs: [version, ci, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-app
+          path: mac-app
+      - name: Record how it was built
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: mac-app/*.zip
+      - name: Write the install notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          cat > notes.md <<EOF
+          ## Mac app
+
+          Download **Keystead-$VERSION.zip**, open it, and move Keystead to Applications. It
+          runs on Macs with Apple silicon or Intel, on macOS 14 or later.
+
+          It isn't notarized yet, so the first time it opens, macOS says it can't check it for
+          malware. In System Settings › Privacy & Security, choose **Open Anyway** next to
+          Keystead. Each new version asks once.
+
+          To check the download, compare \`shasum -a 256 Keystead-$VERSION.zip\` with
+          Keystead-$VERSION.zip.sha256, or confirm this repository's release workflow built it
+          from this tag with \`gh attestation verify Keystead-$VERSION.zip --repo $GITHUB_REPOSITORY\`.
+
+          ## Server
+
+          \`ghcr.io/$OWNER/keystead-server:$VERSION\`: see
+          [deploy/README.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/deploy/README.md)
+          for updating.
+          EOF
+          cat notes.md
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Notes written by hand before this ran are kept; only the files are replaced.
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            flags=()
+            if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "Keystead $VERSION" \
+              --notes-file notes.md "${flags[@]}"
+          fi
+          gh release upload "$GITHUB_REF_NAME" mac-app/* --clobber
+          gh release view "$GITHUB_REF_NAME" --json url,assets --jq '.url, .assets[].name'
 
   # Each platform builds natively on its own runner (emulating ARM to compile Rust is very
   # slow), checks the image starts and reports healthy, then pushes it by digest only.

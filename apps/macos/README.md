@@ -214,8 +214,8 @@ Three levels, from no setup at all to a notarized download:
 
 | Level | Who it's for | Setup |
 | --- | --- | --- |
-| Ad hoc ("Sign to Run Locally") | Anyone building on their own Mac, and CI | None; this is the default |
-| Apple Development | Day-to-day development with a stable signature | A free Apple account is enough. Copy `Config/Signing.local.xcconfig.example` to `Config/Signing.local.xcconfig` and set your team ID |
+| Ad hoc ("Sign to Run Locally") | Anyone building on their own Mac, and CI's checks | None; this is the default |
+| Apple Development | Day-to-day development with a stable signature, and the app attached to GitHub releases | A free Apple account is enough. Copy `Config/Signing.local.xcconfig.example` to `Config/Signing.local.xcconfig` and set your team ID. For releases, the certificate goes in repository secrets: see Publishing the Mac app in the main README |
 | Developer ID + notarization | Distributing to other Macs | A paid Apple Developer Program membership ($99 a year) and a Developer ID Application certificate |
 
 `Config/Signing.local.xcconfig` is git-ignored, so team details stay out of the repository.
@@ -244,6 +244,11 @@ the company as the developer and needs a D-U-N-S number.
   sandbox container, notarization and updates.
 
 ### Releasing (needs a Developer ID certificate; not yet tried)
+
+Pushing a version tag already attaches a build signed with the owner's Apple Development
+certificate to the tag's GitHub release (see Publishing the Mac app in the main README).
+Notarizing it takes the steps below, which the macOS workflow could then run with the
+Developer ID certificate and notarization credentials as repository secrets. By hand:
 
 1. In `Config/Signing.local.xcconfig`, uncomment
    `CODE_SIGN_IDENTITY[config=Release] = Developer ID Application`.

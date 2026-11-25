@@ -306,25 +306,68 @@ very different schedules; until then they'd add a compatibility table to keep up
    git push origin main v0.2.1
    ```
 
-5. Write short notes for the tag's GitHub release: what changed in the server and in the
-   apps, and whether the server has to be updated first.
+5. Once the workflow has made the tag's GitHub release, add short notes at the top: what
+   changed in the server and in the apps, and whether the server has to be updated first.
 
-The tag must match `Cargo.toml`, and CI (the Rust checks and the server image) must pass on
-the tagged commit. The [release workflow](.github/workflows/release.yml) then publishes
-`ghcr.io/elquimista/keystead-server` for `linux/amd64` and `linux/arm64`, tagged `0.2.1`,
-`0.2` and `latest`. Pre-releases such as `v0.3.0-rc.1` get only their own tag.
+The tag must match the version in all three files (the workflow checks), and CI (the Rust
+checks and the server image) must pass on the tagged commit. The
+[release workflow](.github/workflows/release.yml) then:
 
-The Mac app isn't published by the workflow yet: build it as described in
-[apps/macos/README.md](apps/macos/README.md). Handing it to other people needs a Developer
-ID certificate (the paid Apple Developer Program) so it can be notarized; then the same tag
-can publish it too. Until then, the [macOS workflow](.github/workflows/macos.yml) only
-checks that the tagged commit's app builds and can be notarized. It runs beside the release
-without holding up the image, since GitHub's macOS runners can queue for a long time; if it
-fails, or never gets a runner, run it again from the Actions tab.
+- publishes `ghcr.io/elquimista/keystead-server` for `linux/amd64` and `linux/arm64`,
+  tagged `0.2.1`, `0.2` and `latest`. Pre-releases such as `v0.3.0-rc.1` get only their own
+  tag;
+- builds the Mac app on the tagged commit with the [macOS workflow](.github/workflows/macos.yml),
+  checks it's the tag's version and runs on Apple silicon and Intel, and attaches
+  `Keystead-0.2.1.zip` and its SHA-256 checksum to the tag's GitHub release, making the
+  release with install notes if there isn't one yet. Its build provenance is recorded, so
+  `gh attestation verify Keystead-0.2.1.zip --repo elquimista/keystead` shows it was built
+  by this workflow from the tag. A pre-release's GitHub release is marked as one.
+
+The image doesn't wait for the Mac app: GitHub's macOS runners can queue for a long time.
+If the Mac app's job fails or never gets a runner, use **Re-run failed jobs** on the run;
+the image is unaffected, and the app is attached when it succeeds.
 
 After the first release, GitHub may list the image as private: on the repository's
 **Packages** entry, open **Package settings** and change the visibility to public, so
 servers can pull it without logging in.
+
+### Publishing the Mac app
+
+The macOS workflow signs the app it attaches with the owner's Apple Development
+certificate, from repository secrets, with a secure timestamp. Every version is then
+recognised as the same app, so macOS lets an update into the data the last one left, and
+the signature stays valid after the certificate expires. Without the secrets, the Mac
+app's job stops with an error and nothing is attached; the server image is unaffected.
+
+Once, and again whenever the certificate is renewed (it lasts a year):
+
+1. In Keychain Access, under **login** › **My Certificates**, right-click
+   **Apple Development: …** and choose **Export**. Save it as a `.p12` with a strong
+   password.
+2. Copy it as text:
+
+   ```sh
+   base64 -i ~/Desktop/Certificates.p12 | pbcopy
+   ```
+
+3. On GitHub, in the repository's **Settings** › **Secrets and variables** › **Actions**,
+   add two repository secrets: `MACOS_CERTIFICATE_P12` (the text you copied) and
+   `MACOS_CERTIFICATE_PASSWORD` (the export password). The team comes from the
+   certificate.
+4. Delete the `.p12`.
+
+The workflow puts the certificate in a keychain of its own, with a random password, and
+deletes it when the job ends. Secrets aren't given to pull requests from forks, but anyone
+who can push to the repository could write a workflow that reads them; moving them into a
+protected environment that only version tags can use would close that.
+
+The app still isn't notarized, so macOS asks people to choose **Open Anyway** in System
+Settings › Privacy & Security for each new version, and Apple means Apple Development
+certificates for development rather than for handing apps out. That's fine for a few
+testers, not for rolling out to a team: notarizing needs a Developer ID certificate (the
+paid Apple Developer Program), then the same secrets for it plus notarization credentials,
+for the macOS workflow to sign, notarize and staple with (see
+[apps/macos/README.md](apps/macos/README.md)).
 
 ## License
 
