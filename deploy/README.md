@@ -226,6 +226,18 @@ anyone moves a login: apps before 0.12.0 keep showing a moved login in its old f
 people who lost it. Apps from 0.12.0 work with older servers, saying the server needs
 updating to move logins.
 
+**Updating to 0.13.0.** Folders can be renamed and deleted, logins exported to an encrypted
+KeePass file, and someone who lost every device and their Recovery Kit can recover with the
+owner's help, getting back their own logins and private folders too if they turned on
+escrow. Apps also check password health: weak, reused and old passwords. Renaming folders
+and exporting work with any server; deleting folders, recovering with help, escrow and
+spotting old passwords need this one. The database gets new tables and columns (schema
+version 8 to 13): take a backup first. Update every app and the CLI before anyone recovers
+with the owner's help: apps before 0.13.0 can't check a recovered person's new keys, so
+they stop sharing with that person and ignore what they save. Apps from 0.13.0 work with
+older servers, saying the server needs updating for what it can't do. The Mac app can now
+write a file you choose in a Save panel, for exports.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
