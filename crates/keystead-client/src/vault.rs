@@ -55,6 +55,9 @@ const NEEDS_0_7: &str = "the server is older than Keystead 0.7.0 and keeps no hi
 /// Adding a device from another came with 0.8.0.
 const NEEDS_0_8: &str = "the server is older than Keystead 0.8.0 and can't add a device from \
                          another; update it, or use your Recovery Kit on the new device";
+/// Moving logins came with 0.12.0; an older server refuses any change of folder or owner.
+const NEEDS_0_12: &str = "the server is older than Keystead 0.12.0 and can't move logins; \
+                          update it to 0.12.0 or later";
 /// What a server answers for sign-out if it's from before sign-out existed.
 const NO_SIGN_OUT: &str = "the server is too old to forget a device that signs out; update it";
 const PAGE_SIZE: i64 = 500;
@@ -2366,6 +2369,9 @@ impl Vault {
     /// with directly keep it. A login in no folder can only be moved by its owner.
     pub fn move_item(&mut self, item_id: ItemId, to: Option<&str>) -> Result<EditOutcome> {
         self.check_server_takes_items()?;
+        if self.server_version()? < (0, 12) {
+            bail!(NEEDS_0_12);
+        }
         self.sync()?;
         let current = self.live_item(item_id)?.clone();
         let me = self.profile.user_id;
