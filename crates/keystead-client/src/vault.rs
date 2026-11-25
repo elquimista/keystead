@@ -359,6 +359,21 @@ pub struct HistoryRow {
     pub changes: Vec<String>,
 }
 
+/// What separates a folder from the one it's inside, in folder names: "Engineering /
+/// Databases".
+pub const FOLDER_SEPARATOR: &str = " / ";
+
+/// A folder made inside another.
+#[derive(Debug, Default)]
+pub struct NewFolder {
+    /// Its full name, "Parent / Name".
+    pub name: String,
+    /// Who it was shared with, like its parent; groups are marked "(group)".
+    pub shared_with: Vec<String>,
+    /// Anyone it couldn't be shared with, and why.
+    pub problems: Vec<String>,
+}
+
 /// A password to change: someone lost access to a login while its password stayed the
 /// same, so they may still know it.
 #[derive(Debug)]
@@ -935,6 +950,53 @@ impl Vault {
         self.profile.folders.insert(folder_id, record);
         self.save()?;
         Ok(folder_id)
+    }
+
+    /// Creates a folder inside another: named "Parent / Name", which apps show nested.
+    /// Each folder keeps its own sharing; with `share_like_parent` the new one starts out
+    /// shared with the same people and groups as its parent, in the same roles. Returns its
+    /// full name, who it was shared with, and anyone it couldn't be shared with, and why.
+    pub fn create_folder_inside(
+        &mut self,
+        parent: &str,
+        name: &str,
+        share_like_parent: bool,
+    ) -> Result<NewFolder> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("a folder needs a name");
+        }
+        self.sync()?;
+        self.profile.find_folder(&self.keys, &self.groups, parent)?;
+        let full = format!("{parent}{FOLDER_SEPARATOR}{name}");
+        if self.folders()?.contains(&full) {
+            bail!("there's already a folder named {full:?}");
+        }
+        let (members, groups) = if share_like_parent {
+            self.folder_sharing(parent)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        self.create_folder(&full)?;
+        let mut created = NewFolder {
+            name: full.clone(),
+            ..NewFolder::default()
+        };
+        for member in members.iter().filter(|member| !member.me) {
+            match self.share_folder(&full, member.user_id, member.role) {
+                Ok(name) => created.shared_with.push(name),
+                Err(error) => created.problems.push(format!("{}: {error:#}", member.name)),
+            }
+        }
+        for group in groups {
+            match self.share_folder_with_group(&full, &group.name, group.role) {
+                Ok(name) => created.shared_with.push(format!("{name} (group)")),
+                Err(error) => created
+                    .problems
+                    .push(format!("{} (group): {error:#}", group.name)),
+            }
+        }
+        Ok(created)
     }
 
     /// Shares a folder with an approved user by wrapping its current key for them.

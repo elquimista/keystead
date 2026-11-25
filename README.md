@@ -146,6 +146,8 @@ keystead folder members Production   # who is in it, with roles
 keystead folder role Production 3 edit
 keystead folder remove Production 3  # takes them out and changes the folder's key
 keystead folder leave Production
+keystead folder create Databases --inside Production   # "Production / Databases", shared like Production
+keystead folder create Keys --inside Production --private
 keystead unshare Bank 2              # take away someone's copy of one login
 keystead remove-user 3               # owner: remove someone from the team (asks first)
 ```

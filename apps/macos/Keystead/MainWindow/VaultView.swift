@@ -120,24 +120,9 @@ private struct Sidebar: View {
                     .help("Logins deleted in the last 30 days, which can be brought back")
             }
             Section("Folders") {
-                ForEach(model.folders, id: \.self) { folder in
-                    Label(folder, systemImage: "folder")
-                        .tag(AppModel.Section.folder(folder))
-                        .contextMenu {
-                            Button("New Login in \u{201C}\(folder)\u{201D}…") {
-                                model.sheet = .addLogin(folder: folder)
-                            }
-                            .disabled(model.folderRoles[folder] == .view)
-                            if model.manages(folder: folder) {
-                                Button("Share \u{201C}\(folder)\u{201D}…") {
-                                    model.sheet = .share(folder: folder, user: nil)
-                                }
-                            }
-                            Button("Access…") { model.sheet = .manageFolder(folder) }
-                        }
-                }
+                FolderTree(model: model, nodes: FolderNode.tree(model.folders))
                 Button {
-                    model.sheet = .newFolder
+                    model.sheet = .newFolder(inside: nil)
                 } label: {
                     Label("New Folder…", systemImage: "plus")
                 }
@@ -168,6 +153,98 @@ private struct Sidebar: View {
                 }
                 .padding(10)
             }
+        }
+    }
+}
+
+/// A folder in the sidebar's tree. Folders nest by name ("Engineering / Databases"); a step
+/// that's no folder itself, only holds folders, can't be selected.
+struct FolderNode: Identifiable {
+    /// The full name, "Engineering / Databases".
+    let id: String
+    /// The last part, "Databases".
+    let name: String
+    let isFolder: Bool
+    let children: [FolderNode]
+
+    static let separator = " / "
+
+    static func tree(_ folders: [String]) -> [FolderNode] {
+        build(folders.map { $0.components(separatedBy: separator) }, under: [])
+    }
+
+    private static func build(_ paths: [[String]], under prefix: [String]) -> [FolderNode] {
+        var rests: [String: [[String]]] = [:]
+        for path in paths where !path.isEmpty {
+            rests[path[0], default: []].append(Array(path.dropFirst()))
+        }
+        return rests.keys
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { head in
+                let below = rests[head] ?? []
+                return FolderNode(
+                    id: (prefix + [head]).joined(separator: separator), name: head,
+                    isFolder: below.contains(where: \.isEmpty),
+                    children: build(below.filter { !$0.isEmpty }, under: prefix + [head]))
+            }
+    }
+}
+
+/// Folders in the sidebar, nested, open unless collapsed.
+private struct FolderTree: View {
+    let model: AppModel
+    let nodes: [FolderNode]
+
+    var body: some View {
+        ForEach(nodes) { node in
+            if node.children.isEmpty {
+                FolderRow(model: model, node: node)
+            } else {
+                DisclosureGroup(isExpanded: Binding(
+                    get: { !model.collapsedFolders.contains(node.id) },
+                    set: { open in
+                        if open {
+                            model.collapsedFolders.remove(node.id)
+                        } else {
+                            model.collapsedFolders.insert(node.id)
+                        }
+                    }
+                )) {
+                    FolderTree(model: model, nodes: node.children)
+                } label: {
+                    FolderRow(model: model, node: node)
+                }
+            }
+        }
+    }
+}
+
+private struct FolderRow: View {
+    let model: AppModel
+    let node: FolderNode
+
+    var body: some View {
+        if node.isFolder {
+            let folder = node.id
+            Label(node.name, systemImage: "folder")
+                .tag(AppModel.Section.folder(folder))
+                .contextMenu {
+                    Button("New Login in \u{201C}\(node.name)\u{201D}…") {
+                        model.sheet = .addLogin(folder: folder)
+                    }
+                    .disabled(model.folderRoles[folder] == .view)
+                    Button("New Folder Inside…") { model.sheet = .newFolder(inside: folder) }
+                    if model.manages(folder: folder) {
+                        Button("Share \u{201C}\(node.name)\u{201D}…") {
+                            model.sheet = .share(folder: folder, user: nil)
+                        }
+                    }
+                    Button("Access…") { model.sheet = .manageFolder(folder) }
+                }
+        } else {
+            // Only folders inside it are yours, not this one.
+            Label(node.name, systemImage: "folder")
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -312,7 +389,7 @@ private struct LoginList: View {
                             + "can also add your own.")
             } actions: {
                 Button("New Login…") { model.sheet = .addLogin(folder: nil) }
-                Button("New Folder…") { model.sheet = .newFolder }
+                Button("New Folder…") { model.sheet = .newFolder(inside: nil) }
             }
         } else {
             ContentUnavailableView {

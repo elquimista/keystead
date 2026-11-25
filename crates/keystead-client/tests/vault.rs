@@ -1436,3 +1436,59 @@ fn an_export_from_passbolt_or_keepass_imports_into_folders() {
             .any(|folder| folder.name == "Imported" && folder.new)
     );
 }
+
+#[test]
+fn a_folder_inside_another_starts_out_shared_like_it() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+
+    // Production: Bob edits it, and Ops (Alice and Bob) views it.
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    alice.create_group("Ops", &[bob_id]).unwrap();
+    alice
+        .share_folder_with_group("Production", "Ops", Role::View)
+        .unwrap();
+
+    let created = alice
+        .create_folder_inside("Production", " Databases ", true)
+        .unwrap();
+    assert_eq!(created.name, "Production / Databases");
+    assert_eq!(created.shared_with, ["Bob", "Ops (group)"]);
+    assert!(created.problems.is_empty());
+    let (people, groups) = alice.folder_sharing("Production / Databases").unwrap();
+    let roles: Vec<(String, Role)> = people.into_iter().map(|p| (p.name, p.role)).collect();
+    assert_eq!(
+        roles,
+        [
+            ("Alice".to_owned(), Role::Manage),
+            ("Bob".to_owned(), Role::Edit)
+        ]
+    );
+    assert_eq!(groups[0].role, Role::View);
+    bob.sync().unwrap();
+    assert!(
+        bob.folders()
+            .unwrap()
+            .contains(&"Production / Databases".to_owned())
+    );
+
+    // Private: only Alice. And the same name twice is refused.
+    let private = alice
+        .create_folder_inside("Production", "Root keys", false)
+        .unwrap();
+    assert!(private.shared_with.is_empty());
+    bob.sync().unwrap();
+    assert!(!bob.folders().unwrap().contains(&private.name));
+    assert!(
+        alice
+            .create_folder_inside("Production", "Databases", true)
+            .is_err()
+    );
+    assert!(alice.create_folder_inside("Nowhere", "X", true).is_err());
+}

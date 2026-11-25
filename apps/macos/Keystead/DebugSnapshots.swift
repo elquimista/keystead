@@ -106,6 +106,11 @@ enum DebugSnapshots {
                     model.section = .recentlyDeleted
                     model.selectedDeletedID = model.recentlyDeleted.first?.id
                 }),
+                ("6e11-new-folder-inside", { model.sheet = .newFolder(inside: "Production") }),
+                ("6e12-subfolder", {
+                    model.sheet = nil
+                    model.section = .folder("Production / Databases")
+                }),
                 ("6e9-to-change", {
                     model.section = .toChange
                     model.selectedItemID = model.items[0].id

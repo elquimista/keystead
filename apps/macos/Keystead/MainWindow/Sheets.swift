@@ -18,8 +18,8 @@ struct SheetContent: View {
             DeleteLoginSheet(model: model, item: item)
         case .shareLogin(let item):
             ShareLoginSheet(model: model, item: item)
-        case .newFolder:
-            NewFolderSheet(model: model)
+        case .newFolder(let parent):
+            NewFolderSheet(model: model, parent: parent)
         case .share(let folder, let user):
             ShareSheet(model: model, folder: folder, user: user)
         case .shareWithGroup(let group):
@@ -1152,6 +1152,12 @@ private struct ManageFolderSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Access to \u{201C}\(folder)\u{201D}")
                 .font(.title3.weight(.semibold))
+            if model.folders.contains(where: { $0.hasPrefix(folder + FolderNode.separator) }) {
+                Text("Folders inside it have their own access: sharing this one doesn't share them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let sharing {
                 if !sharing.people.isEmpty {
                     PeopleWithAccess(
@@ -1270,26 +1276,64 @@ private struct RemoveUserSheet: View {
 
 // MARK: - Folders
 
+/// A new folder, or one inside another, which starts out shared like its parent unless
+/// asked not to. After that, each folder has its own access.
 private struct NewFolderSheet: View {
     let model: AppModel
+    let parent: String?
     @State private var name = ""
+    @State private var shareLikeParent = true
+    @State private var parentSharing: Sharing?
 
-    private var exists: Bool { model.folders.contains(name.trimmed) }
+    private var fullName: String {
+        parent.map { "\($0)\(FolderNode.separator)\(name.trimmed)" } ?? name.trimmed
+    }
+    private var exists: Bool { model.folders.contains(fullName) }
 
     var body: some View {
-        SheetScaffold(title: "New Folder", actionTitle: "Create", canAct: !name.trimmed.isEmpty && !exists) {
-            try await model.createFolder(named: name)
+        SheetScaffold(
+            title: parent.map { "New Folder in \u{201C}\($0)\u{201D}" } ?? "New Folder",
+            actionTitle: "Create", canAct: !name.trimmed.isEmpty && !exists
+        ) {
+            if let parent {
+                try await model.createFolder(named: name, inside: parent, shareLikeParent: shareLikeParent)
+            } else {
+                try await model.createFolder(named: name)
+            }
             return true
         } content: {
             Form {
-                TextField("Name", text: $name, prompt: Text("Production"))
+                TextField("Name", text: $name, prompt: Text(parent == nil ? "Production" : "Databases"))
+                if let parent {
+                    Toggle("Share it like \u{201C}\(parent)\u{201D}", isOn: $shareLikeParent)
+                }
             }
-            Text(exists
-                ? "There's already a folder with that name."
-                : "Only you can see a new folder until you share it.")
+            Text(caption)
                 .font(.caption)
                 .foregroundStyle(exists ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .task {
+            if let parent { parentSharing = try? await model.sharing(of: parent) }
+        }
+    }
+
+    private var caption: String {
+        if exists { return "There's already a folder with that name." }
+        guard let parent, shareLikeParent else {
+            return "Only you can see a new folder until you share it."
+        }
+        guard let parentSharing else {
+            return "It starts out shared like its parent; after that, each has its own access."
+        }
+        let others = parentSharing.people.filter { !$0.isMe }
+            .map { "\($0.name) (\($0.role.label.lowercased()))" }
+            + parentSharing.groups.map { "\($0.name) (group, \($0.role.label.lowercased()))" }
+        if others.isEmpty {
+            return "\u{201C}\(parent)\u{201D} isn't shared with anyone else, so neither is this."
+        }
+        return "Shared with " + ListFormatter.localizedString(byJoining: others)
+            + ". After that, each folder has its own access: sharing one doesn't share the other."
     }
 }
 

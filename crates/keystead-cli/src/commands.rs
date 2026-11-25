@@ -11,8 +11,8 @@ pub use keystead_client::{
     MemberRow, SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
 };
 use keystead_client::{
-    DeviceSetupLine, ImportPlan, ImportSummary, ImportedLogin, JoiningDevice, NewAccount, Vault,
-    read_kdbx,
+    DeviceSetupLine, ImportPlan, ImportSummary, ImportedLogin, JoiningDevice, NewAccount,
+    NewFolder, Vault, read_kdbx,
 };
 pub use keystead_core::api::Role;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
@@ -202,6 +202,16 @@ pub fn approve(home: &Path, user: UserId, fingerprint: &str) -> Result<String> {
 
 pub fn create_folder(home: &Path, name: &str) -> Result<()> {
     open(home)?.create_folder(name).map(|_| ())
+}
+
+/// Creates a folder inside another, shared like it unless private.
+pub fn create_folder_inside(
+    home: &Path,
+    parent: &str,
+    name: &str,
+    share_like_parent: bool,
+) -> Result<NewFolder> {
+    open(home)?.create_folder_inside(parent, name, share_like_parent)
 }
 
 pub fn share_folder(home: &Path, folder: &str, user: UserId, role: Role) -> Result<String> {

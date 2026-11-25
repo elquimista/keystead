@@ -104,7 +104,7 @@ private struct AppCommands: Commands {
             Button("New Login…") { model.sheet = .addLogin(folder: nil) }
                 .keyboardShortcut("n")
                 .disabled(model.phase != .unlocked)
-            Button("New Folder…") { model.sheet = .newFolder }
+            Button("New Folder…") { model.sheet = .newFolder(inside: nil) }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(model.phase != .unlocked)
             Divider()

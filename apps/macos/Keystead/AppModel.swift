@@ -40,7 +40,8 @@ final class AppModel {
         case history(ItemSummary)
         case deleteLogin(ItemSummary)
         case shareLogin(ItemSummary)
-        case newFolder
+        /// A new folder, or one inside another.
+        case newFolder(inside: String?)
         case share(folder: String?, user: User?)
         /// Shares one of your folders with a group, from the group's page.
         case shareWithGroup(GroupSummary)
@@ -70,7 +71,7 @@ final class AppModel {
             case .editLogin(let item): "edit-\(item.id)"
             case .deleteLogin(let item): "delete-\(item.id)"
             case .shareLogin(let item): "share-login-\(item.id)"
-            case .newFolder: "new-folder"
+            case .newFolder(let parent): "new-folder-\(parent ?? "")"
             case .share(let folder, let user): "share-\(folder ?? "")-\(user?.userId ?? 0)"
             case .shareWithGroup(let group): "share-with-group-\(group.id)"
             case .manageFolder(let folder): "manage-\(folder)"
@@ -648,6 +649,21 @@ final class AppModel {
         await reloadLocal()
     }
 
+    /// Creates a folder inside another, shared like it unless asked not to, and shows it.
+    func createFolder(named name: String, inside parent: String, shareLikeParent: Bool) async throws {
+        let created = try await perform {
+            try $0.createFolderInside(parent: parent, name: name, shareLikeParent: shareLikeParent)
+        }
+        await reloadLocal()
+        section = .folder(created.name)
+        if !created.problems.isEmpty {
+            message = "Created \(created.name), but couldn't share it with "
+                + ListFormatter.localizedString(byJoining: created.problems) + "."
+        }
+    }
+
+    /// Folders the sidebar shows collapsed; the rest are open.
+    var collapsedFolders: Set<String> = []
     func share(folder: String, with user: User, role: Role) async throws {
         _ = try await perform {
             try $0.shareFolder(folder: folder, userId: user.userId, role: role)
@@ -1022,9 +1038,11 @@ extension AppModel {
                 User(userId: 3, name: "Sam", approved: false, isOwner: false, removed: false),
                 User(userId: 4, name: "Pat", approved: true, isOwner: false, removed: true),
             ]
-            model.folders = ["Production", "Staging"]
+            model.folders = ["Production", "Production / Databases", "Staging"]
             // Mo's Staging folder, shared with Olivia to view.
-            model.folderRoles = ["Production": .manage, "Staging": .view]
+            model.folderRoles = [
+                "Production": .manage, "Production / Databases": .manage, "Staging": .view,
+            ]
             model.items = [
                 ItemSummary(
                     id: "00000000-0000-4000-8000-000000000001", folder: "Production",

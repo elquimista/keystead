@@ -274,8 +274,17 @@ enum DevicesCommand {
 
 #[derive(Subcommand)]
 enum FolderCommand {
-    /// Create a folder
-    Create { name: String },
+    /// Create a folder, or one inside another (named "Parent / Name"), which starts out
+    /// shared like its parent
+    Create {
+        name: String,
+        /// Create it inside this folder
+        #[arg(long, value_name = "FOLDER")]
+        inside: Option<String>,
+        /// With --inside: don't share it like its parent; only you can open it
+        #[arg(long, requires = "inside")]
+        private: bool,
+    },
     /// Share a folder with an approved user or a group (managers)
     Share {
         folder: String,
@@ -571,9 +580,30 @@ fn run(cli: Cli) -> Result<()> {
             let name = commands::approve(&home, UserId(user_id), &fingerprint)?;
             println!("Approved {name}.");
         }
-        Command::Folder(FolderCommand::Create { name }) => {
+        Command::Folder(FolderCommand::Create {
+            name, inside: None, ..
+        }) => {
             commands::create_folder(&home, &name)?;
             println!("Created folder {name}.");
+        }
+        Command::Folder(FolderCommand::Create {
+            name,
+            inside: Some(parent),
+            private,
+        }) => {
+            let created = commands::create_folder_inside(&home, &parent, &name, !private)?;
+            if created.shared_with.is_empty() {
+                println!("Created folder {}; only you can open it.", created.name);
+            } else {
+                println!(
+                    "Created folder {}, shared like {parent} with {}.",
+                    created.name,
+                    created.shared_with.join(", ")
+                );
+            }
+            for problem in &created.problems {
+                eprintln!("warning: couldn't share it with {problem}");
+            }
         }
         Command::Folder(FolderCommand::Share {
             folder,

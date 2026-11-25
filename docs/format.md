@@ -285,6 +285,11 @@ back to format 1.
 **Folder info** (`{"name"}`) is encrypted with the folder key, with associated data
 `transcript("keystead/folder-info/v1", folder id)`.
 
+Folders nest by name only: apps show "Engineering / Databases" (parts joined by
+`" / "`) inside "Engineering". Each folder still has its own key and its own people and
+groups; sharing one never shares another. A folder made inside another may start out
+shared like it, which is just sharing it with the same people and groups.
+
 ## Directory
 
 The server lists every user's public keys, but a server that swapped in its own key

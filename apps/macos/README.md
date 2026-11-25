@@ -13,6 +13,10 @@ account back on a new Mac with a Recovery Kit.
   password. Each login can be edited (name, username, website, password and notes; notes
   stay hidden until shown, like the password), shared with a person or a group, or
   deleted for everyone who can open it.
+- **Folders inside folders:** folders named like "Production / Databases" show nested in
+  the sidebar. New Folder Inside… (a folder's right-click menu) makes one that starts out
+  shared like its parent, or private. After that each folder has its own access: sharing
+  one never shares another, and the Access sheet says so.
 - **Roles and access:** folders and logins are shared to view, edit or manage. A folder's
   Access… (in its right-click menu or toolbar) lists its members; managers change roles
   and remove people, and anyone can leave. Actions someone's role doesn't allow are

@@ -319,6 +319,17 @@ pub struct HistoryEntry {
     pub changes: Vec<String>,
 }
 
+/// A folder made inside another.
+#[derive(uniffi::Record)]
+pub struct FolderCreated {
+    /// Its full name, "Parent / Name".
+    pub name: String,
+    /// Who it was shared with, like its parent; groups are marked "(group)".
+    pub shared_with: Vec<String>,
+    /// Anyone it couldn't be shared with, and why.
+    pub problems: Vec<String>,
+}
+
 /// A folder an import puts logins into, or leaves out.
 #[derive(uniffi::Record)]
 pub struct ImportFolderSummary {
@@ -882,6 +893,24 @@ impl Vault {
     pub fn create_folder(&self, name: String) -> Result<(), CoreError> {
         self.vault()?.create_folder(&name)?;
         Ok(())
+    }
+
+    /// Creates a folder inside another, named "Parent / Name". With `share_like_parent`,
+    /// it starts out shared with the parent's people and groups, in the same roles.
+    pub fn create_folder_inside(
+        &self,
+        parent: String,
+        name: String,
+        share_like_parent: bool,
+    ) -> Result<FolderCreated, CoreError> {
+        let created = self
+            .vault()?
+            .create_folder_inside(&parent, &name, share_like_parent)?;
+        Ok(FolderCreated {
+            name: created.name,
+            shared_with: created.shared_with,
+            problems: created.problems,
+        })
     }
 
     /// Shares a folder with an approved user. Returns their name.
