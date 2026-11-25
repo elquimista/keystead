@@ -211,6 +211,13 @@ an app before 0.10.0 can't save a login that was shared with a deleted group unt
 app has saved it once. Apps from 0.10.0 say the server needs updating if it's older. Also
 fixes leaving a folder you still reach through a group, which made it vanish from the app.
 
+**Updating to 0.11.0.** Only the apps and the CLI changed: importing from Passbolt (its
+KDBX export) or a KeePass or KeePassXC file, and folders shown nested by name ("Production
+/ Databases"), with new folders inside others starting out shared like their parent. The
+Mac app can now read a file you choose in an Open panel, which also fixes reading a
+one-time code's QR code from a screenshot. The server is the same as 0.10.0, so updating
+it is optional.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
