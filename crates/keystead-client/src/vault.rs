@@ -919,8 +919,12 @@ impl Vault {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
         self.profile.set_directory(directory.entries);
         self.save()?;
-        Ok(self
-            .profile
+        Ok(self.known_users())
+    }
+
+    /// Everyone as of the last sync or [`Vault::users`], without asking the server.
+    pub fn known_users(&self) -> Vec<UserRow> {
+        self.profile
             .directory
             .iter()
             .map(|entry| UserRow {
@@ -934,7 +938,7 @@ impl Vault {
                 recovering: entry.recovering,
                 keys_replaced: entry.revision > 0,
             })
-            .collect())
+            .collect()
     }
 
     /// Creates a single-use invite (owner only).

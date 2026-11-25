@@ -13,7 +13,7 @@ account back on a new Mac with a Recovery Kit.
   password. Each login can be edited (name, username, website, password and notes; notes
   stay hidden until shown, like the password), shared with a person or a group, or
   deleted for everyone who can open it.
-- **Moving logins:** Move To… (in a login's details or right-click menu) moves it to
+- **Moving logins:** Move To… (in a login's "⋯" toolbar menu or right-click menu) moves it to
   another folder you can add to, or out of folders as yours. Whoever had it only through
   the old folder loses it, and its password goes on their To Change list; people and
   groups it's shared with directly keep it. Needs a 0.12.0 server.
@@ -45,12 +45,12 @@ account back on a new Mac with a Recovery Kit.
   used for other logins too, or unchanged for over a year (old ones need a 0.13.0
   server). It's worked out on your Mac when you open it, and nothing about the passwords
   is kept.
-- **One-time codes:** a login can keep the setup of a site's one-time codes (Edit…, then
-  paste the setup key or otpauth:// link, or From QR Code… to read it from a screenshot).
+- **One-time codes:** a login can keep the setup of a site's one-time codes (Edit, then
+  paste the setup key or otpauth:// link, or the QR code button to read it from a screenshot).
   Its details then show the current code with the seconds it has left; copying it works
   like copying the password. Logins with codes need a 0.6.0 server, and apps before 0.6.0
   can't open them.
-- **History:** History… on a login lists its earlier versions (the server keeps the last
+- **History:** History… (in a login's "⋯" toolbar menu) lists its earlier versions (the server keeps the last
   10): who saved each, when, and what it changed. Each one's password can be shown or
   copied, and Bring Back… saves it as a new version. Editors and managers only; needs a
   0.7.0 server.
@@ -160,6 +160,24 @@ columns are laid out, and quit:
 build/DerivedData/Build/Products/Debug/Keystead.app/Contents/MacOS/Keystead -demo -snapshot
 open ~/Library/Containers/io.github.elquimista.Keystead.dev/Data/tmp/snapshots
 ```
+
+To see how the window copes with a big team, `-demo big` has 5,000 logins, and `-measure`
+prints how long the list's search and quick search take per keystroke and how much memory
+the app uses, then quits. Build with optimization for numbers that mean something, in a
+folder of its own:
+
+```sh
+xcodebuild -project Keystead.xcodeproj -scheme Keystead -configuration Debug \
+  -derivedDataPath build/MeasureData build CODE_SIGN_IDENTITY=- SWIFT_OPTIMIZATION_LEVEL=-O
+build/MeasureData/Build/Products/Debug/Keystead.app/Contents/MacOS/Keystead -demo big -measure
+```
+
+The Rust core's side, opening and listing a vault with that many logins, is
+`cargo run --release -p keystead-client --example vault_bench -- 5000`.
+
+Release builds take a little over a minute longer than Debug ones: the core is built with
+link-time optimization (the `app` profile in `Cargo.toml`) and the app's symbols are
+stripped, which together halve its size.
 
 ## Icons
 

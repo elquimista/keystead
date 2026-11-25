@@ -40,6 +40,14 @@ zeroize = { version = "1", features = ["derive"] }
 # Dropbox's password strength estimator, for password health.
 zxcvbn = { version = "3", default-features = false }
 
+# The Mac app's core, linked into the app: one optimizing pass over all of it (link-time
+# optimization) makes it smaller and a little faster. A profile of its own, so the server's
+# and the CLI's builds stay quick. apps/macos/scripts/build-core.sh uses it for Release.
+[profile.app]
+inherits = "release"
+lto = true
+codegen-units = 1
+
 # Unoptimized Argon2 takes many seconds per KeePass file, which tests export and import.
 [profile.dev.package.rust-argon2]
 opt-level = 3

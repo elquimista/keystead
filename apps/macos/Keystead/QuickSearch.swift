@@ -184,26 +184,18 @@ final class QuickSearchPanel: NSPanel {
 final class QuickSearchState {
     let model: AppModel
     var query = "" {
-        didSet { selection = 0 }
+        didSet {
+            selection = 0
+            results = model.quickSearch(query)
+        }
     }
     var selection = 0
+    /// Matching logins, those whose name starts with the first word first: worked out once
+    /// per keystroke, however often they're shown.
+    private(set) var results: [ItemSummary] = []
 
     init(model: AppModel) {
         self.model = model
-    }
-
-    /// Matching logins, those whose name starts with the first word first.
-    var results: [ItemSummary] {
-        let first = query.lowercased().split(whereSeparator: \.isWhitespace).first.map(String.init)
-        let matches = model.items(matching: query)
-        return Array(
-            matches.sorted { a, b in
-                let aStarts = first.map { a.name.lowercased().hasPrefix($0) } ?? false
-                let bStarts = first.map { b.name.lowercased().hasPrefix($0) } ?? false
-                if aStarts != bStarts { return aStarts }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
-            }
-            .prefix(50))
     }
 
     func move(by step: Int) {
@@ -318,8 +310,7 @@ struct QuickSearchView: View {
 
     private func row(_ item: ItemSummary, selected: Bool) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "key")
-                .foregroundStyle(selected ? .white : .secondary)
+            LoginTile(name: item.name, url: item.url, size: 30)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
                     .foregroundStyle(selected ? .white : .primary)

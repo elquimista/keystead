@@ -34,6 +34,14 @@ CODE_SIGN_ENTITLEMENTS = Config/Keystead.entitlements
 // builds must never carry it: notarization rejects apps that do.
 CODE_SIGN_INJECT_BASE_ENTITLEMENTS[config=Release] = NO
 
+// Release builds leave out symbols the app doesn't need to run, and code nothing calls;
+// the symbols stay in the dSYM next to the build, for reading crash reports. A third off
+// the app's size.
+DEAD_CODE_STRIPPING = YES
+DEPLOYMENT_POSTPROCESSING[config=Release] = YES
+STRIP_INSTALLED_PRODUCT[config=Release] = YES
+STRIP_STYLE[config=Release] = all
+
 // The Rust core build script writes outside Xcode's build folder.
 ENABLE_USER_SCRIPT_SANDBOXING = NO
 

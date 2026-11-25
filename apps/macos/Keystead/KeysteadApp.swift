@@ -21,6 +21,7 @@ struct KeysteadApp: App {
             MainView(model: model)
             #if DEBUG
                 .task { await DebugSnapshots.runIfRequested(model) }
+                .task { await DebugMeasure.runIfRequested(model) }
             #endif
         }
         .defaultSize(width: 920, height: 580)
@@ -54,8 +55,8 @@ extension KeysteadApp {
         #if DEBUG
         let arguments = CommandLine.arguments
         if let index = arguments.firstIndex(of: "-demo") {
-            let alone = arguments.dropFirst(index + 1).first == "alone"
-            return AppModel.demo(alone: alone)
+            let variant = arguments.dropFirst(index + 1).first
+            return AppModel.demo(alone: variant == "alone", big: variant == "big")
         }
         #endif
         return AppModel()

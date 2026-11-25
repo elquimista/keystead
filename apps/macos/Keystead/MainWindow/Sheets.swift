@@ -62,6 +62,17 @@ struct SheetContent: View {
     }
 }
 
+extension View {
+    /// A sheet's form in the grouped style, as in System Settings, edge to edge with the
+    /// sheet's other content. Sheets grow to fit it, so it doesn't scroll.
+    func sheetForm() -> some View {
+        formStyle(.grouped)
+            .scrollDisabled(true)
+            .padding(.horizontal, -20)
+            .padding(.vertical, -12)
+    }
+}
+
 /// What every sheet shares: a title, the content, an error line and the buttons. `action`
 /// runs when the main button is pressed and returns whether the sheet should close.
 private struct SheetScaffold<Content: View>: View {
@@ -132,10 +143,10 @@ private struct PasswordField: View {
             HStack {
                 Group {
                     if visible {
-                        TextField(title, text: $password)
+                        TextField(title, text: $password, prompt: Text("Required"))
                             .font(.system(.body, design: .monospaced))
                     } else {
-                        SecureField(title, text: $password)
+                        SecureField(title, text: $password, prompt: Text("Required"))
                     }
                 }
                 .labelsHidden()
@@ -182,24 +193,34 @@ private struct AddLoginSheet: View {
             return true
         } content: {
             Form {
-                Picker("Folder", selection: $folder) {
-                    Text("None").tag(String?.none)
-                    if !model.folders.isEmpty {
-                        Divider()
+                Section {
+                    Picker("Folder", selection: $folder) {
+                        Text("None").tag(String?.none)
+                        if !model.folders.isEmpty {
+                            Divider()
+                        }
+                        ForEach(model.folders, id: \.self) { Text($0).tag(String?.some($0)) }
                     }
-                    ForEach(model.folders, id: \.self) { Text($0).tag(String?.some($0)) }
+                } footer: {
+                    Text(folder.map { "Everyone \u{201C}\($0)\u{201D} is shared with will see it." }
+                        ?? "Only you can see it until you share it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
                 }
-                TextField("Name", text: $name, prompt: Text("AWS root account"))
-                TextField("Username", text: $username, prompt: Text("Optional"))
-                TextField("Website", text: $url, prompt: Text("Optional, https://…"))
-                PasswordField(title: "Password", password: $password)
-                OneTimeCodeField(setup: $oneTimeCode)
+                Section {
+                    TextField("Name", text: $name, prompt: Text("AWS root account"))
+                    TextField("Username", text: $username, prompt: Text("Optional"))
+                    TextField("Website", text: $url, prompt: Text("Optional"))
+                }
+                Section {
+                    PasswordField(title: "Password", password: $password)
+                    OneTimeCodeField(setup: $oneTimeCode)
+                }
                 NotesField(notes: $notes)
             }
-            Text(folder.map { "Everyone \u{201C}\($0)\u{201D} is shared with will see this login." }
-                ?? "Only you can see this login until you share it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .sheetForm()
         }
     }
 }
@@ -220,10 +241,10 @@ private struct OneTimeCodeField: View {
                 HStack {
                     Group {
                         if visible {
-                            TextField("One-time code", text: $setup, prompt: Text("Optional: setup key or link"))
+                            TextField("One-time code", text: $setup, prompt: Text("Optional"))
                                 .font(.system(.body, design: .monospaced))
                         } else {
-                            SecureField("One-time code", text: $setup, prompt: Text("Optional: setup key or link"))
+                            SecureField("One-time code", text: $setup, prompt: Text("Optional"))
                         }
                     }
                     .labelsHidden()
@@ -234,8 +255,14 @@ private struct OneTimeCodeField: View {
                     }
                     .buttonStyle(.borderless)
                     .help(visible ? "Hide the setup key" : "Show the setup key")
-                    Button("From QR Code…") { readQRCode() }
-                        .help("Read the site's QR code from a screenshot or image")
+                    Button {
+                        readQRCode()
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Read the site's QR code from a screenshot or image. Or paste its setup "
+                        + "key or otpauth:// link.")
                 }
                 if let problem {
                     Text(problem)
@@ -291,8 +318,11 @@ private struct NotesField: View {
     @Binding var notes: String
 
     var body: some View {
-        TextField("Notes", text: $notes, prompt: Text("Optional"), axis: .vertical)
-            .lineLimit(3...8)
+        Section("Notes") {
+            TextField("Notes", text: $notes, prompt: Text("Optional"), axis: .vertical)
+                .labelsHidden()
+                .lineLimit(3...8)
+        }
     }
 }
 
@@ -354,19 +384,26 @@ private struct EditLoginSheet: View {
                     .frame(maxWidth: .infinity)
             } else {
                 Form {
-                    LabeledContent("Folder", value: item.folder ?? "None")
-                    TextField("Name", text: $name)
-                    TextField("Username", text: $username, prompt: Text("Optional"))
-                    TextField("Website", text: $url, prompt: Text("Optional, https://…"))
-                    PasswordField(title: "Password", password: $password)
-                    OneTimeCodeField(setup: $oneTimeCode)
+                    Section {
+                        TextField("Name", text: $name)
+                        TextField("Username", text: $username, prompt: Text("Optional"))
+                        TextField("Website", text: $url, prompt: Text("Optional, https://…"))
+                    }
+                    Section {
+                        PasswordField(title: "Password", password: $password)
+                        OneTimeCodeField(setup: $oneTimeCode)
+                    } footer: {
+                        if password != original?.password {
+                            Text("Change it on the website or service too, if you haven't already.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .multilineTextAlignment(.leading)
+                        }
+                    }
                     NotesField(notes: $notes)
                 }
-                if password != original?.password {
-                    Text("Change it on the website or service too, if you haven't already.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                .sheetForm()
             }
         }
         .task {
@@ -823,6 +860,7 @@ private struct HelpRecoverSheet: View {
                         .textSelection(.enabled)
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
                         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
                     Button("Copy Line") { model.copy(line) }
                 } else if request != nil {
@@ -983,6 +1021,7 @@ private struct ExportLoginsSheet: View {
                                 prompt: Text("At least \(minimum) characters"))
                     SecureField("Again", text: $again, prompt: Text("The same passphrase"))
                 }
+                .sheetForm()
                 if !again.isEmpty && !matches {
                     Text("The passphrases don't match.")
                         .font(.caption)
@@ -1034,6 +1073,7 @@ private struct MoveLoginSheet: View {
                     ForEach(choices, id: \.self) { Text($0).tag(String??.some($0)) }
                 }
             }
+            .sheetForm()
             Text(consequence)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1077,6 +1117,7 @@ private struct RenameFolderSheet: View {
             Form {
                 TextField("Name", text: $name)
             }
+            .sheetForm()
             if exists {
                 Text("There's already a folder with that name.")
                     .font(.caption)
@@ -1136,8 +1177,11 @@ private struct DeleteFolderSheet: View {
                 // Return cancels; deleting takes a deliberate click.
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.defaultAction)
-                Button(actionTitle, role: .destructive) {
+                Button(role: .destructive) {
                     Task { await delete() }
+                } label: {
+                    Text(actionTitle)
+                        .foregroundStyle(.red)
                 }
                 .disabled(plan == nil || busy)
             }
@@ -1271,8 +1315,11 @@ private struct DeleteLoginSheet: View {
                     // Return cancels; deleting takes a deliberate click.
                     Button("Cancel") { dismiss() }
                         .keyboardShortcut(.defaultAction)
-                    Button("Delete", role: .destructive) {
+                    Button(role: .destructive) {
                         Task { await delete() }
+                    } label: {
+                        Text("Delete")
+                            .foregroundStyle(.red)
                     }
                     .disabled(busy)
                 }
@@ -1402,6 +1449,7 @@ private struct ShareLoginSheet: View {
                             ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
                         }
                     }
+                    .sheetForm()
                     if let chosen {
                         Text((chosen.isGroup ? "Everyone in \(chosen.name)" : chosen.name)
                             + " will see this login"
@@ -1712,7 +1760,7 @@ private struct RemoveUserSheet: View {
                 // Return cancels; removing someone takes a deliberate click.
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.defaultAction)
-                Button("Remove", role: .destructive) {
+                Button(role: .destructive) {
                     Task {
                         busy = true
                         do {
@@ -1723,6 +1771,9 @@ private struct RemoveUserSheet: View {
                         }
                         busy = false
                     }
+                } label: {
+                    Text("Remove")
+                        .foregroundStyle(.red)
                 }
                 .disabled(busy)
             }
@@ -1766,6 +1817,7 @@ private struct NewFolderSheet: View {
                     Toggle("Share it like \u{201C}\(parent)\u{201D}", isOn: $shareLikeParent)
                 }
             }
+            .sheetForm()
             Text(caption)
                 .font(.caption)
                 .foregroundStyle(exists ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
@@ -1864,6 +1916,7 @@ private struct ShareSheet: View {
                         ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
                     }
                 }
+                .sheetForm()
                 if let chosen {
                     Text(chosen.isGroup
                         ? "Everyone in \(chosen.name) will see every login in \u{201C}\(folder)\u{201D}, "
@@ -1901,6 +1954,7 @@ private struct NewGroupSheet: View {
             Form {
                 TextField("Name", text: $name, prompt: Text("Engineering"))
             }
+            .sheetForm()
             if !people.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("In the group")
@@ -1917,6 +1971,7 @@ private struct NewGroupSheet: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
                     }
                     .frame(maxHeight: 160)
                 }
@@ -1968,6 +2023,7 @@ private struct AddToGroupSheet: View {
                         ForEach(candidates) { Text($0.name).tag($0.userId) }
                     }
                 }
+                .sheetForm()
                 if let person {
                     Text("\(person.name) will get every folder and login shared with \(group.name).")
                         .font(.caption)
@@ -2003,6 +2059,7 @@ private struct RenameGroupSheet: View {
             Form {
                 TextField("Name", text: $name)
             }
+            .sheetForm()
             if exists {
                 Text("There's already a group with that name.")
                     .font(.caption)
@@ -2039,6 +2096,7 @@ private struct InviteSheet: View {
                         .textSelection(.enabled)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
                     Button {
                         model.copy(invitation.command)
@@ -2055,6 +2113,7 @@ private struct InviteSheet: View {
                 Form {
                     TextField("Name", text: $name, prompt: Text("As your team will see them"))
                 }
+                .sheetForm()
             }
         }
     }
@@ -2079,6 +2138,7 @@ private struct ApproveSheet: View {
                 TextField("Fingerprint", text: $fingerprint, prompt: Text("1a2b-3c4d-5e6f-7a8b-9c0d"))
                     .font(.system(.body, design: .monospaced))
             }
+            .sheetForm()
             Text("Once approved, \(user.name) can see the folders and logins you share with them.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -2123,8 +2183,11 @@ struct SignOutSheet: View {
                 // Return cancels; signing out takes a deliberate click.
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.defaultAction)
-                Button("Sign Out", role: .destructive) {
+                Button(role: .destructive) {
                     Task { await signOut() }
+                } label: {
+                    Text("Sign Out")
+                        .foregroundStyle(.red)
                 }
                 .disabled(busy)
             }

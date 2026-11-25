@@ -18,6 +18,12 @@ TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
 export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # Match the app's deployment target so the linker doesn't warn about newer objects.
 export MACOSX_DEPLOYMENT_TARGET=14.0
+# Release builds of the app take the `app` profile (link-time optimization: smaller, slower
+# to build); Debug builds and running this on its own take the usual release profile.
+PROFILE=release
+if [ "${CONFIGURATION:-}" = Release ]; then
+    PROFILE=app
+fi
 
 cd "$REPO_DIR"
 installed="$(rustup target list --installed)"
@@ -25,8 +31,8 @@ libraries=()
 built=()
 for target in "${TARGETS[@]}"; do
     if grep -qx "$target" <<<"$installed"; then
-        cargo build --quiet --release -p keystead-ffi --target "$target"
-        libraries+=("$REPO_DIR/target/$target/release/libkeystead_ffi.a")
+        cargo build --quiet --profile "$PROFILE" -p keystead-ffi --target "$target"
+        libraries+=("$REPO_DIR/target/$target/$PROFILE/libkeystead_ffi.a")
         built+=("$target")
     else
         echo "warning: Rust target $target isn't installed, so the app won't run on it" \
@@ -52,7 +58,7 @@ mv "$BUILD_DIR/libkeystead_ffi.a.new" "$BUILD_DIR/libkeystead_ffi.a"
 # UniFFI reads the API description embedded in the compiled library.
 rm -rf "$BUILD_DIR/bindings"
 cargo run --quiet -p keystead-uniffi-bindgen -- generate \
-    --library "$REPO_DIR/target/${built[0]}/release/libkeystead_ffi.dylib" \
+    --library "$REPO_DIR/target/${built[0]}/$PROFILE/libkeystead_ffi.dylib" \
     --language swift --out-dir "$BUILD_DIR/bindings"
 
 rm -rf "$BUILD_DIR/headers"

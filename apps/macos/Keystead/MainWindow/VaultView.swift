@@ -48,24 +48,7 @@ struct VaultView: View {
                 LoginDetail(model: model, item: item)
                     .id(item.id)
             } else {
-                Text("Select a login")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    Task { await model.refresh() }
-                } label: {
-                    Label("Sync", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .help("Fetch changes from the server")
-                Button {
-                    model.lock()
-                } label: {
-                    Label("Lock", systemImage: "lock")
-                }
-                .help("Lock \(appName)")
+                ContentUnavailableView("No Login Selected", systemImage: "key.horizontal")
             }
         }
         .overlay(alignment: .bottom) {
@@ -154,11 +137,28 @@ private struct Sidebar: View {
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(identity.name)
+                            .lineLimit(1)
                         Text(identity.isOwner ? "Owner · \(host(identity.server))" : host(identity.server))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                     Spacer()
+                    // Out of the toolbar, which stays for what's selected; also in the Vault menu.
+                    Button {
+                        Task { await model.refresh() }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Sync with the server (⌘R)")
+                    Button {
+                        model.lock()
+                    } label: {
+                        Image(systemName: "lock")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Lock \(appName) (⇧⌘L)")
                 }
                 .padding(10)
             }
@@ -371,13 +371,21 @@ private struct LoginList: View {
 
     private func rows(_ items: [ItemSummary]) -> some View {
         ForEach(items) { item in
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.name)
-                Text(subtitle(for: item))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                LoginTile(name: item.name, url: item.url, size: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.name)
+                        .lineLimit(1)
+                    let subtitle = subtitle(for: item)
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 3)
         }
     }
 
@@ -462,80 +470,60 @@ private struct LoginDetail: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Username") {
-                    HStack {
-                        Text(item.username.isEmpty ? "—" : item.username)
-                            .textSelection(.enabled)
-                        if !item.username.isEmpty {
-                            Button {
-                                model.copy(item.username)
-                            } label: {
-                                Image(systemName: "doc.on.doc")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Copy username")
-                        }
+                if !item.username.isEmpty {
+                    FieldRow("Username", copyHelp: "Copy username") {
+                        model.copy(item.username)
+                    } value: {
+                        Text(item.username)
                     }
                 }
-                LabeledContent("Password") {
-                    HStack {
-                        Text(showsPassword ? details?.password ?? "" : "••••••••••••")
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                        Button {
-                            Task { await reveal(\.showsPassword) }
-                        } label: {
-                            Image(systemName: showsPassword ? "eye.slash" : "eye")
-                        }
-                        .buttonStyle(.borderless)
-                        .help(showsPassword ? "Hide password" : "Show password")
-                        Button {
-                            Task { await model.copyPassword(of: item) }
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Copy password (cleared after 30 seconds)")
+                FieldRow(
+                    "Password", copyHelp: "Copy password (cleared after 30 seconds)"
+                ) {
+                    Task { await model.copyPassword(of: item) }
+                } value: {
+                    Text(showsPassword ? details?.password ?? "" : "••••••••••••")
+                        .font(.system(.body, design: .monospaced))
+                } accessory: { hovering in
+                    RevealButton(what: "password", shown: showsPassword, hovering: hovering) {
+                        await reveal(\.showsPassword)
                     }
                 }
                 if item.hasOneTimeCode {
                     OneTimeCodeRow(model: model, item: item)
                 }
                 if !item.url.isEmpty {
-                    LabeledContent("Website") {
-                        HStack {
-                            Text(item.url)
-                                .textSelection(.enabled)
-                            if let url = URL(string: item.url), url.scheme != nil {
-                                Link(destination: url) {
-                                    Image(systemName: "arrow.up.forward.square")
-                                }
+                    FieldRow("Website", copyHelp: "Copy website address", valueCopies: false) {
+                        model.copy(item.url)
+                    } value: {
+                        if let url = URL(string: item.url), url.scheme != nil {
+                            Link(item.url, destination: url)
                                 .help("Open in your browser")
-                            }
-                        }
-                    }
-                }
-                LabeledContent("Notes") {
-                    HStack(alignment: .firstTextBaseline) {
-                        if showsNotes {
-                            let notes = details?.notes ?? ""
-                            Text(notes.isEmpty ? "None" : notes)
-                                .foregroundStyle(notes.isEmpty ? .secondary : .primary)
-                                .textSelection(.enabled)
-                                .multilineTextAlignment(.trailing)
                         } else {
-                            Text("Hidden")
-                                .foregroundStyle(.secondary)
+                            Text(item.url)
                         }
-                        Button {
-                            Task { await reveal(\.showsNotes) }
-                        } label: {
-                            Image(systemName: showsNotes ? "eye.slash" : "eye")
-                        }
-                        .buttonStyle(.borderless)
-                        .help(showsNotes ? "Hide notes" : "Show notes")
                     }
                 }
+                FieldRow("Notes", copy: nil) {
+                    if showsNotes {
+                        let notes = details?.notes ?? ""
+                        Text(notes.isEmpty ? "None" : notes)
+                            .foregroundStyle(notes.isEmpty ? .secondary : .primary)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.trailing)
+                    } else {
+                        Text("Hidden")
+                            .foregroundStyle(.secondary)
+                    }
+                } accessory: { hovering in
+                    RevealButton(what: "notes", shown: showsNotes, hovering: hovering) {
+                        await reveal(\.showsNotes)
+                    }
+                }
+            } header: {
+                LoginHeader(item: item)
+            }
+            Section {
                 // A login shared with you may sit in a folder of theirs you can't see.
                 if item.folder != nil || !item.sharedWithMe {
                     LabeledContent("Folder", value: item.folder ?? "None")
@@ -553,10 +541,6 @@ private struct LoginDetail: View {
                 if item.role != .manage {
                     LabeledContent("Your access", value: item.role.label)
                 }
-            } header: {
-                Text(item.name)
-                    .font(.title2.weight(.semibold))
-                    .padding(.bottom, 4)
             }
             let exposures = model.toChange(for: item)
             if !exposures.isEmpty {
@@ -564,8 +548,7 @@ private struct LoginDetail: View {
                     Label {
                         Text("\(ListFormatter.localizedString(byJoining: exposures.map(\.userName))) "
                             + "could see this password until losing access \(day(exposures[0].since)), "
-                            + "and may still know it. Change it at the website, then save the new "
-                            + "one here.")
+                            + "and may still know it. Change it at the website, then save it here.")
                             .fixedSize(horizontal: false, vertical: true)
                     } icon: {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -587,29 +570,43 @@ private struct LoginDetail: View {
                     }
                 }
             }
-            Section {
-                HStack {
-                    Button("Edit…") { model.sheet = .editLogin(item) }
-                        .disabled(item.role == .view)
-                    Button(item.role == .manage ? "Share…" : "Access…") {
-                        model.sheet = .shareLogin(item)
-                    }
-                    Button("History…") { model.sheet = .history(item) }
-                        .disabled(item.role == .view)
-                    Button("Move To…") { model.sheet = .moveLogin(item) }
-                        .disabled(!model.canMove(item))
-                        .help("Earlier versions of this login, and bringing one back")
-                    Spacer()
-                    Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
-                        .disabled(item.role == .view)
-                }
-            }
             if let error {
                 Text(error)
                     .foregroundStyle(.red)
             }
         }
         .formStyle(.grouped)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    model.sheet = .editLogin(item)
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                .help("Edit this login")
+                .disabled(item.role == .view)
+                Button {
+                    model.sheet = .shareLogin(item)
+                } label: {
+                    Label(
+                        item.role == .manage ? "Share" : "Access",
+                        systemImage: item.role == .manage ? "person.crop.circle.badge.plus" : "person.2")
+                }
+                .help(item.role == .manage ? "Share this login" : "Who can open this login")
+                Menu {
+                    Button("History…") { model.sheet = .history(item) }
+                        .disabled(item.role == .view)
+                    Button("Move To…") { model.sheet = .moveLogin(item) }
+                        .disabled(!model.canMove(item))
+                    Divider()
+                    Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
+                        .disabled(item.role == .view)
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .help("History, Move To and Delete")
+            }
+        }
         .onChange(of: model.items) {
             // The login may have changed; don't keep showing the old password or notes.
             details = nil
@@ -642,6 +639,118 @@ private struct LoginDetail: View {
     }
 }
 
+/// A login's tile, name, and website or where it lives, above its fields.
+private struct LoginHeader: View {
+    let item: ItemSummary
+
+    var body: some View {
+        PageHeader(title: item.name, subtitle: item.url.isEmpty ? item.place : host(item.url)) {
+            LoginTile(name: item.name, url: item.url, size: 52)
+        }
+    }
+}
+
+/// One field of a login: its label and value and, while the pointer is over it, a button
+/// that copies it, which turns into a check mark for a moment. Clicking the value copies it
+/// too, unless it's a link. `accessory` adds buttons of its own, told when the pointer is
+/// over the row.
+private struct FieldRow<Value: View, Accessory: View>: View {
+    let label: String
+    let copyHelp: String
+    let valueCopies: Bool
+    let copy: (() -> Void)?
+    let value: Value
+    let accessory: (Bool) -> Accessory
+
+    @State private var hovering = false
+    @State private var copied = false
+
+    init(
+        _ label: String, copyHelp: String = "Copy", valueCopies: Bool = true,
+        copy: (() -> Void)?, @ViewBuilder value: () -> Value,
+        @ViewBuilder accessory: @escaping (Bool) -> Accessory
+    ) {
+        self.label = label
+        self.copyHelp = copyHelp
+        self.valueCopies = valueCopies
+        self.copy = copy
+        self.value = value()
+        self.accessory = accessory
+    }
+
+    var body: some View {
+        LabeledContent(label) {
+            HStack(spacing: 8) {
+                if let copy, valueCopies {
+                    Button {
+                        copied(copy)
+                    } label: {
+                        value
+                    }
+                    .buttonStyle(.plain)
+                    .help(copyHelp)
+                } else {
+                    value
+                }
+                accessory(hovering)
+                if let copy {
+                    Button {
+                        copied(copy)
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .contentTransition(.symbolEffect(.replace))
+                    }
+                    .buttonStyle(.borderless)
+                    .help(copyHelp)
+                    .opacity(hovering || copied ? 1 : 0)
+                }
+            }
+        }
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: hovering)
+    }
+
+    private func copied(_ copy: () -> Void) {
+        copy()
+        copied = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            copied = false
+        }
+    }
+}
+
+extension FieldRow where Accessory == EmptyView {
+    init(
+        _ label: String, copyHelp: String = "Copy", valueCopies: Bool = true,
+        copy: (() -> Void)?, @ViewBuilder value: () -> Value
+    ) {
+        self.init(
+            label, copyHelp: copyHelp, valueCopies: valueCopies, copy: copy, value: value,
+            accessory: { _ in EmptyView() })
+    }
+}
+
+/// Shows or hides a field: there while the pointer is over its row, or while it's shown.
+private struct RevealButton: View {
+    let what: String
+    let shown: Bool
+    let hovering: Bool
+    let toggle: () async -> Void
+
+    var body: some View {
+        Button {
+            Task { await toggle() }
+        } label: {
+            Image(systemName: shown ? "eye.slash" : "eye")
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.borderless)
+        .help(shown ? "Hide \(what)" : "Show \(what)")
+        .opacity(hovering || shown ? 1 : 0)
+    }
+}
+
 /// A login's current one-time code and the seconds it has left, fetched again as each one
 /// runs out.
 private struct OneTimeCodeRow: View {
@@ -652,12 +761,14 @@ private struct OneTimeCodeRow: View {
     @State private var error: String?
 
     var body: some View {
-        LabeledContent("One-time code") {
-            HStack {
+        FieldRow(
+            "One-time code", copyHelp: "Copy one-time code (cleared after 30 seconds)",
+            copy: code == nil ? nil : { Task { await model.copyOneTimeCode(of: item) } }
+        ) {
+            HStack(spacing: 8) {
                 if let code {
                     Text(grouped(code.code))
                         .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         let left = max(0, Int(expires.timeIntervalSince(context.date).rounded(.up)))
                         Text("\(left)s")
@@ -665,13 +776,6 @@ private struct OneTimeCodeRow: View {
                             .foregroundStyle(left <= 5 ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                             .help("Seconds until the next code")
                     }
-                    Button {
-                        Task { await model.copyOneTimeCode(of: item) }
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Copy one-time code (cleared after 30 seconds)")
                 } else if let error {
                     Text(error)
                         .foregroundStyle(.red)
@@ -714,15 +818,20 @@ private struct DeletedList: View {
 
     var body: some View {
         List(model.recentlyDeleted, selection: $selection) { login in
-            VStack(alignment: .leading, spacing: 2) {
-                Text(login.name)
-                Text(["Deleted by \(login.deletedBy) \(day(login.deletedAt))", login.folder ?? ""]
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " · "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                LoginTile(name: login.name, url: "", size: 28, muted: true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(login.name)
+                        .lineLimit(1)
+                    Text(["Deleted by \(login.deletedBy) \(day(login.deletedAt))", login.folder ?? ""]
+                        .filter { !$0.isEmpty }
+                        .joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 3)
         }
         .navigationTitle("Recently Deleted")
     }
@@ -744,32 +853,46 @@ private struct DeletedDetail: View {
                     LabeledContent("Username", value: login.username)
                 }
                 LabeledContent("Folder", value: login.folder ?? "None")
-                LabeledContent("Deleted", value: "By \(login.deletedBy) \(day(login.deletedAt))")
                 LabeledContent("Kept until", value: String(day(login.keptUntil).dropFirst(3)))
-            } header: {
-                Text(login.name)
-                    .font(.title2.weight(.semibold))
-                    .padding(.bottom, 4)
-            }
-            Section {
-                Text("Bringing it back gives it to everyone who had it before it was deleted, as "
-                    + "it was then. After the date above it's gone for good.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button("Bring Back") { run { note = try await model.undelete(login) } }
-                    Spacer()
-                    Button("Delete Now…", role: .destructive) { confirmingPurge = true }
-                }
-                .disabled(busy)
                 if let note {
                     Text(note)
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            } header: {
+                PageHeader(
+                    title: login.name,
+                    subtitle: "Deleted by \(login.deletedBy) \(day(login.deletedAt))"
+                ) {
+                    LoginTile(name: login.name, url: "", size: 52, muted: true)
+                }
+            } footer: {
+                Text("Bringing it back gives it to everyone who had it before it was deleted, as "
+                    + "it was then. After the date above it's gone for good.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
             }
         }
         .formStyle(.grouped)
+        .disabled(busy)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    run { note = try await model.undelete(login) }
+                } label: {
+                    Label("Bring Back", systemImage: "arrow.uturn.backward")
+                }
+                .help("Bring it back for everyone who had it")
+                Button {
+                    confirmingPurge = true
+                } label: {
+                    Label("Delete Now", systemImage: "trash")
+                }
+                .help("Delete it for good now")
+            }
+        }
         .confirmationDialog(
             "Delete \u{201C}\(login.name)\u{201D} for good?", isPresented: $confirmingPurge
         ) {
@@ -801,18 +924,18 @@ private struct PeopleList: View {
     var body: some View {
         List(selection: $selection) {
             ForEach(model.users) { user in
-                HStack(spacing: 8) {
-                    Image(systemName: "person.crop.circle")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 10) {
+                    Avatar(name: user.name, size: 28)
+                        .opacity(user.removed ? 0.5 : 1)
+                    VStack(alignment: .leading, spacing: 1) {
                         Text(user.userId == model.identity?.userId ? "\(user.name) (you)" : user.name)
+                            .lineLimit(1)
                         Text(status(of: user))
                             .font(.caption)
                             .foregroundStyle(user.approved ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.vertical, 3)
             }
             if model.isOwner && model.users.count <= 1 {
                 // An ordinary row, not a bottom inset: wrapping text in a List's inset
@@ -866,40 +989,46 @@ private struct PersonDetail: View {
             })
     }
 
+    private var header: some View {
+        PageHeader(title: user.name, subtitle: isMe ? "You · \(status(of: user))" : status(of: user)) {
+            Avatar(name: user.name, size: 52)
+        }
+    }
+
     var body: some View {
         Form {
-            Section {
-                LabeledContent("Status", value: status(of: user))
-            } header: {
-                Text(user.name)
-                    .font(.title2.weight(.semibold))
-                    .padding(.bottom, 4)
-            }
             if isMe, let identity = model.identity {
-                Section("Your fingerprint") {
-                    Text(identity.fingerprint)
-                        .font(.system(.title3, design: .monospaced))
-                        .textSelection(.enabled)
-                    if !user.approved {
-                        Text("Read it to the owner, in person or on a call, so they can approve you.")
-                            .foregroundStyle(.secondary)
+                Section {
+                    LabeledContent("Fingerprint") {
+                        Text(identity.fingerprint)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
                     }
-                }
-                Section("Recovery Kit") {
-                    Text("If this Mac is lost, broken or wiped, your Recovery Kit brings your "
-                        + "account back on a new one.")
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Show Recovery Kit…") { model.sheet = .recoveryKit(afterSetup: false) }
+                    ActionRow(title: "Recovery Kit", button: "Show…") {
+                        model.sheet = .recoveryKit(afterSetup: false)
+                    }
+                } header: {
+                    header
+                } footer: {
+                    Text(user.approved
+                        ? "If this Mac is lost, broken or wiped, your Recovery Kit brings your "
+                            + "account back on a new one."
+                        : "Read your fingerprint to the owner, in person or on a call, so they "
+                            + "can approve you.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
                 }
                 if identity.recovering {
                     Section {
                         Label("The owner has started a recovery for your account.",
                               systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                        Text("If you didn't ask for one, cancel it: someone may be trying to get new "
-                            + "keys for your account.")
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button("Cancel Recovery", role: .destructive) {
+                        ActionRow(
+                            title: "If you didn't ask for one, cancel it.",
+                            button: "Cancel Recovery", role: .destructive
+                        ) {
                             Task {
                                 do {
                                     try await model.cancelRecovery(for: identity.userId)
@@ -911,23 +1040,27 @@ private struct PersonDetail: View {
                     }
                 }
                 if !identity.isOwner {
-                    Section("If you lose everything") {
+                    Section {
                         Toggle("Let the owner recover my own logins and folders", isOn: escrow(identity))
-                        Text("If you lose every device and your Recovery Kit, the owner can help you "
-                            + "back in, and what's shared with you comes back. With this on, your "
-                            + "own logins and the folders only you are in come back too, but the "
-                            + "owner can open them at any time.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                         if let problem {
                             Text(problem)
                                 .foregroundStyle(.red)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                    } header: {
+                        Text("If you lose everything")
+                    } footer: {
+                        Text("If you lose every device and your Recovery Kit, the owner can help "
+                            + "you back in, and what's shared with you comes back. With this on, "
+                            + "your own logins and the folders only you are in come back too, but "
+                            + "the owner can open them at any time.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
                     }
                 }
-                Section("Your devices") {
+                Section("Devices") {
                     if let problem = model.devicesProblem {
                         Text("Couldn't load your devices: \(problem).")
                             .foregroundStyle(.secondary)
@@ -939,61 +1072,92 @@ private struct PersonDetail: View {
                     Button("Add a Device…") { model.sheet = .addDevice }
                         .help("Use your account on another Mac or computer too")
                 }
+                // Fetched here, where they're shown, rather than on every sync.
+                .task { await model.reloadDevices() }
             } else if !user.approved {
                 Section {
                     if model.isOwner {
-                        Text("\(user.name) has joined and is waiting for you. Ask them to read out "
-                            + "the fingerprint their Keystead shows, in person or on a call, and "
-                            + "type it in. That proves the keys on the server are really theirs.")
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button("Approve \(user.name)…") { model.sheet = .approve(user) }
+                        ActionRow(title: "Their fingerprint", button: "Approve…") {
+                            model.sheet = .approve(user)
+                        }
                     } else {
-                        Text("Waiting for the owner to approve \(user.name).")
+                        Text("Waiting for the owner to approve them.")
                             .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    header
+                } footer: {
+                    if model.isOwner {
+                        Text("\(user.name) has joined. Ask them to read out the fingerprint "
+                            + "their Keystead shows, in person or on a call, to prove the keys on "
+                            + "the server are really theirs.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
                     }
                 }
             } else if user.removed {
                 Section {
-                    Text("\(user.name) was removed from the team. Their devices no longer work, "
-                        + "and nobody can share with them.")
+                    Text("Their devices no longer work, and nobody can share with them.")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                } header: {
+                    header
                 }
                 PasswordsToChange(model: model, user: user)
             } else {
                 Section {
-                    Text("Share a folder to give \(user.name) its logins: everything in it now, "
-                        + "and anything added later.")
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Share a Folder…") { model.sheet = .share(folder: nil, user: user) }
-                        .disabled(!model.folders.contains { model.manages(folder: $0) })
+                    ActionRow(
+                        title: "Folders", button: "Share a Folder…",
+                        disabled: !model.folders.contains { model.manages(folder: $0) }
+                    ) {
+                        model.sheet = .share(folder: nil, user: user)
+                    }
+                } header: {
+                    header
+                } footer: {
+                    Text("Sharing a folder gives \(user.name) everything in it, now and later.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
                 }
                 PasswordsToChange(model: model, user: user)
                 if model.isOwner && !user.isOwner {
-                    Section("If \(user.name) loses everything") {
-                        Text(user.recovering
-                            ? "A recovery for \(user.name) is waiting for your approval."
-                            : "If \(user.name) loses every device and their Recovery Kit, you can "
-                                + "help them back in with new keys.")
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(user.escrow
-                            ? "Their own logins and folders would come back too: they keep them "
-                                + "in escrow with you."
-                            : "Their own logins and the folders only they're in wouldn't come "
-                                + "back: escrow is off.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button(user.recovering ? "Continue Recovery…" : "Help Recover…") {
+                    Section {
+                        ActionRow(
+                            title: user.recovering ? "A recovery is waiting for you" : "Recovery",
+                            button: user.recovering ? "Continue…" : "Help Recover…"
+                        ) {
                             model.sheet = .helpRecover(user)
                         }
+                    } header: {
+                        Text("If \(user.name) loses everything")
+                    } footer: {
+                        Text(user.escrow
+                            ? "With new keys, what's shared with them comes back, and their own "
+                                + "logins and folders too: they keep them in escrow with you."
+                            : "With new keys, what's shared with them comes back. Their own "
+                                + "logins and the folders only they're in don't: escrow is off.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
                     }
                     Section {
-                        Text("Removing \(user.name) stops their devices and takes away every "
-                            + "folder and login, for example when they leave the company.")
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button("Remove from Team…", role: .destructive) {
+                        ActionRow(
+                            title: "Remove from the team", button: "Remove…", role: .destructive
+                        ) {
                             model.sheet = .removeUser(user)
                         }
+                    } footer: {
+                        Text("Their devices stop working and they lose every folder and login, "
+                            + "for example when they leave the company.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
                     }
                 }
             }
@@ -1012,19 +1176,23 @@ private struct PasswordsToChange: View {
     var body: some View {
         let entries = model.toChange.filter { $0.userId == user.userId }
         if !entries.isEmpty {
-            Section("Passwords to change") {
-                Text("\(user.name) could see \(entries.count == 1 ? "1 password" : "\(entries.count) passwords") "
-                    + "you can change, until losing access \(day(entries[0].since)).")
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button("Show") { model.section = .toChange }
-                    Spacer()
-                    Button("Keep All…") { confirming = true }
+            Section {
+                LabeledContent(entries.count == 1 ? "1 password to change" : "\(entries.count) passwords to change") {
+                    HStack {
+                        Button("Keep All…") { confirming = true }
+                        Button("Show") { model.section = .toChange }
+                    }
                 }
                 if let error {
                     Text(error)
                         .foregroundStyle(.red)
                 }
+            } footer: {
+                Text("\(user.name) could see them until losing access \(day(entries[0].since)).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
             }
             .confirmationDialog(
                 "Keep every password \(user.name) could see?", isPresented: $confirming
@@ -1055,18 +1223,18 @@ private struct GroupList: View {
     var body: some View {
         List(selection: $selection) {
             ForEach(model.groups) { group in
-                HStack(spacing: 8) {
-                    Image(systemName: "person.3")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 10) {
+                    GroupTile(size: 28)
+                    VStack(alignment: .leading, spacing: 1) {
                         Text(group.name)
+                            .lineLimit(1)
                         Text(summary(of: group))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.vertical, 3)
             }
             if model.groups.isEmpty {
                 // An ordinary row, not a bottom inset, as in People.
@@ -1117,11 +1285,18 @@ private struct GroupDetail: View {
     @State private var busy = false
     @State private var error: String?
 
+    private var memberCount: String {
+        let count = group.members.count == 1 ? "1 person" : "\(group.members.count) people"
+        if group.members.contains(where: { $0.isMe && $0.isManager }) { return "\(count) · you manage it" }
+        return group.isMember ? "\(count) · you're in it" : count
+    }
+
     var body: some View {
         Form {
             Section {
                 ForEach(group.members) { member in
-                    HStack {
+                    HStack(spacing: 10) {
+                        Avatar(name: member.name, size: 24)
                         Text(member.isMe ? "\(member.name) (you)" : member.name)
                         if member.isManager {
                             Text("Manager")
@@ -1153,51 +1328,19 @@ private struct GroupDetail: View {
                         .foregroundStyle(.secondary)
                 }
             } header: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(group.name)
-                        .font(.title2.weight(.semibold))
-                    Text(group.members.count == 1 ? "1 person" : "\(group.members.count) people")
-                        .foregroundStyle(.secondary)
+                PageHeader(title: group.name, subtitle: memberCount) {
+                    GroupTile(size: 52)
                 }
-                .padding(.bottom, 4)
-            }
-            Section {
-                Text("Folders and logins shared with \(group.name) reach everyone in it, "
-                    + "including people added later. Taking someone out gives the group, and the "
-                    + "folders shared with it, new keys, so they can't read what's saved afterwards.")
-                    .fixedSize(horizontal: false, vertical: true)
-                if group.canManage && !group.canAdd {
-                    Text("Only managers who are in the group can add people, as that hands them "
-                        + "its key.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack {
-                    if group.canAdd {
-                        Button("Add Person…") { model.sheet = .addToGroup(group) }
-                    }
-                    Button("Share a Folder…") { model.sheet = .shareWithGroup(group) }
-                        .disabled(!model.folders.contains { model.manages(folder: $0) })
-                    if group.canManage {
-                        Button("Rename…") { model.sheet = .renameGroup(group) }
-                    }
-                    Spacer()
-                    if busy {
-                        ProgressView().controlSize(.small)
-                    }
-                    if group.isMember {
-                        Button("Leave…") { leaving = true }
-                    }
-                }
-            }
-            if group.canManage {
-                Section {
-                    Text("Deleting \(group.name) takes away what only it gave the people in it, "
-                        + "and gives the folders shared with it new keys.")
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Delete Group…", role: .destructive) { deleting = true }
-                }
+            } footer: {
+                Text("Folders and logins shared with \(group.name) reach everyone in it, including "
+                    + "people added later. Taking someone out gives it new keys."
+                    + (group.canManage && !group.canAdd
+                        ? " Only managers who are in the group can add people, as that hands them its key."
+                        : ""))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
             }
             if let error {
                 Text(error)
@@ -1207,6 +1350,45 @@ private struct GroupDetail: View {
         }
         .formStyle(.grouped)
         .disabled(busy)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if busy {
+                    ProgressView().controlSize(.small)
+                }
+                if group.canAdd {
+                    Button {
+                        model.sheet = .addToGroup(group)
+                    } label: {
+                        Label("Add Person", systemImage: "person.badge.plus")
+                    }
+                    .help("Add someone to \(group.name)")
+                }
+                Button {
+                    model.sheet = .shareWithGroup(group)
+                } label: {
+                    Label("Share a Folder", systemImage: "folder.badge.plus")
+                }
+                .help("Share a folder with everyone in \(group.name)")
+                .disabled(!model.folders.contains { model.manages(folder: $0) })
+                if group.canManage || group.isMember {
+                    Menu {
+                        if group.canManage {
+                            Button("Rename…") { model.sheet = .renameGroup(group) }
+                        }
+                        if group.isMember {
+                            Button("Leave…") { leaving = true }
+                        }
+                        if group.canManage {
+                            Divider()
+                            Button("Delete Group…", role: .destructive) { deleting = true }
+                        }
+                    } label: {
+                        Label("More", systemImage: "ellipsis.circle")
+                    }
+                    .help("Rename, Leave and Delete")
+                }
+            }
+        }
         .confirmationDialog("Leave \u{201C}\(group.name)\u{201D}?", isPresented: $leaving) {
             Button("Leave", role: .destructive) {
                 if let me = group.members.first(where: \.isMe) {

@@ -107,7 +107,17 @@ final class AppModel {
 
     private(set) var phase: Phase
     private(set) var identity: Identity?
-    private(set) var items: [ItemSummary] = []
+    private(set) var items: [ItemSummary] = [] {
+        didSet {
+            searchTexts = items.map(Self.searchText)
+            nameRanks = nil
+        }
+    }
+    /// Where each of `items` comes by name, for quick search; worked out when first needed.
+    @ObservationIgnored private var nameRanks: [Int]?
+    /// What search looks in for each of `items`, in the same order: lowercased once when
+    /// the list changes, not on every keystroke.
+    private(set) var searchTexts: [String] = []
     private(set) var folders: [String] = []
     /// Your role in each folder, by name.
     private(set) var folderRoles: [String: Role] = [:]
@@ -116,7 +126,11 @@ final class AppModel {
     private(set) var groups: [GroupSummary] = []
     /// Passwords to change: who lost access to which logins you can change, most recent
     /// first.
-    private(set) var toChange: [ToChange] = []
+    private(set) var toChange: [ToChange] = [] {
+        didSet { toChangeByItem = Dictionary(grouping: toChange, by: \.itemId) }
+    }
+    /// `toChange` by login, for the list and each login's page.
+    private(set) var toChangeByItem: [String: [ToChange]] = [:]
     /// Reads an export file (.kdbx) with its passphrase, off the main thread.
     func readExport(_ file: Data, passphrase: String) async throws -> LoginExport {
         try await Task.detached { try LoginExport.read(file: file, passphrase: passphrase) }.value
@@ -196,20 +210,76 @@ final class AppModel {
     /// Logins in `section` matching every word of `query` in name, username, URL, folder or
     /// who shared them.
     func items(matching query: String, in section: Section = .allLogins) -> [ItemSummary] {
-        let words = query.lowercased().split(whereSeparator: \.isWhitespace)
-        return items.filter { item in
+        if section == .recentlyDeleted { return [] }
+        // Each word as bytes, compared byte for byte: both sides are lowercased and composed
+        // the same way, so this matches what a Unicode-aware search would, many times faster.
+        let words = Self.normalized(query).split(whereSeparator: \.isWhitespace)
+            .map { Array(String($0).utf8CString) }
+        var found: [ItemSummary] = []
+        for (item, text) in zip(items, searchTexts) {
             switch section {
-            case .folder(let folder): guard item.folder == folder else { return false }
-            case .sharedWithMe: guard item.sharedWithMe else { return false }
-            case .toChange: guard toChange.contains(where: { $0.itemId == item.id }) else { return false }
-            case .health: guard health(for: item) != nil else { return false }
-            case .recentlyDeleted: return false
-            case .allLogins, .people, .groups: break
+            case .folder(let folder): guard item.folder == folder else { continue }
+            case .sharedWithMe: guard item.sharedWithMe else { continue }
+            case .toChange: guard toChangeByItem[item.id] != nil else { continue }
+            case .health: guard healthByItem[item.id] != nil else { continue }
+            case .allLogins, .people, .groups, .recentlyDeleted: break
             }
-            let text = "\(item.name) \(item.username) \(item.url) \(item.folder ?? "") \(item.owner ?? "")"
-                .lowercased()
-            return words.allSatisfy { text.contains($0) }
+            let matches = words.isEmpty || text.withCString { text in
+                words.allSatisfy { word in
+                    word.withUnsafeBufferPointer { strstr(text, $0.baseAddress!) != nil }
+                }
+            }
+            if matches { found.append(item) }
         }
+        return found
+    }
+
+    /// Quick search's results: logins matching `query`, those whose name starts with its
+    /// first word first, then by name, at most `limit` of them.
+    func quickSearch(_ query: String, limit: Int = 50) -> [ItemSummary] {
+        let words = Self.normalized(query).split(whereSeparator: \.isWhitespace)
+            .map { Array(String($0).utf8CString) }
+        let first = words.first
+        let ranks = nameRanks ?? rankByName()
+        var hits: [(starts: Bool, rank: Int, index: Int)] = []
+        for (index, text) in searchTexts.enumerated() {
+            text.withCString { text in
+                let matches = words.allSatisfy { word in
+                    word.withUnsafeBufferPointer { strstr(text, $0.baseAddress!) != nil }
+                }
+                guard matches else { return }
+                // The name comes first in the search text.
+                let starts = first?.withUnsafeBufferPointer {
+                    strncmp(text, $0.baseAddress!, $0.count - 1) == 0
+                } ?? false
+                hits.append((starts, ranks[index], index))
+            }
+        }
+        hits.sort { ($0.starts ? 0 : 1, $0.rank) < ($1.starts ? 0 : 1, $1.rank) }
+        return hits.prefix(limit).map { items[$0.index] }
+    }
+
+    /// Ranks `items` by name, as Finder sorts ("Login 9" before "Login 10"), once per list.
+    private func rankByName() -> [Int] {
+        let order = items.indices.sorted {
+            items[$0].name.localizedStandardCompare(items[$1].name) == .orderedAscending
+        }
+        var ranks = [Int](repeating: 0, count: items.count)
+        for (rank, index) in order.enumerated() {
+            ranks[index] = rank
+        }
+        nameRanks = ranks
+        return ranks
+    }
+
+    private static func searchText(_ item: ItemSummary) -> String {
+        normalized(
+            "\(item.name) \(item.username) \(item.url) \(item.folder ?? "") \(item.owner ?? "")")
+    }
+
+    /// Lowercased, with accents composed, so the same text always has the same bytes.
+    private static func normalized(_ text: String) -> String {
+        text.lowercased().precomposedStringWithCanonicalMapping
     }
 
     /// Whether any login was shared with you one by one, so the sidebar shows them.
@@ -217,14 +287,21 @@ final class AppModel {
 
     /// Who lost access to this login while its password stayed the same, most recent first.
     func toChange(for item: ItemSummary) -> [ToChange] {
-        toChange.filter { $0.itemId == item.id }
+        toChangeByItem[item.id] ?? []
     }
 
     /// How many logins are on the To Change list.
-    var toChangeCount: Int { Set(toChange.map(\.itemId)).count }
+    var toChangeCount: Int { toChangeByItem.count }
 
     /// The last password health check; nil until Password Health is first shown.
-    private(set) var health: PasswordHealth?
+    private(set) var health: PasswordHealth? {
+        didSet {
+            healthByItem = Dictionary(
+                (health?.logins ?? []).map { ($0.itemId, $0) }, uniquingKeysWith: { a, _ in a })
+        }
+    }
+    /// `health` by login.
+    private(set) var healthByItem: [String: HealthLogin] = [:]
     private(set) var checkingHealth = false
 
     /// Checks the passwords of the logins you can change: weak, reused or over a year old.
@@ -242,7 +319,7 @@ final class AppModel {
 
     /// What's wrong with this login's password, from the last check.
     func health(for item: ItemSummary) -> HealthLogin? {
-        health?.logins.first { $0.itemId == item.id }
+        healthByItem[item.id]
     }
 
     var filteredItems: [ItemSummary] { items(matching: search) }
@@ -701,8 +778,9 @@ final class AppModel {
     func refresh() async {
         do {
             let result = try await perform { try $0.sync() }
-            users = try await perform { try $0.users() }
-            identity = try await perform { try $0.identity() }
+            // The sync fetched the directory already.
+            update(\.users, to: try await perform { try $0.knownUsers() })
+            update(\.identity, to: try await perform { try $0.identity() })
             if result.rejected > 0 {
                 message = "Ignored \(result.rejected) item(s) not signed by an approved user."
             } else if let problem = result.rekeyProblems.first {
@@ -718,16 +796,25 @@ final class AppModel {
             message = "Couldn't sync (\(describe(error))). Showing the copy on this Mac."
         }
         await reloadLocal()
-        await reloadDevices()
         await reloadDeleted()
+    }
+
+    /// Sets a property only if its value changed, so the views that show it aren't drawn
+    /// again for nothing after a sync that brought nothing new.
+    private func update<Value: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<AppModel, Value>, to value: Value
+    ) {
+        if self[keyPath: keyPath] != value {
+            self[keyPath: keyPath] = value
+        }
     }
 
     /// Loads Recently Deleted on its own, like the device list.
     private func reloadDeleted() async {
         do {
             let deleted = try await perform { try $0.deletedLogins() }
-            keepsDeleted = deleted != nil
-            recentlyDeleted = deleted ?? []
+            update(\.keepsDeleted, to: deleted != nil)
+            update(\.recentlyDeleted, to: deleted ?? [])
         } catch {
             recentlyDeleted = []
         }
@@ -755,10 +842,13 @@ final class AppModel {
     }
 
     /// Loads the device list on its own, so an older server that has no device list
-    /// doesn't make syncing look broken.
-    private func reloadDevices() async {
+    /// doesn't make syncing look broken. Asked for where it's shown, not on every sync.
+    func reloadDevices() async {
+        #if DEBUG
+        if isDemo { return }
+        #endif
         do {
-            devices = try await perform { try $0.devices() }
+            update(\.devices, to: try await perform { try $0.devices() })
             devicesProblem = nil
         } catch {
             devices = []
@@ -1325,9 +1415,9 @@ final class AppModel {
 
     private func reloadLocal() async {
         do {
-            items = try await perform { try $0.items() }
-            groups = try await perform { try $0.groups() }.sorted { $0.name < $1.name }
-            toChange = try await perform { try $0.toChange() }
+            update(\.items, to: try await perform { try $0.items() })
+            update(\.groups, to: try await perform { try $0.groups() }.sorted { $0.name < $1.name })
+            update(\.toChange, to: try await perform { try $0.toChange() })
             let tooNew = try await perform { try $0.tooNew() }
             if tooNew > 0 && message == nil {
                 message = "\(tooNew == 1 ? "A login is" : "\(tooNew) logins are") from a newer "
@@ -1339,8 +1429,10 @@ final class AppModel {
                 Task { await checkHealth() }
             }
             let summaries = try await perform { try $0.folderSummaries() }
-            folders = summaries.map(\.name).sorted()
-            folderRoles = Dictionary(summaries.map { ($0.name, $0.role) }, uniquingKeysWith: { a, _ in a })
+            update(\.folders, to: summaries.map(\.name).sorted())
+            update(
+                \.folderRoles,
+                to: Dictionary(summaries.map { ($0.name, $0.role) }, uniquingKeysWith: { a, _ in a }))
         } catch {
             message = describe(error)
         }
@@ -1368,7 +1460,7 @@ extension AppModel {
             escrow: escrow, recovering: false, keysReplaced: false)
     }
 
-    static func demo(alone: Bool) -> AppModel {
+    static func demo(alone: Bool, big: Bool = false) -> AppModel {
         let model = AppModel()
         model.isDemo = true
         model.phase = .unlocked
@@ -1463,6 +1555,31 @@ extension AppModel {
                     itemId: "00000000-0000-4000-8000-000000000003", name: "Bank",
                     folder: nil, userId: 4, userName: "Pat", since: 1_795_500_000),
             ]
+        }
+        if big {
+            // 5,000 logins, for `-measure`: a tenth on To Change, a tenth on Password Health.
+            let folders = ["Production", "Production / Databases", "Staging", nil]
+            model.items = (0..<5000).map { index in
+                ItemSummary(
+                    id: String(format: "00000000-0000-4000-8000-%012d", 1000 + index),
+                    folder: folders[index % folders.count], name: "Login \(index)",
+                    username: "user\(index)@example.com", url: "https://site\(index).example.com",
+                    owner: nil, sharedWith: index % 7 == 0 ? ["Mo"] : [], sharedWithGroups: [],
+                    sharedWithMe: false, role: .manage, hasOneTimeCode: index % 5 == 0)
+            }
+            model.toChange = model.items.enumerated().filter { $0.offset % 10 == 0 }.map {
+                ToChange(
+                    itemId: $0.element.id, name: $0.element.name, folder: $0.element.folder,
+                    userId: 4, userName: "Pat", since: 1_795_500_000)
+            }
+            model.health = PasswordHealth(
+                logins: model.items.enumerated().filter { $0.offset % 10 == 5 }.map {
+                    HealthLogin(
+                        itemId: $0.element.id, name: $0.element.name,
+                        username: $0.element.username, folder: $0.element.folder, weak: true,
+                        reusedWith: [], oldSince: nil)
+                },
+                checked: 5000, agesKnown: true)
         }
         return model
     }

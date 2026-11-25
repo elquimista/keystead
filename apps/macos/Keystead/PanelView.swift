@@ -125,17 +125,20 @@ private struct ItemRowView: View {
 
     var body: some View {
         Button(action: copy) {
-            HStack {
+            HStack(spacing: 8) {
+                LoginTile(name: item.name, url: item.url, size: 24)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(item.name)
+                        .lineLimit(1)
                     Text(item.username.isEmpty ? item.place : "\(item.username) · \(item.place)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
                 Spacer()
                 Image(systemName: "doc.on.doc")
                     .foregroundStyle(.secondary)
-                    .opacity(hovering ? 1 : 0.4)
+                    .opacity(hovering ? 1 : 0)
             }
             .padding(.vertical, 4)
             .padding(.horizontal, 6)

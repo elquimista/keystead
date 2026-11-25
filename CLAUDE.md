@@ -40,7 +40,9 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
   failing.
 - Benchmarks (always `--release`; debug numbers are meaningless):
   `cargo run --release -p keystead-proto-unlock-search`,
-  `cargo run --release -p keystead-proto-change-feed`
+  `cargo run --release -p keystead-proto-change-feed`,
+  `cargo run --release -p keystead-client --example vault_bench -- 5000` (the Mac app's
+  side: `-demo big -measure`, see apps/macos/README.md)
 - Secure Enclave prototype: `swift test` in `prototypes/secure-enclave`; `se-proto unlock`
   shows a Touch ID or password prompt, so a person must run it
 

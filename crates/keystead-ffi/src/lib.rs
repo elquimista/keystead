@@ -501,6 +501,21 @@ pub struct ItemSummary {
     pub has_one_time_code: bool,
 }
 
+impl From<keystead_client::UserRow> for User {
+    fn from(user: keystead_client::UserRow) -> Self {
+        User {
+            user_id: user.user_id.0,
+            name: user.name,
+            approved: user.approved,
+            is_owner: user.is_owner,
+            removed: user.removed,
+            escrow: user.escrow,
+            recovering: user.recovering,
+            keys_replaced: user.keys_replaced,
+        }
+    }
+}
+
 /// A password to change: someone lost access to a login while its password stayed the
 /// same, so they may still know it.
 #[derive(uniffi::Record)]
@@ -1063,20 +1078,16 @@ impl Vault {
 
     /// Everyone on the server, fetched fresh.
     pub fn users(&self) -> Result<Vec<User>, CoreError> {
+        Ok(self.vault()?.users()?.into_iter().map(User::from).collect())
+    }
+
+    /// Everyone as of the last sync, without asking the server again.
+    pub fn known_users(&self) -> Result<Vec<User>, CoreError> {
         Ok(self
             .vault()?
-            .users()?
+            .known_users()
             .into_iter()
-            .map(|user| User {
-                user_id: user.user_id.0,
-                name: user.name,
-                approved: user.approved,
-                is_owner: user.is_owner,
-                removed: user.removed,
-                escrow: user.escrow,
-                recovering: user.recovering,
-                keys_replaced: user.keys_replaced,
-            })
+            .map(User::from)
             .collect())
     }
 
