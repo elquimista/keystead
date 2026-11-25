@@ -1,0 +1,40 @@
+name: macOS app
+
+# Builds the Mac app and checks it's ready for notarization. It publishes nothing, so
+# releases don't wait for it: GitHub's macOS runners are sometimes short of capacity, and a
+# job queued there once held back a server image. Runs on pull requests, beside every
+# release (on the tagged commit), and by hand from the Actions tab.
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  macos-app:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Add the Intel target for a universal build
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build the Rust core
+        run: scripts/build-core.sh
+      - name: Build the app (Release, signed ad hoc)
+        run: >
+          xcodebuild -project Keystead.xcodeproj -scheme Keystead -configuration Release
+          -derivedDataPath build/DerivedData build
+      - name: Check the signature is ready for notarization
+        run: |
+          APP=build/DerivedData/Build/Products/Release/Keystead.app
+          codesign --verify --strict --deep "$APP"
+          codesign -dv "$APP" 2>&1 | grep -q 'runtime'
+          ENTITLEMENTS=$(codesign -d --entitlements - --xml "$APP")
+          echo "$ENTITLEMENTS" | grep -q 'com.apple.security.app-sandbox'
+          ! echo "$ENTITLEMENTS" | grep -q 'get-task-allow'
+      - name: Secure Enclave prototype tests
+        run: swift test
+        working-directory: prototypes/secure-enclave

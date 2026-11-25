@@ -2,8 +2,8 @@ name: Release
 
 # Pushing a version tag (v0.1.0) publishes the server image to the GitHub Container
 # Registry as ghcr.io/<owner>/keystead-server, for linux/amd64 and linux/arm64, tagged
-# 0.1.0, 0.1 and latest. The tag must match the version in Cargo.toml, and all of CI must
-# pass on the tagged commit first.
+# 0.1.0, 0.1 and latest. The tag must match the version in Cargo.toml, and CI must pass on
+# the tagged commit first. The Mac app's check runs beside it, without holding it up.
 
 on:
   push:
@@ -27,6 +27,12 @@ jobs:
 
   ci:
     uses: ./.github/workflows/ci.yml
+
+  # The Mac app on the tagged commit. Nothing here waits for it: the app isn't published by
+  # this workflow, and macOS runners can queue for a long time.
+  macos:
+    needs: version
+    uses: ./.github/workflows/macos.yml
 
   # Each platform builds natively on its own runner (emulating ARM to compile Rust is very
   # slow), checks the image starts and reports healthy, then pushes it by digest only.

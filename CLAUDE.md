@@ -59,4 +59,5 @@ Self-hosted team password manager: Rust core, server and CLI, plus native deskto
   the CLI and the apps. Platform code only supplies the account secret and a
   `DeviceSigner`; don't duplicate client logic in Swift or the CLI.
 - Release builds of the Mac app must stay notarizable: Hardened Runtime on, no
-  `get-task-allow`, no unsigned nested binaries. CI checks this.
+  `get-task-allow`, no unsigned nested binaries. The macOS workflow
+  (`.github/workflows/macos.yml`) checks this; releases don't wait for it.

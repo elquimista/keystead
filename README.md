@@ -309,15 +309,18 @@ very different schedules; until then they'd add a compatibility table to keep up
 5. Write short notes for the tag's GitHub release: what changed in the server and in the
    apps, and whether the server has to be updated first.
 
-The tag must match `Cargo.toml`, and all of CI must pass on the tagged commit. The
-[release workflow](.github/workflows/release.yml) then publishes
+The tag must match `Cargo.toml`, and CI (the Rust checks and the server image) must pass on
+the tagged commit. The [release workflow](.github/workflows/release.yml) then publishes
 `ghcr.io/elquimista/keystead-server` for `linux/amd64` and `linux/arm64`, tagged `0.2.1`,
 `0.2` and `latest`. Pre-releases such as `v0.3.0-rc.1` get only their own tag.
 
 The Mac app isn't published by the workflow yet: build it as described in
 [apps/macos/README.md](apps/macos/README.md). Handing it to other people needs a Developer
 ID certificate (the paid Apple Developer Program) so it can be notarized; then the same tag
-can publish it too.
+can publish it too. Until then, the [macOS workflow](.github/workflows/macos.yml) only
+checks that the tagged commit's app builds and can be notarized. It runs beside the release
+without holding up the image, since GitHub's macOS runners can queue for a long time; if it
+fails, or never gets a runner, run it again from the Actions tab.
 
 After the first release, GitHub may list the image as private: on the repository's
 **Packages** entry, open **Package settings** and change the visibility to public, so

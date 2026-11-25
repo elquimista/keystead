@@ -2,6 +2,7 @@ name: CI
 
 # Not on pushes to main: CI runs on pull requests, on every release (the release workflow
 # runs all of it on the tagged commit before publishing), and by hand from the Actions tab.
+# The Mac app has its own workflow, macos.yml, which releases don't wait for.
 on:
   pull_request:
   workflow_call:
@@ -32,31 +33,3 @@ jobs:
           done
           docker logs keystead
           curl --fail http://127.0.0.1:8080/v1/health
-
-  macos-app:
-    runs-on: macos-15
-    defaults:
-      run:
-        working-directory: apps/macos
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - name: Add the Intel target for a universal build
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - name: Build the Rust core
-        run: scripts/build-core.sh
-      - name: Build the app (Release, signed ad hoc)
-        run: >
-          xcodebuild -project Keystead.xcodeproj -scheme Keystead -configuration Release
-          -derivedDataPath build/DerivedData build
-      - name: Check the signature is ready for notarization
-        run: |
-          APP=build/DerivedData/Build/Products/Release/Keystead.app
-          codesign --verify --strict --deep "$APP"
-          codesign -dv "$APP" 2>&1 | grep -q 'runtime'
-          ENTITLEMENTS=$(codesign -d --entitlements - --xml "$APP")
-          echo "$ENTITLEMENTS" | grep -q 'com.apple.security.app-sandbox'
-          ! echo "$ENTITLEMENTS" | grep -q 'get-task-allow'
-      - name: Secure Enclave prototype tests
-        run: swift test
-        working-directory: prototypes/secure-enclave
