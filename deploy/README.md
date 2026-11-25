@@ -21,7 +21,8 @@ nobody can invite or approve people on that server any more. Keystead asks for i
 setup, and it's always under People › You. Recovering needs server 0.2.0 or later.
 
 **Keystead is early software**, and hasn't had a security audit yet. Keep another copy of
-your passwords for now.
+your passwords for now: from 0.13.0, File › Export Logins… (or `keystead export`) saves
+them to an encrypted KeePass file.
 
 ## What you need
 

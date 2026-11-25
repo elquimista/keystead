@@ -12,8 +12,9 @@
 	<key>com.apple.security.print</key>
 	<true/>
 	<!-- Reads a file the user chooses in an Open panel, and only that: an export to import,
-	     or a screenshot of a one-time code's QR code. -->
-	<key>com.apple.security.files.user-selected.read-only</key>
+	     or a screenshot of a one-time code's QR code. Writes the one they name in a Save
+	     panel: an export of their logins, encrypted. -->
+	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 </dict>
 </plist>

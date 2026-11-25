@@ -50,6 +50,8 @@ struct SheetContent: View {
             AddToGroupSheet(model: model, group: group)
         case .renameGroup(let group):
             RenameGroupSheet(model: model, group: group)
+        case .exportLogins:
+            ExportLoginsSheet(model: model)
         case .renameFolder(let folder):
             RenameFolderSheet(model: model, folder: folder)
         case .deleteFolder(let folder):
@@ -755,6 +757,79 @@ private struct ImportSheet: View {
         if panel.runModal() == .OK {
             file = panel.url
         }
+    }
+}
+
+/// Exports every login you can open to a KeePass file encrypted with a passphrase.
+private struct ExportLoginsSheet: View {
+    let model: AppModel
+    @State private var passphrase = ""
+    @State private var again = ""
+    @State private var result: (logins: UInt32, leftOut: UInt32, file: String)?
+
+    private let minimum = Int(minExportPassphrase())
+    private var long: Bool { passphrase.count >= minimum }
+    private var matches: Bool { passphrase == again }
+
+    var body: some View {
+        SheetScaffold(
+            title: "Export Logins", actionTitle: result == nil ? "Export…" : "Done",
+            canAct: result != nil || (long && matches),
+            showsCancel: result == nil
+        ) {
+            if result != nil { return true }
+            guard let url = chooseFile() else { return false }
+            let exported = try await model.exportLogins(to: url, passphrase: passphrase)
+            passphrase = ""
+            again = ""
+            result = (exported.logins, exported.leftOut, url.lastPathComponent)
+            return false
+        } content: {
+            if let result {
+                Text("Exported \(result.logins) \(result.logins == 1 ? "login" : "logins") to "
+                    + "\(result.file).")
+                Text("KeePassXC and KeePass open it with the passphrase, and Import reads it back. "
+                    + "Keep the file and the passphrase safe, and apart.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if result.leftOut > 0 {
+                    Text("\(result.leftOut) couldn't be opened here and were left out; a newer "
+                        + "Keystead may have saved them.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text("Saves every login you can open, \(model.items.count) in all, to a KeePass "
+                    + "file (.kdbx), with folders as groups and one-time codes kept. KeePassXC and "
+                    + "KeePass open it, and Import reads it back.")
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("It's encrypted with the passphrase you choose here: anyone with the file "
+                    + "and the passphrase can read every password in it.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Form {
+                    SecureField("Passphrase", text: $passphrase,
+                                prompt: Text("At least \(minimum) characters"))
+                    SecureField("Again", text: $again, prompt: Text("The same passphrase"))
+                }
+                if !again.isEmpty && !matches {
+                    Text("The passphrases don't match.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+        .frame(width: 500)
+    }
+
+    private func chooseFile() -> URL? {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "kdbx") ?? .data]
+        panel.nameFieldStringValue =
+            "Keystead \(Date.now.formatted(.iso8601.year().month().day())).kdbx"
+        panel.message = "Choose where to save the export."
+        return panel.runModal() == .OK ? panel.url : nil
     }
 }
 

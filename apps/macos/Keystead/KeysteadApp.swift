@@ -110,6 +110,8 @@ private struct AppCommands: Commands {
             Divider()
             Button("Import from Passbolt or KeePass…") { model.sheet = .importLogins }
                 .disabled(model.phase != .unlocked)
+            Button("Export Logins…") { model.sheet = .exportLogins }
+                .disabled(model.phase != .unlocked)
         }
         CommandGroup(before: .sidebar) {
             Button("All Logins") { model.section = .allLogins }

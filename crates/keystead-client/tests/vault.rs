@@ -1688,3 +1688,94 @@ fn deleting_a_folder_deletes_its_logins_for_everyone() {
     carol.sync().unwrap();
     assert!(carol.list().unwrap().is_empty());
 }
+
+#[test]
+fn an_export_opens_in_keepass_and_imports_back() {
+    use keepass::config::KdfConfig;
+    use keepass::{Database, DatabaseKey};
+    use keystead_client::read_kdbx;
+
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let alice_id = alice.whoami().user_id;
+
+    // A login with everything in Production / Databases, an empty folder, one of Alice's
+    // own, and one Bob shared with her.
+    alice.create_folder("Production").unwrap();
+    alice
+        .create_folder_inside("Production", "Databases", false)
+        .unwrap();
+    alice.create_folder("Empty").unwrap();
+    let (mut overview, mut details) = login("Postgres", "pg-pw");
+    overview.username = "admin".into();
+    overview.url = "https://db.example.com".into();
+    overview.tags = vec!["db".into()];
+    details.notes = "Primary\nsecond line".into();
+    details.otp = "otpauth://totp/DB:admin?secret=JBSWY3DPEHPK3PXP&issuer=DB".into();
+    alice
+        .add(Some("Production / Databases"), overview, details)
+        .unwrap();
+    let (overview, details) = login("Bank", "bank-pw");
+    alice.add(None, overview, details).unwrap();
+    let (overview, details) = login("Wiki", "wiki-pw");
+    bob.add(None, overview, details).unwrap();
+    let wiki = bob.find_item("Wiki", None).unwrap();
+    bob.share_item(wiki, alice_id, Role::View).unwrap();
+    alice.sync().unwrap();
+
+    assert!(
+        alice.export_kdbx("too short").is_err(),
+        "the file holds every password"
+    );
+    let export = alice.export_kdbx("correct horse battery").unwrap();
+    assert_eq!((export.logins, export.left_out), (3, 0));
+
+    // KeePass sees the folders as groups, even the empty one, and Argon2id over 128 MiB.
+    assert!(read_kdbx(&export.file, "wrong passphrase").is_err());
+    let database = Database::open(
+        &mut &export.file[..],
+        DatabaseKey::new().with_password("correct horse battery"),
+    )
+    .unwrap();
+    let groups: Vec<String> = database.root().groups().map(|g| g.name.clone()).collect();
+    assert_eq!(groups.len(), 2);
+    assert!(groups.contains(&"Production".into()) && groups.contains(&"Empty".into()));
+    assert!(matches!(
+        database.config.kdf_config,
+        KdfConfig::Argon2id { memory, .. } if memory == 128 * 1024 * 1024
+    ));
+
+    let mut logins = read_kdbx(&export.file, "correct horse battery").unwrap();
+    logins.sort_by(|a, b| a.overview.name.cmp(&b.overview.name));
+    let placed: Vec<(&str, Option<&str>)> = logins
+        .iter()
+        .map(|login| (login.overview.name.as_str(), login.folder.as_deref()))
+        .collect();
+    assert_eq!(
+        placed,
+        [
+            ("Bank", None),
+            ("Postgres", Some("Production / Databases")),
+            ("Wiki", None)
+        ]
+    );
+    let postgres = alice.find_item("Postgres", None).unwrap();
+    let (overview, details) = alice.open_item(postgres).unwrap();
+    assert_eq!(logins[1].overview.username, overview.username);
+    assert_eq!(logins[1].overview.url, overview.url);
+    assert_eq!(logins[1].overview.tags, overview.tags);
+    assert_eq!(
+        logins[1].details, details,
+        "password, notes and one-time code"
+    );
+
+    // Bob imports it: Wiki is already his, the rest is new.
+    let summary = bob.import(&logins, None).unwrap();
+    assert_eq!((summary.added, summary.duplicates), (2, 1));
+    let copy = bob
+        .find_item("Postgres", Some("Production / Databases"))
+        .unwrap();
+    assert_eq!(bob.open_item(copy).unwrap().1, details);
+}

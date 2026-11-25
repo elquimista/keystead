@@ -1527,6 +1527,7 @@ dependencies = [
  "keystead-server",
  "p256",
  "rand",
+ "rust-argon2",
  "serde",
  "serde_json",
  "tokio",

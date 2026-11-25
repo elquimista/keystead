@@ -111,6 +111,15 @@ keystead import passbolt-export.kdbx --unfiled-folder Imported   # logins in no 
 New folders are yours alone until shared. Passbolt's sharing doesn't come with the export:
 share the folders with your groups afterwards.
 
+To keep a copy of your own, export every login you can open to a KeePass file, encrypted
+with a passphrase of at least 12 characters (Argon2id over 128 MiB per guess). Folders
+become groups and one-time codes come along; KeePassXC and KeePass open it, and `import`
+reads it back. Only you can read the new file, and it never overwrites one:
+
+```sh
+keystead export keystead-backup.kdbx   # asks for a passphrase, twice
+```
+
 A deleted login can be brought back for 30 days (needs a 0.9.0 server):
 
 ```sh

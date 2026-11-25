@@ -330,6 +330,16 @@ pub struct FolderCreated {
     pub problems: Vec<String>,
 }
 
+/// Logins written to a KeePass file, for the app to save.
+#[derive(uniffi::Record)]
+pub struct ExportedFile {
+    /// The file, encrypted with the passphrase chosen.
+    pub data: Vec<u8>,
+    pub logins: u32,
+    /// Logins left out: ones a newer Keystead saved, or that didn't open.
+    pub left_out: u32,
+}
+
 /// A folder renamed, with the folders inside it.
 #[derive(uniffi::Record)]
 pub struct FolderRenamed {
@@ -929,6 +939,17 @@ impl Vault {
         Ok(())
     }
 
+    /// Every login you can open, from the local copy, in a KeePass file (.kdbx) encrypted
+    /// with `passphrase`.
+    pub fn export_logins(&self, passphrase: String) -> Result<ExportedFile, CoreError> {
+        let export = self.vault()?.export_kdbx(&passphrase)?;
+        Ok(ExportedFile {
+            logins: count(export.logins),
+            left_out: count(export.left_out),
+            data: export.file,
+        })
+    }
+
     /// Renames a folder, and the folders inside it you manage (managers).
     pub fn rename_folder(&self, folder: String, name: String) -> Result<FolderRenamed, CoreError> {
         let renamed = self.vault()?.rename_folder(&folder, &name)?;
@@ -1316,6 +1337,12 @@ pub fn new_device_id() -> String {
 #[uniffi::export]
 pub fn generate_password() -> String {
     keystead_client::generate_password()
+}
+
+/// The shortest passphrase an export takes.
+#[uniffi::export]
+pub fn min_export_passphrase() -> u32 {
+    count(keystead_client::MIN_EXPORT_PASSPHRASE)
 }
 
 /// The account secret as the 24 words of a recovery kit. The words are as secret as the

@@ -10,14 +10,17 @@ pub mod http;
 pub mod profile;
 mod vault;
 
+pub mod export;
 pub mod import;
 
+pub use export::MIN_EXPORT_PASSPHRASE;
 pub use import::{ImportedLogin, read_kdbx};
 pub use vault::{
     DeletedRow, DeviceRow, DeviceSetupLine, EditOutcome, FOLDER_SEPARATOR, FolderDeletion,
     GroupMemberRow, GroupRow, GroupShareRow, HistoryRow, ImportFolder, ImportPlan, ImportSummary,
-    InviteInfo, ItemRow, JoiningDevice, MemberRow, NewAccount, NewFolder, RenamedFolder,
-    SyncSummary, ToChangeRow, UserRow, Vault, Whoami, generate_password, join, recover, setup,
+    InviteInfo, ItemRow, JoiningDevice, KdbxExport, MemberRow, NewAccount, NewFolder,
+    RenamedFolder, SyncSummary, ToChangeRow, UserRow, Vault, Whoami, generate_password, join,
+    recover, setup,
 };
 
 use keystead_core::encoding::Bytes;

@@ -12,7 +12,7 @@ pub use keystead_client::{
 };
 use keystead_client::{
     DeviceSetupLine, FolderDeletion, ImportPlan, ImportSummary, ImportedLogin, JoiningDevice,
-    NewAccount, NewFolder, RenamedFolder, Vault, read_kdbx,
+    KdbxExport, NewAccount, NewFolder, RenamedFolder, Vault, read_kdbx,
 };
 pub use keystead_core::api::Role;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
@@ -469,6 +469,27 @@ pub fn update(
         details.otp = otp;
     }
     vault.update(item_id, &overview, &details)
+}
+
+/// Every login you can open, after a sync, in a KeePass file encrypted with `passphrase`,
+/// saved as `file`: a new file only you can read.
+pub fn export(home: &Path, file: &Path, passphrase: &str) -> Result<KdbxExport> {
+    let export = refreshed(home)?.export_kdbx(passphrase)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut out = match options.open(file) {
+        Ok(out) => out,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("{} already exists; choose another name", file.display())
+        }
+        Err(error) => bail!("couldn't create {}: {error}", file.display()),
+    };
+    std::io::Write::write_all(&mut out, &export.file)
+        .and_then(|()| out.sync_all())
+        .map_err(|error| anyhow::anyhow!("couldn't write {}: {error}", file.display()))?;
+    Ok(export)
 }
 
 /// Reads the logins in an export file (.kdbx) with its passphrase. Nothing is saved.

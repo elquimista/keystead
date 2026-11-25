@@ -209,6 +209,9 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Export every login you can open to a new KeePass file (.kdbx), encrypted with a
+    /// passphrase you choose. KeePassXC and KeePass open it, and `import` reads it back
+    Export { file: std::path::PathBuf },
     /// Import logins from a Passbolt export, or a KeePass or KeePassXC file (.kdbx). Shows
     /// what it would do first
     Import {
@@ -1091,6 +1094,42 @@ fn run(cli: Cli) -> Result<()> {
                     println!("Not deleted: {author} saved version {version} first.");
                     println!("Your copy now has their version; check it, then run rm again.");
                 }
+            }
+        }
+        Command::Export { file } => {
+            let passphrase = if std::io::stdin().is_terminal() {
+                let passphrase = rpassword::prompt_password(format!(
+                    "A passphrase for {}, at least {} characters (hidden): ",
+                    file.display(),
+                    keystead_client::MIN_EXPORT_PASSPHRASE
+                ))?;
+                if rpassword::prompt_password("The same passphrase again: ")? != passphrase {
+                    anyhow::bail!("the passphrases don't match");
+                }
+                passphrase
+            } else {
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                line.trim_end_matches(['\r', '\n']).to_owned()
+            };
+            let export = commands::export(&home, &file, &passphrase)?;
+            let logins = if export.logins == 1 {
+                "login"
+            } else {
+                "logins"
+            };
+            println!(
+                "Exported {} {logins} to {}. KeePassXC and KeePass open it with the passphrase, \
+                 and `keystead import` reads it back. Keep it somewhere safe: it holds every \
+                 password in it.",
+                export.logins,
+                file.display()
+            );
+            if export.left_out > 0 {
+                eprintln!(
+                    "warning: left out {} logins that a newer Keystead saved, or that didn't open",
+                    export.left_out
+                );
             }
         }
         Command::Import {

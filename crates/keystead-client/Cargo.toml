@@ -9,15 +9,15 @@ publish.workspace = true
 [dependencies]
 keystead-core.workspace = true
 anyhow.workspace = true
-keepass.workspace = true
+keepass = { workspace = true, features = ["save_kdbx4"] }
 rand.workspace = true
+rust-argon2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
 keystead-server.workspace = true
-keepass = { workspace = true, features = ["save_kdbx4"] }
 axum.workspace = true
 p256.workspace = true
 tokio.workspace = true

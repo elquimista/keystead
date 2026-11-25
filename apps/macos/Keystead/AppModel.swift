@@ -65,6 +65,8 @@ final class AppModel {
         case newGroup
         /// Importing logins from a Passbolt export, or a KeePass or KeePassXC file.
         case importLogins
+        /// Exporting every login you can open to an encrypted KeePass file.
+        case exportLogins
         case addToGroup(GroupSummary)
         case renameGroup(GroupSummary)
 
@@ -91,6 +93,7 @@ final class AppModel {
             case .signOut: "sign-out"
             case .newGroup: "new-group"
             case .importLogins: "import-logins"
+            case .exportLogins: "export-logins"
             case .addToGroup(let group): "add-to-group-\(group.id)"
             case .renameGroup(let group): "rename-group-\(group.id)"
             }
@@ -112,6 +115,18 @@ final class AppModel {
     /// Reads an export file (.kdbx) with its passphrase, off the main thread.
     func readExport(_ file: Data, passphrase: String) async throws -> LoginExport {
         try await Task.detached { try LoginExport.read(file: file, passphrase: passphrase) }.value
+    }
+
+    /// Writes every login you can open to `url`, as a KeePass file encrypted with
+    /// `passphrase` that only you can read, after Touch ID and a sync. Returns how many
+    /// logins went in, and how many were left out.
+    func exportLogins(to url: URL, passphrase: String) async throws -> (logins: UInt32, leftOut: UInt32) {
+        _ = try await DeviceAuthentication.authenticate(reason: "export your logins")
+        await refresh()
+        let exported = try await perform { try $0.exportLogins(passphrase: passphrase) }
+        try exported.data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return (exported.logins, exported.leftOut)
     }
 
     /// What importing would do; logins in no folder go into `unfiled`, or stay yours.

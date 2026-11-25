@@ -33,6 +33,7 @@ use rand::Rng;
 use rand::rngs::OsRng;
 
 use crate::DeviceSigner;
+use crate::export::{KdbxWriter, MIN_EXPORT_PASSPHRASE};
 use crate::http::{Client, Failure};
 use crate::import::ImportedLogin;
 use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile};
@@ -335,6 +336,15 @@ pub struct ImportSummary {
     pub folders_created: usize,
     pub duplicates: usize,
     /// Logins for folders you can only view.
+    pub left_out: usize,
+}
+
+/// Logins written to a KeePass file.
+pub struct KdbxExport {
+    /// The file, encrypted with the passphrase chosen.
+    pub file: Vec<u8>,
+    pub logins: usize,
+    /// Logins left out: ones a newer Keystead wrote, or that didn't open.
     pub left_out: usize,
 }
 
@@ -2301,6 +2311,48 @@ impl Vault {
         let saved: EncryptedItem = self.call(|client| client.put(&path, &request))??;
         self.profile.items.insert(saved.id, saved);
         Ok(id)
+    }
+
+    /// Every login this account can open, from the local copy, in a KeePass file (.kdbx)
+    /// encrypted with `passphrase`: each folder a group (nested by name, even when empty),
+    /// and logins outside folders at the top. It opens in KeePassXC or KeePass and
+    /// imports back. Built in memory; the caller saves it.
+    pub fn export_kdbx(&self, passphrase: &str) -> Result<KdbxExport> {
+        if passphrase.chars().count() < MIN_EXPORT_PASSPHRASE {
+            bail!(
+                "use a passphrase of at least {MIN_EXPORT_PASSPHRASE} characters: anyone with \
+                 the file can try to guess it"
+            );
+        }
+        let mut writer = KdbxWriter::new();
+        let mut folders = HashMap::new();
+        for &folder_id in self.profile.folders.keys() {
+            let name = self
+                .profile
+                .folder_name(&self.keys, &self.groups, folder_id)?;
+            writer.folder(&name);
+            folders.insert(folder_id, name);
+        }
+        let mut left_out = self.too_new();
+        for item in self.openable_items() {
+            let folder = item
+                .folder_id
+                .and_then(|folder_id| folders.get(&folder_id))
+                .map(String::as_str);
+            let opened = self
+                .item_key(item)
+                .and_then(|key| Ok((item.open_overview(&key)?, item.open_details(&key)?)));
+            match opened {
+                Ok((overview, details)) => writer.add(folder, &overview, &details),
+                Err(_) => left_out += 1,
+            }
+        }
+        let logins = writer.logins();
+        Ok(KdbxExport {
+            file: writer.finish(passphrase)?,
+            logins,
+            left_out,
+        })
     }
 
     /// What importing these logins would do, after a sync: which folders they go into

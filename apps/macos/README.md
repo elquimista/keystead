@@ -55,6 +55,10 @@ account back on a new Mac with a Recovery Kit.
   into (new ones are yours alone until shared), what's already here and left out, and
   imports only once you confirm. One-time codes come along; extra fields go into notes.
   Nothing decrypted is written to disk.
+- **Exporting:** File › Export Logins… saves every login you can open to a KeePass file
+  (.kdbx), encrypted with a passphrase you choose, after Touch ID. Folders become groups
+  and one-time codes come along; KeePassXC and KeePass open it, and Import reads it back.
+  The file is encrypted before it's written, and only you can read it.
 - **Recently Deleted:** a deleted login stays in Recently Deleted (in the sidebar) for 30
   days, for everyone who could edit it, with who deleted it and when. Bring Back returns it
   to everyone who had it; Delete Now… deletes it for good. Needs a 0.9.0 server.
