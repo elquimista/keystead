@@ -253,6 +253,14 @@ app now says when a newer release is out, with a link to its page: once a day it
 turn that off in Settings › Updates. Copies from 0.13.1 and earlier don't check, so tell
 your team about this one.
 
+**Updating to 0.14.0.** The Mac app stops asking for Touch ID or the password every
+few minutes while it's unlocked. It used to sign in to the server again each time its
+15-minute session ran out, and each sign-in used the Mac's device key; now it renews the
+session without the key (`POST /v1/sign-in/renew`), so it asks only when it unlocks, or
+after the server restarts. Update the server for this: with a 0.13 server, a 0.14.0 app
+signs in as before and still asks, but says why. The order doesn't matter, and older apps
+keep working with the new server.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
