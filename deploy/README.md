@@ -218,6 +218,13 @@ Mac app can now read a file you choose in an Open panel, which also fixes readin
 one-time code's QR code from a screenshot. The server is the same as 0.10.0, so updating
 it is optional.
 
+**Updating to 0.12.0.** Logins can move to another folder, or out of folders as the mover's
+own. Whoever had one only through its old folder loses it, and its password goes on their
+To Change list. The database gets one more column. Update every app and the CLI before
+anyone moves a login: apps before 0.12.0 keep showing a moved login in its old folder to
+people who lost it. Apps from 0.12.0 work with older servers, saying the server needs
+updating to move logins.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
