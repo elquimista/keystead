@@ -17,6 +17,11 @@ account back on a new Mac with a Recovery Kit.
   another folder you can add to, or out of folders as yours. Whoever had it only through
   the old folder loses it, and its password goes on their To Change list; people and
   groups it's shared with directly keep it. Needs a 0.12.0 server.
+- **Renaming and deleting folders:** a folder's managers rename it or delete it from its
+  right-click menu. Renaming renames the folders inside it they manage too, and everyone
+  sees the new name; any server works. Deleting asks first, saying how many logins go
+  with it, for everyone and for good, and which folders inside it stay. Deleting needs
+  a 0.13.0 server.
 - **Folders inside folders:** folders named like "Production / Databases" show nested in
   the sidebar. New Folder Inside… (a folder's right-click menu) makes one that starts out
   shared like its parent, or private. After that each folder has its own access: sharing
@@ -101,9 +106,6 @@ account back on a new Mac with a Recovery Kit.
 - **Debug builds** are a separate app, "Keystead Dev" (`….Keystead.dev`), with their own
   data and an orange icon. Development never touches a real vault, and the two are easy
   to tell apart.
-
-Not yet: deleting folders and groups, and approving a second Mac from an existing one
-(for now, set it up with the Recovery Kit).
 
 ## Building
 

@@ -277,6 +277,7 @@ pub fn router(state: AppState) -> Router {
             put(transfers::send_secret),
         )
         .route("/v1/folders", post(vault::create_folder))
+        .route("/v1/folders/{folder_id}", delete(vault::delete_folder))
         .route(
             "/v1/folders/{folder_id}/members",
             post(vault::add_member).get(vault::members),

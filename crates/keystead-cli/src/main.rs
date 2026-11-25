@@ -340,6 +340,16 @@ enum FolderCommand {
     },
     /// Leave a folder
     Leave { folder: String },
+    /// Rename a folder, and the folders inside it you manage (managers)
+    Rename { folder: String, name: String },
+    /// Delete a folder and its logins for everyone, for good; folders inside it stay
+    /// (managers)
+    Delete {
+        folder: String,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
     /// List your folders
     List,
 }
@@ -782,6 +792,53 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("They now manage {group}.");
             }
+        }
+        Command::Folder(FolderCommand::Rename { folder, name }) => {
+            let renamed = commands::rename_folder(&home, &folder, &name)?;
+            println!("Renamed {folder} to {}.", renamed.name);
+            for kept in &renamed.kept {
+                println!("{kept} kept its name: you don't manage it.");
+            }
+            for problem in &renamed.problems {
+                eprintln!("warning: couldn't rename {problem}");
+            }
+        }
+        Command::Folder(FolderCommand::Delete { folder, yes }) => {
+            let plan = commands::folder_deletion(&home, &folder)?;
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!("add --yes to delete the folder without being asked");
+                }
+                println!("Everyone in {folder} loses it.");
+                if plan.logins > 0 {
+                    let logins = if plan.logins == 1 { "login" } else { "logins" };
+                    println!(
+                        "Its {} {logins} are deleted with it for everyone, including anyone \
+                         they're shared with directly, and can't be brought back.",
+                        plan.logins
+                    );
+                }
+                if plan.to_change > 0 {
+                    println!(
+                        "{} of their passwords are on the list to change; that's forgotten too.",
+                        plan.to_change
+                    );
+                }
+                if !plan.inside.is_empty() {
+                    println!("Folders inside it stay: {}.", plan.inside.join(", "));
+                }
+                print!("Delete {folder}? [y/N] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("Not deleted.");
+                    return Ok(());
+                }
+            }
+            let summary = commands::delete_folder(&home, &folder, plan.logins)?;
+            commands::warn_rejected(&summary);
+            println!("Deleted {folder}.");
         }
         Command::Folder(FolderCommand::Leave { folder }) => {
             commands::leave_folder(&home, &folder)?;

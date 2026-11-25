@@ -50,6 +50,10 @@ struct SheetContent: View {
             AddToGroupSheet(model: model, group: group)
         case .renameGroup(let group):
             RenameGroupSheet(model: model, group: group)
+        case .renameFolder(let folder):
+            RenameFolderSheet(model: model, folder: folder)
+        case .deleteFolder(let folder):
+            DeleteFolderSheet(model: model, folder: folder)
         }
     }
 }
@@ -800,6 +804,164 @@ private struct MoveLoginSheet: View {
         }
         return "Whoever has it only through \u{201C}\(folder)\u{201D} loses it, and its password "
             + "goes on their To Change list. Everyone in the folder you choose gets it. " + kept
+    }
+}
+
+/// Renames a folder; the folders inside it that you manage follow.
+private struct RenameFolderSheet: View {
+    let model: AppModel
+    let folder: String
+    @State private var name: String
+
+    init(model: AppModel, folder: String) {
+        self.model = model
+        self.folder = folder
+        _name = State(initialValue: folder)
+    }
+
+    private var exists: Bool { name.trimmed != folder && model.folders.contains(name.trimmed) }
+
+    var body: some View {
+        SheetScaffold(
+            title: "Rename \u{201C}\(folder)\u{201D}", actionTitle: "Rename",
+            canAct: !name.trimmed.isEmpty && !exists && name.trimmed != folder
+        ) {
+            try await model.rename(folder: folder, to: name)
+            return true
+        } content: {
+            Form {
+                TextField("Name", text: $name)
+            }
+            if exists {
+                Text("There's already a folder with that name.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var caption: String {
+        var text = "Everyone in it sees the new name. Name it \u{201C}Parent / Name\u{201D} to "
+            + "show it inside another folder; who can open it stays the same."
+        let inside = model.folders.filter { $0.hasPrefix(folder + " / ") }.count
+        if inside == 1 {
+            text += " The folder inside it is renamed too, if you manage it."
+        } else if inside > 1 {
+            text += " The \(inside) folders inside it are renamed too, where you manage them."
+        }
+        return text
+    }
+}
+
+/// Asks before deleting a folder: what goes with it for good, and what stays.
+private struct DeleteFolderSheet: View {
+    let model: AppModel
+    let folder: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var plan: FolderDeletion?
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Delete \u{201C}\(folder)\u{201D}?")
+                .font(.title3.weight(.semibold))
+            if let plan {
+                ForEach(consequence(plan), id: \.self) { paragraph in
+                    Text(paragraph)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if error == nil {
+                ProgressView().controlSize(.small)
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                if busy {
+                    ProgressView().controlSize(.small)
+                }
+                // Return cancels; deleting takes a deliberate click.
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                Button(actionTitle, role: .destructive) {
+                    Task { await delete() }
+                }
+                .disabled(plan == nil || busy)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .task { await load() }
+    }
+
+    private var actionTitle: String {
+        switch plan?.logins ?? 0 {
+        case 0: "Delete Folder"
+        case 1: "Delete Folder and 1 Login"
+        case let count: "Delete Folder and \(count) Logins"
+        }
+    }
+
+    /// What goes and what stays, a paragraph each.
+    private func consequence(_ plan: FolderDeletion) -> [String] {
+        var parts: [String]
+        switch plan.logins {
+        case 0:
+            parts = ["Everyone in it loses it. It has no logins."]
+        case 1:
+            parts = ["Everyone in it loses it. Its login is deleted with it for everyone, "
+                + "including anyone it's shared with directly. It doesn't go to Recently "
+                + "Deleted, so it can't be brought back. To keep it, move it to another folder "
+                + "first."]
+        default:
+            parts = ["Everyone in it loses it. Its \(plan.logins) logins are deleted with it for "
+                + "everyone, including anyone they're shared with directly. They don't go to "
+                + "Recently Deleted, so they can't be brought back. To keep some, move them to "
+                + "another folder first."]
+        }
+        if plan.toChange == 1 {
+            parts.append("One of its passwords is on To Change, which deleting forgets: if the "
+                + "account stays, change that password at its website first.")
+        } else if plan.toChange > 1 {
+            parts.append("\(plan.toChange) of its passwords are on To Change, which deleting "
+                + "forgets: if those accounts stay, change their passwords first.")
+        }
+        if !plan.inside.isEmpty {
+            parts.append("Folders inside it stay: "
+                + ListFormatter.localizedString(byJoining: plan.inside.map { "\u{201C}\($0)\u{201D}" })
+                + ".")
+        }
+        return parts
+    }
+
+    private func load() async {
+        do {
+            plan = try await model.deletion(of: folder)
+        } catch let failure {
+            error = describe(failure)
+        }
+    }
+
+    private func delete() async {
+        guard let plan else { return }
+        busy = true
+        do {
+            try await model.delete(folder: folder, logins: plan.logins)
+            dismiss()
+        } catch let failure {
+            error = describe(failure)
+            // Someone may have added or deleted a login meanwhile: show the folder as it is.
+            self.plan = try? await model.deletion(of: folder)
+        }
+        busy = false
     }
 }
 

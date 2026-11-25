@@ -240,6 +240,13 @@ private struct FolderRow: View {
                         }
                     }
                     Button("Access…") { model.sheet = .manageFolder(folder) }
+                    if model.manages(folder: folder) {
+                        Divider()
+                        Button("Rename…") { model.sheet = .renameFolder(folder) }
+                        Button("Delete Folder…", role: .destructive) {
+                            model.sheet = .deleteFolder(folder)
+                        }
+                    }
                 }
         } else {
             // Only folders inside it are yours, not this one.

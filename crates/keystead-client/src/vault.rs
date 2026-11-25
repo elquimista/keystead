@@ -58,6 +58,9 @@ const NEEDS_0_8: &str = "the server is older than Keystead 0.8.0 and can't add a
 /// Moving logins came with 0.12.0; an older server refuses any change of folder or owner.
 const NEEDS_0_12: &str = "the server is older than Keystead 0.12.0 and can't move logins; \
                           update it to 0.12.0 or later";
+/// Deleting folders came with 0.13.0.
+const NEEDS_0_13: &str = "the server is older than Keystead 0.13.0 and can't delete folders; \
+                          update it to 0.13.0 or later";
 /// What a server answers for sign-out if it's from before sign-out existed.
 const NO_SIGN_OUT: &str = "the server is too old to forget a device that signs out; update it";
 const PAGE_SIZE: i64 = 500;
@@ -375,6 +378,28 @@ pub struct NewFolder {
     pub shared_with: Vec<String>,
     /// Anyone it couldn't be shared with, and why.
     pub problems: Vec<String>,
+}
+
+/// A folder renamed, with the folders inside it.
+#[derive(Debug, Default)]
+pub struct RenamedFolder {
+    /// Its new name.
+    pub name: String,
+    /// Folders inside it that kept their names: this account doesn't manage them.
+    pub kept: Vec<String>,
+    /// Folders inside it that couldn't be renamed, and why.
+    pub problems: Vec<String>,
+}
+
+/// What deleting a folder deletes, to ask about first.
+#[derive(Debug)]
+pub struct FolderDeletion {
+    /// Logins in it, including any this app can't open; they're deleted with it.
+    pub logins: usize,
+    /// How many of their passwords are on the list to change; deleting forgets that.
+    pub to_change: usize,
+    /// Folders inside it, which stay.
+    pub inside: Vec<String>,
 }
 
 /// A password to change: someone lost access to a login while its password stayed the
@@ -1002,6 +1027,116 @@ impl Vault {
         Ok(created)
     }
 
+    /// Renames a folder, and the folders inside it that this account manages ("Old /
+    /// Databases" becomes "New / Databases"); the others keep their names. A folder's name
+    /// is sealed with its key, so each gets a new key with its new name, which reaches every
+    /// device the way new keys do. Managers only.
+    pub fn rename_folder(&mut self, folder: &str, name: &str) -> Result<RenamedFolder> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("a folder needs a name");
+        }
+        self.sync()?;
+        let folder_id = self.profile.find_folder(&self.keys, &self.groups, folder)?;
+        if self.profile.folder_role(folder_id) != Role::Manage {
+            bail!("you need manage access to rename {folder:?}");
+        }
+        if name == folder {
+            bail!("it's already named {name:?}");
+        }
+        let names = self
+            .profile
+            .folders
+            .keys()
+            .map(|&id| Ok((id, self.profile.folder_name(&self.keys, &self.groups, id)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let prefix = format!("{folder}{FOLDER_SEPARATOR}");
+        let mut renamed = RenamedFolder {
+            name: name.to_owned(),
+            ..RenamedFolder::default()
+        };
+        let mut inside = Vec::new();
+        for (id, old) in &names {
+            let Some(rest) = old.strip_prefix(&prefix) else {
+                continue;
+            };
+            if self.profile.folder_role(*id) == Role::Manage {
+                inside.push((*id, old.clone(), format!("{name}{FOLDER_SEPARATOR}{rest}")));
+            } else {
+                renamed.kept.push(old.clone());
+            }
+        }
+        // No two folders may end up with one name.
+        let moving: HashSet<FolderId> = inside.iter().map(|(id, ..)| *id).collect();
+        let targets = std::iter::once(name).chain(inside.iter().map(|(.., new)| new.as_str()));
+        for target in targets {
+            if names
+                .iter()
+                .any(|(id, other)| other == target && *id != folder_id && !moving.contains(id))
+            {
+                bail!("there's already a folder named {target:?}");
+            }
+        }
+        self.rekey_as(folder_id, Some(name))?;
+        for (id, old, new) in inside {
+            if let Err(error) = self.rekey_as(id, Some(&new)) {
+                renamed.problems.push(format!("{old}: {error:#}"));
+            }
+        }
+        renamed.kept.sort();
+        Ok(renamed)
+    }
+
+    /// What deleting a folder would delete, fetched fresh, to ask about first.
+    pub fn folder_deletion(&mut self, folder: &str) -> Result<FolderDeletion> {
+        self.sync()?;
+        let folder_id = self.profile.find_folder(&self.keys, &self.groups, folder)?;
+        let logins: HashSet<ItemId> = self
+            .profile
+            .items
+            .values()
+            .filter(|item| item.folder_id == Some(folder_id) && !item.deleted)
+            .map(|item| item.id)
+            .collect();
+        let to_change: HashSet<ItemId> = self
+            .profile
+            .exposures
+            .iter()
+            .map(|exposure| exposure.item_id)
+            .filter(|item_id| logins.contains(item_id))
+            .collect();
+        let prefix = format!("{folder}{FOLDER_SEPARATOR}");
+        Ok(FolderDeletion {
+            logins: logins.len(),
+            to_change: to_change.len(),
+            inside: self
+                .folders()?
+                .into_iter()
+                .filter(|name| name.starts_with(&prefix))
+                .collect(),
+        })
+    }
+
+    /// Deletes a folder for everyone, with its logins and their history, for good
+    /// (managers). `logins` is how many logins the caller agreed to delete with it, from
+    /// [`folder_deletion`](Self::folder_deletion); if that's changed, nothing is deleted.
+    /// Folders inside it stay.
+    pub fn delete_folder(&mut self, folder: &str, logins: usize) -> Result<SyncSummary> {
+        let folder_id = self.profile.find_folder(&self.keys, &self.groups, folder)?;
+        if self.profile.folder_role(folder_id) != Role::Manage {
+            bail!("you need manage access to delete {folder:?}");
+        }
+        let path = format!("/v1/folders/{folder_id}?logins={logins}");
+        match self.call(|client| client.delete::<()>(&path))? {
+            Ok(()) => {}
+            Err(Failure::Status {
+                code: 404 | 405, ..
+            }) if self.server_version()? < (0, 13) => bail!(NEEDS_0_13),
+            Err(error) => return Err(error.into()),
+        }
+        self.sync()
+    }
+
     /// Shares a folder with an approved user by wrapping its current key for them.
     pub fn share_folder(&mut self, folder: &str, user: UserId, role: Role) -> Result<String> {
         self.sync()?;
@@ -1064,6 +1199,11 @@ impl Vault {
     /// Gives a folder a new key, wrapped for each current member and group, with the old
     /// key sealed under it so older items still open.
     fn rekey(&mut self, folder_id: FolderId) -> Result<()> {
+        self.rekey_as(folder_id, None)
+    }
+
+    /// Gives a folder a new key, and with `name`, a new name sealed with it.
+    fn rekey_as(&mut self, folder_id: FolderId, name: Option<&str>) -> Result<()> {
         let record = self
             .profile
             .folders
@@ -1073,7 +1213,10 @@ impl Vault {
         let old = self
             .profile
             .folder_key(&self.keys, &self.groups, folder_id)?;
-        let info = FolderInfo::open(&record.info, folder_id, &old)?;
+        let mut info = FolderInfo::open(&record.info, folder_id, &old)?;
+        if let Some(name) = name {
+            name.clone_into(&mut info.name);
+        }
         let path = format!("/v1/folders/{folder_id}/members");
         let members: Members = self.call(|client| client.get(&path, &[]))??;
         let key = FolderKey::generate();

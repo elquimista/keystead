@@ -11,8 +11,8 @@ pub use keystead_client::{
     MemberRow, SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
 };
 use keystead_client::{
-    DeviceSetupLine, ImportPlan, ImportSummary, ImportedLogin, JoiningDevice, NewAccount,
-    NewFolder, Vault, read_kdbx,
+    DeviceSetupLine, FolderDeletion, ImportPlan, ImportSummary, ImportedLogin, JoiningDevice,
+    NewAccount, NewFolder, RenamedFolder, Vault, read_kdbx,
 };
 pub use keystead_core::api::Role;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
@@ -212,6 +212,19 @@ pub fn create_folder_inside(
     share_like_parent: bool,
 ) -> Result<NewFolder> {
     open(home)?.create_folder_inside(parent, name, share_like_parent)
+}
+
+pub fn rename_folder(home: &Path, folder: &str, name: &str) -> Result<RenamedFolder> {
+    open(home)?.rename_folder(folder, name)
+}
+
+/// What deleting a folder would delete, fetched fresh.
+pub fn folder_deletion(home: &Path, folder: &str) -> Result<FolderDeletion> {
+    open(home)?.folder_deletion(folder)
+}
+
+pub fn delete_folder(home: &Path, folder: &str, logins: usize) -> Result<SyncSummary> {
+    open(home)?.delete_folder(folder, logins)
 }
 
 pub fn share_folder(home: &Path, folder: &str, user: UserId, role: Role) -> Result<String> {

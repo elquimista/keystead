@@ -43,6 +43,9 @@ final class AppModel {
         case shareLogin(ItemSummary)
         /// A new folder, or one inside another.
         case newFolder(inside: String?)
+        case renameFolder(String)
+        /// Asks before deleting a folder, saying what goes with it.
+        case deleteFolder(String)
         case share(folder: String?, user: User?)
         /// Shares one of your folders with a group, from the group's page.
         case shareWithGroup(GroupSummary)
@@ -74,6 +77,8 @@ final class AppModel {
             case .deleteLogin(let item): "delete-\(item.id)"
             case .shareLogin(let item): "share-login-\(item.id)"
             case .newFolder(let parent): "new-folder-\(parent ?? "")"
+            case .renameFolder(let folder): "rename-folder-\(folder)"
+            case .deleteFolder(let folder): "delete-folder-\(folder)"
             case .share(let folder, let user): "share-\(folder ?? "")-\(user?.userId ?? 0)"
             case .shareWithGroup(let group): "share-with-group-\(group.id)"
             case .manageFolder(let folder): "manage-\(folder)"
@@ -681,6 +686,58 @@ final class AppModel {
             message = "Created \(created.name), but couldn't share it with "
                 + ListFormatter.localizedString(byJoining: created.problems) + "."
         }
+    }
+
+    /// Renames a folder, and the folders inside it you manage, and keeps showing it. Says
+    /// which ones inside kept their names or couldn't be renamed.
+    func rename(folder: String, to name: String) async throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let renamed = try await perform { try $0.renameFolder(folder: folder, name: name) }
+        await reloadLocal()
+        // Where a folder, or a step in the sidebar, went.
+        func moved(_ old: String) -> String? {
+            if old == folder { return renamed.name }
+            if old.hasPrefix(folder + " / ") { return renamed.name + String(old.dropFirst(folder.count)) }
+            return nil
+        }
+        if case .folder(let shown) = section, let new = moved(shown), folders.contains(new) {
+            section = .folder(new)
+        }
+        collapsedFolders = Set(collapsedFolders.map { moved($0) ?? $0 })
+        var notes: [String] = []
+        if !renamed.kept.isEmpty {
+            let one = renamed.kept.count == 1
+            notes.append(ListFormatter.localizedString(byJoining: renamed.kept.map { "\u{201C}\($0)\u{201D}" })
+                + (one ? " kept its name" : " kept their names")
+                + ": you don't manage \(one ? "it" : "them").")
+        }
+        if !renamed.problems.isEmpty {
+            notes.append("Couldn't rename " + ListFormatter.localizedString(byJoining: renamed.problems) + ".")
+        }
+        if !notes.isEmpty { message = notes.joined(separator: " ") }
+    }
+
+    /// What deleting a folder would delete, fetched fresh.
+    func deletion(of folder: String) async throws -> FolderDeletion {
+        #if DEBUG
+        if isDemo {
+            return FolderDeletion(
+                logins: 3, toChange: 1, inside: folders.filter { $0.hasPrefix(folder + " / ") })
+        }
+        #endif
+        return try await perform { try $0.folderDeletion(folder: folder) }
+    }
+
+    /// Deletes a folder and its logins for everyone, for good; `logins` is how many were
+    /// agreed to.
+    func delete(folder: String, logins: UInt64) async throws {
+        let result = try await perform { try $0.deleteFolder(folder: folder, logins: logins) }
+        if case .folder(let shown) = section, shown == folder { section = .allLogins }
+        if let id = selectedItemID, items.first(where: { $0.id == id })?.folder == folder {
+            selectedItemID = nil
+        }
+        await refresh()
+        note(result)
     }
 
     /// Folders the sidebar shows collapsed; the rest are open.

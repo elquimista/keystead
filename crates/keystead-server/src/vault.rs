@@ -324,6 +324,81 @@ pub(crate) async fn rekey(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub(crate) struct DeleteFolderParams {
+    /// How many logins in it the caller agreed to delete with it.
+    #[serde(default)]
+    logins: i64,
+}
+
+/// `DELETE /v1/folders/{folder_id}?logins=N`: a manager deletes a folder for everyone,
+/// with the logins in it and their history, for good. `logins` is how many the caller
+/// agreed to delete; if the folder has another number now, nothing happens. Everyone who
+/// could open the folder or a login in it loses it as if removed, but nothing goes on
+/// passwords to change: the logins are gone, and what was there for them goes too.
+/// Folders inside it by name are folders of their own and stay.
+pub(crate) async fn delete_folder(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(folder_id): Path<FolderId>,
+    Query(params): Query<DeleteFolderParams>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    require(
+        folder_role(&mut tx, auth.user_id, folder_id).await?,
+        Role::Manage,
+        "delete this folder",
+    )?;
+    let folder = folder_id.to_string();
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM items
+         WHERE folder_id = ? AND NOT COALESCE(json_extract(body, '$.deleted'), 0)",
+    )
+    .bind(&folder)
+    .fetch_one(&mut *tx)
+    .await?;
+    if live != params.logins {
+        return Err(ApiError::Conflict(format!(
+            "the folder has {live} logins now, not {}; sync and try again",
+            params.logins
+        )));
+    }
+    // Everyone who can open the folder, or a login in it without the folder.
+    let affected: Vec<i64> = sqlx::query_scalar(
+        "SELECT user_id FROM access WHERE folder_id = ?1
+         UNION
+         SELECT r.user_id FROM item_reach r JOIN items i ON i.id = r.item_id
+         WHERE i.folder_id = ?1",
+    )
+    .bind(&folder)
+    .fetch_all(&mut *tx)
+    .await?;
+    for table in ["item_access", "item_groups", "item_history", "exposures"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE item_id IN (SELECT id FROM items WHERE folder_id = ?)"
+        ))
+        .bind(&folder)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for table in ["items", "members", "folder_groups", "folder_keys"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE folder_id = ?"))
+            .bind(&folder)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM folders WHERE id = ?")
+        .bind(&folder)
+        .execute(&mut *tx)
+        .await?;
+    // Their feeds drop the folder first, then the logins they had without it.
+    for user in affected {
+        reconcile(&mut tx, UserId(user)).await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /v1/folders/{folder_id}/groups`: a manager shares the folder with a group, with
 /// the folder's current key wrapped for the group's current key.
 pub(crate) async fn add_folder_group(

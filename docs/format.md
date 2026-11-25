@@ -284,12 +284,22 @@ open them, and save the next version as format 2 with a new item key. An item ne
 back to format 1.
 
 **Folder info** (`{"name"}`) is encrypted with the folder key, with associated data
-`transcript("keystead/folder-info/v1", folder id)`.
+`transcript("keystead/folder-info/v1", folder id)`. **Renaming** a folder is a rekey (see
+Removing access, and new keys) with the new name in its info: members get it as a
+`rekeyed` entry, so it works with every server and app that has rekeys.
 
 Folders nest by name only: apps show "Engineering / Databases" (parts joined by
 `" / "`) inside "Engineering". Each folder still has its own key and its own people and
 groups; sharing one never shares another. A folder made inside another may start out
-shared like it, which is just sharing it with the same people and groups.
+shared like it, which is just sharing it with the same people and groups. Renaming a
+folder renames the folders inside it that the renamer manages; the rest keep their names.
+
+**Deleting a folder** (0.13.0 and later; `DELETE /v1/folders/{id}?logins=N`, managers)
+deletes it for everyone with the items in it, their history and their passwords to
+change, for good: they don't go to Recently Deleted. `logins` is how many live items the
+manager agreed to delete; if the folder has another number, the server refuses. Everyone
+who could open the folder gets `left`, and then `left_item` for any of its items they had
+without it, as when they're removed. Folders inside it by name stay.
 
 ## Directory
 
@@ -409,6 +419,7 @@ codes (400, 401, 403, 404, 409).
 | `GET /v1/folders/{id}/members` | | `Members` | Folder members |
 | `PUT /v1/folders/{id}/members/{user}` | `RoleRequest` | 204 | Folder managers |
 | `DELETE /v1/folders/{id}/members/{user}` | | 204 | Folder managers, or the member themselves |
+| `DELETE /v1/folders/{id}?logins=N` | | 204 | Folder managers |
 | `POST /v1/folders/{id}/rekey` | `RekeyRequest` | 204 | Folder managers |
 | `POST /v1/folders/{id}/groups` | `AddFolderGroupRequest` | 204 | Folder managers |
 | `PUT /v1/folders/{id}/groups/{group}` | `RoleRequest` | 204 | Folder managers |

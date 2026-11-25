@@ -330,6 +330,27 @@ pub struct FolderCreated {
     pub problems: Vec<String>,
 }
 
+/// A folder renamed, with the folders inside it.
+#[derive(uniffi::Record)]
+pub struct FolderRenamed {
+    pub name: String,
+    /// Folders inside it that kept their names: you don't manage them.
+    pub kept: Vec<String>,
+    /// Folders inside it that couldn't be renamed, and why.
+    pub problems: Vec<String>,
+}
+
+/// What deleting a folder deletes, to ask about first.
+#[derive(uniffi::Record)]
+pub struct FolderDeletion {
+    /// Logins in it, deleted with it for good.
+    pub logins: u64,
+    /// How many of their passwords are on To Change, which deleting forgets.
+    pub to_change: u64,
+    /// Folders inside it, which stay.
+    pub inside: Vec<String>,
+}
+
 /// A folder an import puts logins into, or leaves out.
 #[derive(uniffi::Record)]
 pub struct ImportFolderSummary {
@@ -906,6 +927,33 @@ impl Vault {
     pub fn create_folder(&self, name: String) -> Result<(), CoreError> {
         self.vault()?.create_folder(&name)?;
         Ok(())
+    }
+
+    /// Renames a folder, and the folders inside it you manage (managers).
+    pub fn rename_folder(&self, folder: String, name: String) -> Result<FolderRenamed, CoreError> {
+        let renamed = self.vault()?.rename_folder(&folder, &name)?;
+        Ok(FolderRenamed {
+            name: renamed.name,
+            kept: renamed.kept,
+            problems: renamed.problems,
+        })
+    }
+
+    /// What deleting a folder would delete, fetched fresh.
+    pub fn folder_deletion(&self, folder: String) -> Result<FolderDeletion, CoreError> {
+        let plan = self.vault()?.folder_deletion(&folder)?;
+        Ok(FolderDeletion {
+            logins: plan.logins as u64,
+            to_change: plan.to_change as u64,
+            inside: plan.inside,
+        })
+    }
+
+    /// Deletes a folder and its logins for everyone, for good (managers); `logins` is the
+    /// number from `folder_deletion` that was agreed to.
+    pub fn delete_folder(&self, folder: String, logins: u64) -> Result<SyncResult, CoreError> {
+        let logins = usize::try_from(logins).unwrap_or(usize::MAX);
+        Ok(self.vault()?.delete_folder(&folder, logins)?.into())
     }
 
     /// Creates a folder inside another, named "Parent / Name". With `share_like_parent`,

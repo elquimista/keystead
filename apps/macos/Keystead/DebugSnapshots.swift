@@ -112,6 +112,9 @@ enum DebugSnapshots {
                     model.sheet = nil
                     model.section = .folder("Production / Databases")
                 }),
+                ("6e13-rename-folder", { model.sheet = .renameFolder("Production") }),
+                ("6e14-delete-folder", { model.sheet = .deleteFolder("Production") }),
+                ("6e15-closed", { model.sheet = nil }),
                 ("6e9-to-change", {
                     model.section = .toChange
                     model.selectedItemID = model.items[0].id

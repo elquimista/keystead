@@ -149,6 +149,8 @@ keystead folder remove Production 3  # takes them out and changes the folder's k
 keystead folder leave Production
 keystead folder create Databases --inside Production   # "Production / Databases", shared like Production
 keystead folder create Keys --inside Production --private
+keystead folder rename Production Prod   # and the folders inside it you manage
+keystead folder delete Old               # with its logins, for good (asks first)
 keystead unshare Bank 2              # take away someone's copy of one login
 keystead remove-user 3               # owner: remove someone from the team (asks first)
 ```

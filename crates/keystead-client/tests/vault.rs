@@ -1570,3 +1570,121 @@ fn a_login_moves_between_folders_and_who_had_it_only_there_loses_it() {
     );
     assert_eq!(alice.open_item(database).unwrap().1.password, "db-pw");
 }
+
+#[test]
+fn renaming_a_folder_renames_the_folders_inside_it_for_everyone() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let alice_id = alice.whoami().user_id;
+    let bob_id = bob.whoami().user_id;
+
+    // Production and Production / Databases, both shared with Bob; Bob's own folder
+    // inside, which Alice only views.
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    alice
+        .create_folder_inside("Production", "Databases", true)
+        .unwrap();
+    let (overview, details) = login("Database", "db-pw");
+    alice
+        .add(Some("Production / Databases"), overview, details)
+        .unwrap();
+    bob.sync().unwrap();
+    bob.create_folder_inside("Production", "Bob's", false)
+        .unwrap();
+    bob.share_folder("Production / Bob's", alice_id, Role::View)
+        .unwrap();
+    assert!(
+        bob.rename_folder("Production", "Prod").is_err(),
+        "Bob only edits it"
+    );
+
+    let renamed = alice.rename_folder("Production", "Prod").unwrap();
+    assert_eq!(renamed.name, "Prod");
+    assert_eq!(renamed.kept, ["Production / Bob's"]);
+    assert!(renamed.problems.is_empty());
+    let expected = ["Prod", "Prod / Databases", "Production / Bob's"];
+    assert_eq!(alice.folders().unwrap(), expected);
+
+    // Bob's devices pick the new names up, and the logins in them still open.
+    bob.sync().unwrap();
+    assert_eq!(bob.folders().unwrap(), expected);
+    let database = bob.find_item("Database", None).unwrap();
+    assert_eq!(
+        bob.list().unwrap()[0].folder.as_deref(),
+        Some("Prod / Databases")
+    );
+    assert_eq!(bob.open_item(database).unwrap().1.password, "db-pw");
+
+    // No two folders end up with one name.
+    assert!(
+        alice
+            .rename_folder("Prod / Databases", "Production / Bob's")
+            .is_err()
+    );
+    assert!(alice.rename_folder("Prod", " ").is_err());
+}
+
+#[test]
+fn deleting_a_folder_deletes_its_logins_for_everyone() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+    let carol_id = carol_identity.user_id;
+
+    // Old has two logins: Bob views the folder, and Carol has Router directly. Carol was
+    // in Old too, so Server's password is on the list to change.
+    alice.create_folder("Old").unwrap();
+    alice.share_folder("Old", bob_id, Role::View).unwrap();
+    alice.share_folder("Old", carol_id, Role::View).unwrap();
+    alice.create_folder_inside("Old", "Keep", false).unwrap();
+    for (name, password) in [("Server", "server-pw"), ("Router", "router-pw")] {
+        let (overview, details) = login(name, password);
+        alice.add(Some("Old"), overview, details).unwrap();
+    }
+    let router = alice.find_item("Router", None).unwrap();
+    alice.share_item(router, carol_id, Role::View).unwrap();
+    alice.remove_from_folder("Old", carol_id).unwrap();
+
+    let plan = alice.folder_deletion("Old").unwrap();
+    assert_eq!(
+        (plan.logins, plan.to_change, plan.inside.as_slice()),
+        (2, 1, ["Old / Keep".to_owned()].as_slice())
+    );
+    bob.sync().unwrap();
+    assert!(bob.delete_folder("Old", 2).is_err(), "Bob only views it");
+    assert!(
+        alice.delete_folder("Old", 1).is_err(),
+        "it has another login than agreed to"
+    );
+    assert!(alice.folders().unwrap().contains(&"Old".to_owned()));
+
+    alice.delete_folder("Old", plan.logins).unwrap();
+    assert_eq!(alice.folders().unwrap(), ["Old / Keep"]);
+    assert!(alice.list().unwrap().is_empty());
+    assert!(alice.to_change().unwrap().is_empty());
+    assert!(
+        alice.deleted().unwrap().unwrap().is_empty(),
+        "gone for good"
+    );
+
+    // Bob loses the folder, and Carol the login she had without it.
+    bob.sync().unwrap();
+    assert!(bob.folders().unwrap().is_empty());
+    assert!(bob.list().unwrap().is_empty());
+    carol.sync().unwrap();
+    assert!(carol.list().unwrap().is_empty());
+}
