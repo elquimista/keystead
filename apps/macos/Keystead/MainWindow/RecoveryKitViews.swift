@@ -31,6 +31,7 @@ struct RecoveryKitSheet: View {
                     } label: {
                         Label(revealed ? "Hide Words" : "Show Words",
                               systemImage: revealed ? "eye.slash" : "eye")
+                            .contentTransition(.symbolEffect(.replace))
                     }
                     Button {
                         model.copyRecoveryWords(of: kit)
@@ -50,23 +51,26 @@ struct RecoveryKitSheet: View {
                     try? await Task.sleep(for: SecureClipboard.clearAfter)
                     if !Task.isCancelled { copiedAt = nil }
                 }
-                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 6) {
-                    GridRow {
-                        Text("Server").foregroundStyle(.secondary)
-                        Text(kit.server)
-                    }
-                    GridRow {
-                        Text("Owner's fingerprint").foregroundStyle(.secondary)
-                        Text(kit.ownerFingerprint + (kit.ownerFingerprint == kit.fingerprint ? " (you)" : ""))
-                            .font(.system(.body, design: .monospaced))
+                Form {
+                    Section {
+                        LabeledContent("Server", value: kit.server)
+                        LabeledContent("Owner's fingerprint") {
+                            Text(kit.ownerFingerprint + (kit.ownerFingerprint == kit.fingerprint ? " (you)" : ""))
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    } footer: {
+                        Text("Anyone with these words can be you on \(host(kit.server)). Don't "
+                            + "photograph them. If you copy them, paste them only somewhere as safe as "
+                            + "Keystead, like an encrypted vault, never into a note, chat or email.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Text("Anyone with these words can be you on \(host(kit.server)). Don't photograph "
-                    + "them. If you copy them, paste them only somewhere as safe as Keystead, like "
-                    + "an encrypted vault, never into a note, chat or email.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                .sheetForm()
                 HStack {
                     Spacer()
                     Button("Print…") { printRecoveryKit(kit) }
@@ -156,9 +160,13 @@ struct RecoveryKitWords: View {
                 }
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(.separator.opacity(0.6), lineWidth: 0.5)
+        }
     }
 }
 

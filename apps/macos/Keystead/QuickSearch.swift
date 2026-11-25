@@ -136,26 +136,31 @@ final class QuickSearch: NSObject, NSWindowDelegate {
     private func watchKeys() {
         if keyMonitor != nil { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                guard let self, let state = self.state, event.window === self.panel else {
-                    return event
-                }
-                switch Int(event.keyCode) {
+            // Only plain values cross into the main actor; the event itself isn't Sendable.
+            let keyCode = Int(event.keyCode)
+            let flags = event.modifierFlags
+            let windowNumber = event.windowNumber
+            let handled = MainActor.assumeIsolated { () -> Bool in
+                guard let self, let state = self.state, let panel = self.panel,
+                    windowNumber == panel.windowNumber
+                else { return false }
+                switch keyCode {
                 case kVK_DownArrow:
                     state.move(by: 1)
                 case kVK_UpArrow:
                     state.move(by: -1)
                 case kVK_Return, kVK_ANSI_KeypadEnter:
-                    let what: Copy = event.modifierFlags.contains(.shift) ? .username
-                        : event.modifierFlags.contains(.option) ? .oneTimeCode : .password
+                    let what: Copy = flags.contains(.shift) ? .username
+                        : flags.contains(.option) ? .oneTimeCode : .password
                     Task { await state.activate { item in self.copy(what, of: item) } }
                 case kVK_Escape:
                     self.close()
                 default:
-                    return event
+                    return false
                 }
-                return nil
+                return true
             }
+            return handled ? nil : event
         }
     }
 

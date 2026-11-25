@@ -64,12 +64,148 @@ struct SheetContent: View {
 
 extension View {
     /// A sheet's form in the grouped style, as in System Settings, edge to edge with the
-    /// sheet's other content. Sheets grow to fit it, so it doesn't scroll.
-    func sheetForm() -> some View {
+    /// sheet's other content. Sheets grow to fit it, so it doesn't scroll, unless it's given
+    /// a height for lists that can get long.
+    func sheetForm(height: CGFloat? = nil) -> some View {
         formStyle(.grouped)
-            .scrollDisabled(true)
+            .scrollDisabled(height == nil)
+            .frame(height: height)
             .padding(.horizontal, -20)
             .padding(.vertical, -12)
+    }
+}
+
+/// A grouped form's footer: a caption that reads from the left, as System Settings sets them.
+private struct FormFooter: View {
+    let text: String
+    var color: Color?
+
+    init(_ text: String, color: Color? = nil) {
+        self.text = text
+        self.color = color
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(color.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.secondary))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A small tinted capsule beside a name, like "New".
+struct Badge: View {
+    let text: String
+    var color: Color = .accentColor
+
+    init(_ text: String, color: Color = .accentColor) {
+        self.text = text
+        self.color = color
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(color.opacity(0.15), in: Capsule())
+    }
+}
+
+/// A line to send someone, like an invite, as a form row: monospaced and selectable, with a
+/// copy button that says when it has copied.
+private struct LineRow: View {
+    let line: String
+    let copy: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Text(line)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                copy()
+                copied = true
+            } label: {
+                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .controlSize(.small)
+            .help("Copy the line")
+        }
+        .task(id: copied) {
+            guard copied else { return }
+            try? await Task.sleep(for: .seconds(2))
+            if !Task.isCancelled { copied = false }
+        }
+    }
+}
+
+/// A finished step: a big tinted symbol beside what happened.
+private struct Outcome: View {
+    var symbol = "checkmark.circle.fill"
+    var color: Color = .green
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 34))
+                .foregroundStyle(.white, color)
+                .symbolRenderingMode(.palette)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A code to type, like a fingerprint, as a form row: the label as other labels are, the
+/// code monospaced.
+private struct CodeField: View {
+    let title: String
+    @Binding var text: String
+
+    init(_ title: String, text: Binding<String>) {
+        self.title = title
+        _text = text
+    }
+
+    var body: some View {
+        LabeledContent(title) {
+            TextField(title, text: $text, prompt: Text("1a2b-3c4d-5e6f-7a8b-9c0d"))
+                .labelsHidden()
+                .font(.system(.body, design: .monospaced))
+                .multilineTextAlignment(.trailing)
+                .autocorrectionDisabled()
+        }
+    }
+}
+
+/// Waiting on someone else, as a form row.
+private struct WaitingRow: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text(text)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -444,30 +580,37 @@ private struct HistorySheet: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             } else if let entries {
-                List(entries, id: \.version) { entry in
-                    row(entry)
+                Form {
+                    Section {
+                        ForEach(entries, id: \.version) { entry in
+                            row(entry)
+                        }
+                    } footer: {
+                        FormFooter("The server keeps the last 10 earlier versions. Bringing one back "
+                            + "saves it as a new version; if its password differs, change it at the "
+                            + "website too.")
+                    }
                 }
-                .frame(minHeight: 280)
-                Text("The server keeps the last 10 earlier versions. Bringing one back saves it "
-                    + "as a new version; if its password differs, change it at the website too.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Six versions fit; more scroll.
+                .sheetForm(height: entries.count > 6 ? 500 : nil)
+                .animation(.snappy(duration: 0.25), value: entries.map(\.version))
             } else {
                 ProgressView()
-                    .frame(maxWidth: .infinity)
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, minHeight: 120)
             }
             if let note {
-                Text(note)
+                Label(note, systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let error {
-                Text(error)
+                Label(error, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(width: 540)
+        .frame(width: 560)
         .task { await load() }
         .confirmationDialog(
             "Bring back version \(restoring?.version ?? 0)?",
@@ -482,60 +625,73 @@ private struct HistorySheet: View {
         }
     }
 
+    /// Who saved it beside what they changed, when, and its version; then, for earlier
+    /// versions you can open, the password and a way to bring it back.
     private func row(_ entry: HistoryEntry) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(entry.current ? "Version \(entry.version) · now" : "Version \(entry.version)")
-                    .fontWeight(.semibold)
-                Spacer()
+        HStack(alignment: .top, spacing: 10) {
+            Avatar(name: entry.author, size: 26)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(changes(entry))
+                        .fontWeight(.medium)
+                        .foregroundStyle(entry.readable ? .primary : .secondary)
+                    Spacer(minLength: 8)
+                    if entry.current {
+                        Badge("Current")
+                    } else {
+                        Text("Version \(entry.version)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Text(saved(entry))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-            Text(changes(entry))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if entry.readable && !entry.current {
-                HStack {
-                    Text(shown[entry.version] ?? "••••••••••••")
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                    Button {
-                        Task { await reveal(entry) }
-                    } label: {
-                        Image(systemName: shown[entry.version] == nil ? "eye" : "eye.slash")
+                if !entry.readable {
+                    Text("It's from before this login was shared with you.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if !entry.current {
+                    HStack(spacing: 6) {
+                        Text(shown[entry.version] ?? "••••••••••••")
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(shown[entry.version] == nil ? .secondary : .primary)
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        RevealButton(what: "this version's password", shown: shown[entry.version] != nil,
+                                     hovering: true) { await reveal(entry) }
+                        Button {
+                            Task { await model.copyHistoryPassword(of: item, version: entry.version) }
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Copy this version's password (cleared after 30 seconds)")
+                        Spacer(minLength: 8)
+                        Button("Bring Back…") { restoring = entry }
+                            .controlSize(.small)
                     }
-                    .buttonStyle(.borderless)
-                    .help(shown[entry.version] == nil ? "Show this version's password" : "Hide it")
-                    Button {
-                        Task { await model.copyHistoryPassword(of: item, version: entry.version) }
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Copy this version's password (cleared after 30 seconds)")
-                    Spacer()
-                    Button("Bring Back…") { restoring = entry }
+                    .padding(.top, 6)
                 }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
     }
 
-    /// "Nov 20, 2026 · Mo".
+    /// "Mo · Nov 20, 2026 at 4:46 PM".
     private func saved(_ entry: HistoryEntry) -> String {
         let date = entry.savedAt.map {
             Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened)
         }
-        return [date, entry.author].compactMap { $0 }.joined(separator: " · ")
+        return [entry.author, date].compactMap { $0 }.joined(separator: " · ")
     }
 
     private func changes(_ entry: HistoryEntry) -> String {
-        if !entry.readable {
-            return "Can't be opened here: it's from before this login was shared with you."
-        }
+        if !entry.readable { return "Can't be opened here" }
         if entry.changes == ["created"] { return "Created" }
-        if entry.changes.isEmpty { return "No change to its fields, for example sharing it." }
+        if entry.changes.isEmpty { return "No change to its fields, for example sharing it" }
         return "Changed the " + ListFormatter.localizedString(byJoining: entry.changes)
     }
 
@@ -600,38 +756,35 @@ private struct AddDeviceSheet: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             } else if let line {
-                Text("On the new device, open Keystead, choose Add this Mac, and paste this line. "
-                    + "On the command line, run it.")
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(alignment: .top) {
-                    Text(line)
-                        .font(.system(.callout, design: .monospaced))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Copy") { model.copy(line) }
-                }
-                .padding(10)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-                if let newDevice {
-                    Text("\u{201C}\(newDevice)\u{201D} is ready. Type the code it shows:")
-                    TextField("Code", text: $code, prompt: Text("1a2b-3c4d-5e6f-7a8b-9c0d"))
-                        .font(.system(.body, design: .monospaced))
-                    Text("Typing it checks that your account goes to that device and nowhere else. "
-                        + "Then Touch ID confirms sending it.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Waiting for the new device, for up to ten minutes…")
-                            .foregroundStyle(.secondary)
+                Form {
+                    Section {
+                        LineRow(line: line) { model.copy(line) }
+                    } header: {
+                        Text("1. Paste this line on the new device")
+                    } footer: {
+                        FormFooter("In Keystead, choose \u{201C}Add this Mac\u{201D} and paste it. On "
+                            + "the command line, run it.")
+                    }
+                    Section {
+                        if newDevice != nil {
+                            CodeField("Code", text: $code)
+                        } else {
+                            WaitingRow(text: "Waiting for the new device, for up to ten minutes…")
+                        }
+                    } header: {
+                        Text(newDevice.map { "2. Type the code \u{201C}\($0)\u{201D} shows" }
+                            ?? "2. Type the code it shows")
+                    } footer: {
+                        FormFooter("Typing it checks that your account goes to that device and "
+                            + "nowhere else. Then Touch ID confirms sending it.")
                     }
                 }
+                .sheetForm()
+                .animation(.snappy(duration: 0.25), value: newDevice)
             } else {
                 ProgressView()
-                    .frame(maxWidth: .infinity)
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, minHeight: 120)
             }
         }
         .frame(width: 520)
@@ -694,62 +847,62 @@ private struct ImportSheet: View {
             return false
         } content: {
             if let result {
-                Text("Imported \(result.added) \(result.added == 1 ? "login" : "logins")"
-                    + (result.foldersCreated > 0 ? " into \(result.foldersCreated) new folders." : "."))
-                Text("New folders are yours alone until you share them, for example with a group.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Outcome(
+                    title: "Imported \(result.added) \(result.added == 1 ? "login" : "logins")"
+                        + (result.foldersCreated > 0 ? " into \(result.foldersCreated) new folders" : ""),
+                    detail: "New folders are yours alone until you share them, for example with a group.")
             } else if let preview {
-                Text("\(file?.lastPathComponent ?? "The file") has these logins:")
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(preview.folders, id: \.name) { folder in
-                        HStack {
-                            Label(folder.name, systemImage: "folder")
-                            if folder.new {
-                                Text("new")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                Form {
+                    Section {
+                        ForEach(preview.folders, id: \.name) { folder in
+                            countRow(folder.name, symbol: "folder.fill", count: folder.logins, new: folder.new)
+                        }
+                        if preview.own > 0 {
+                            countRow("In no folder", symbol: "person.fill", count: preview.own, new: false)
+                        }
+                    } header: {
+                        Text("\(file?.lastPathComponent ?? "The file") has these logins")
+                    } footer: {
+                        if !notes(preview).isEmpty {
+                            FormFooter(notes(preview).joined(separator: "\n"))
+                        }
+                    }
+                    if preview.own > 0 || intoFolder {
+                        Section {
+                            Toggle("Put logins in no folder into a folder", isOn: $intoFolder)
+                            if intoFolder {
+                                TextField("Folder name", text: $unfiledFolder)
                             }
-                            Spacer()
-                            Text("\(folder.logins)")
-                                .monospacedDigit()
-                        }
-                    }
-                    if preview.own > 0 {
-                        HStack {
-                            Label("In no folder", systemImage: "person")
-                            Spacer()
-                            Text("\(preview.own)")
-                                .monospacedDigit()
+                        } footer: {
+                            FormFooter(intoFolder
+                                ? "If there's no such folder yet, it's made for you, and it's yours "
+                                    + "alone until you share it."
+                                : "Otherwise each stays yours alone until you share it.")
                         }
                     }
                 }
-                .padding(10)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-                if preview.own > 0 || intoFolder {
-                    Toggle("Put logins in no folder into a folder named", isOn: $intoFolder)
-                    if intoFolder {
-                        TextField("Folder", text: $unfiledFolder)
-                    }
-                }
-                ForEach(notes(preview), id: \.self) { note in
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                .sheetForm(height: preview.folders.count > 8 ? 520 : nil)
             } else {
                 Text("In Passbolt, choose Export and the KDBX format (KeePass or KeePassXC both "
-                    + "work), then choose the file here. A KeePass or KeePassXC file works too. "
-                    + "Nothing is saved until you've seen what would be imported.")
+                    + "work), then choose the file here. A KeePass or KeePassXC file works too.")
                     .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Text(file?.lastPathComponent ?? "No file chosen")
-                        .foregroundStyle(file == nil ? .secondary : .primary)
-                    Spacer()
-                    Button("Choose File…") { chooseFile() }
+                Form {
+                    Section {
+                        LabeledContent("File") {
+                            HStack(spacing: 8) {
+                                Text(file?.lastPathComponent ?? "None")
+                                    .foregroundStyle(file == nil ? .secondary : .primary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Button("Choose\u{2026}") { chooseFile() }
+                            }
+                        }
+                        SecureField("Passphrase", text: $passphrase, prompt: Text("The one it was exported with"))
+                    } footer: {
+                        FormFooter("Nothing is saved until you've seen what would be imported.")
+                    }
                 }
-                SecureField("Passphrase", text: $passphrase, prompt: Text("The passphrase it was exported with"))
+                .sheetForm()
             }
         }
         .frame(width: 500)
@@ -763,6 +916,23 @@ private struct ImportSheet: View {
             }
         }
         #endif
+    }
+
+    /// A folder, or logins in none, and how many logins would go there.
+    private func countRow(_ name: String, symbol: String, count: UInt32, new: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            Text(name)
+            if new {
+                Badge("New")
+            }
+            Spacer()
+            Text("\(count)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var toImport: UInt32 {
@@ -820,74 +990,89 @@ private struct HelpRecoverSheet: View {
     private var claimed: Bool { request?.claimed == true }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Help \(user.name) Recover")
-                .font(.title3.weight(.semibold))
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Avatar(name: user.name, size: 28)
+                Text("Help \(user.name) Recover")
+                    .font(.title3.weight(.semibold))
+            }
             if let approved {
-                Text("\(approved.name)'s new keys are approved, and their old devices no longer "
-                    + "work. What's shared with them comes back as everyone's Keystead syncs.")
-                    .fixedSize(horizontal: false, vertical: true)
-                if !approved.ownLogins {
-                    Text("Their own logins and the folders only they were in don't come back: "
-                        + "escrow was off.")
-                        .foregroundStyle(.secondary)
-                }
+                Outcome(
+                    symbol: "checkmark.seal.fill",
+                    title: "\(approved.name)'s new keys are approved",
+                    detail: "Their old devices no longer work. What's shared with them comes back as "
+                        + "everyone's Keystead syncs."
+                        + (approved.ownLogins
+                            ? ""
+                            : " Their own logins and the folders only they were in don't come back: "
+                                + "escrow was off."))
             } else if !loaded {
-                ProgressView().controlSize(.small)
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, minHeight: 100)
             } else if let request, claimed {
                 Text("\(user.name)'s new Mac is ready. Ask them to read out the fingerprint it "
-                    + "shows, in person or on a call, and type it here. If it doesn't match, "
-                    + "don't approve: someone else may have used the line.")
+                    + "shows, in person or on a call, and type it here.")
                     .fixedSize(horizontal: false, vertical: true)
-                TextField("Their new fingerprint", text: $fingerprint)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .autocorrectionDisabled()
-                Text(request.escrow
-                    ? "Their own logins and folders come back too: they're in escrow."
-                    : "Their own logins and the folders only they're in won't come back: "
-                        + "escrow is off.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Send \(user.name) a one-time line, privately, for example in a direct "
-                    + "message. On a new Mac they choose Recover an Account, then No Recovery "
-                    + "Kit?, and paste it. It works once, for a week.")
-                    .fixedSize(horizontal: false, vertical: true)
-                if let line {
-                    Text(line)
-                        .font(.system(.callout, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
-                        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                    Button("Copy Line") { model.copy(line) }
-                } else if request != nil {
-                    Text("A line was sent earlier. Make a new one if they don't have it; the old "
-                        + "one stops working.")
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if line != nil || request != nil {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Waiting for \(user.name) to use it…")
-                            .foregroundStyle(.secondary)
+                Form {
+                    Section {
+                        CodeField("Fingerprint", text: $fingerprint)
+                    } footer: {
+                        FormFooter("If it doesn't match, don't approve: someone else may have used "
+                            + "the line. "
+                            + (request.escrow
+                                ? "Their own logins and folders come back too: they're in escrow."
+                                : "Their own logins and the folders only they're in won't come "
+                                    + "back: escrow is off."))
                     }
                 }
-                if signedOut {
-                    Label("\(user.name)'s devices are signed out.", systemImage: "checkmark.circle")
-                        .foregroundStyle(.secondary)
-                } else if line == nil {
-                    Toggle("Sign out \(user.name)'s devices now", isOn: $signOut)
-                    Text("A lost device that still works could cancel this recovery. If "
-                        + "\(user.name) still has one after all, their Recovery Kit gets them "
-                        + "back in.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                .sheetForm()
+            } else {
+                if line == nil && request == nil {
+                    Text("Make \(user.name) a one-time line. With it, their new Mac asks for new "
+                        + "keys, and you approve them once they read you its fingerprint.")
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                Form {
+                    if let line {
+                        Section {
+                            LineRow(line: line) { model.copy(line) }
+                        } header: {
+                            Text("Send \(user.name) this line, privately")
+                        } footer: {
+                            FormFooter("For example in a direct message. On a new Mac they choose "
+                                + "\u{201C}Recover your account\u{201D}, then \u{201C}Recover with your "
+                                + "team owner's help\u{201D}, and paste it. It works once, for a week.")
+                        }
+                    } else if request != nil {
+                        Section {
+                            Text("A line was sent earlier. Make a new one if they don't have it; the "
+                                + "old one stops working.")
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if line != nil || request != nil {
+                        Section {
+                            WaitingRow(text: "Waiting for \(user.name) to use it\u{2026}")
+                        }
+                    }
+                    if signedOut {
+                        Section {
+                            Label("\(user.name)'s devices are signed out.", systemImage: "checkmark.circle")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if line == nil {
+                        Section {
+                            Toggle("Sign out \(user.name)'s devices now", isOn: $signOut)
+                        } footer: {
+                            FormFooter("A lost device that still works could cancel this recovery. If "
+                                + "\(user.name) still has one after all, their Recovery Kit gets them "
+                                + "back in.")
+                        }
+                    }
+                }
+                .sheetForm()
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -895,11 +1080,17 @@ private struct HelpRecoverSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
+                if approved == nil && request != nil {
+                    Button(role: .destructive) {
+                        run { try await cancel() }
+                    } label: {
+                        Text("Cancel Recovery")
+                            .foregroundStyle(.red)
+                    }
+                    .disabled(busy)
+                }
                 if busy {
                     ProgressView().controlSize(.small)
-                }
-                if approved == nil && request != nil {
-                    Button("Cancel Recovery", role: .destructive) { run { try await cancel() } }
                 }
                 Spacer()
                 if approved != nil {
@@ -907,11 +1098,13 @@ private struct HelpRecoverSheet: View {
                         .keyboardShortcut(.defaultAction)
                 } else if claimed {
                     Button("Close") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
                     Button("Approve") { run { try await approve() } }
                         .keyboardShortcut(.defaultAction)
                         .disabled(fingerprint.trimmed.isEmpty || busy)
                 } else {
                     Button("Close") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
                     Button(line == nil && request == nil ? "Create Line" : "New Line") {
                         run { try await start() }
                     }
@@ -921,7 +1114,9 @@ private struct HelpRecoverSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 500)
+        .frame(width: 520)
+        .animation(.snappy(duration: 0.25), value: claimed)
+        .animation(.snappy(duration: 0.25), value: line)
         .task { await watch() }
     }
 
@@ -1401,6 +1596,8 @@ private struct ShareLoginSheet: View {
     private var people: [User] { Self.people(for: item, in: model) }
     private var groups: [GroupSummary] { Self.groups(for: item, in: model) }
     private var manages: Bool { item.role == .manage }
+    /// Whether there's someone, or a group, to pick to share with.
+    private var canPick: Bool { manages && !(people.isEmpty && groups.isEmpty) }
 
     /// Whom the login would go to, by name, and whether it's a group.
     private var chosen: (name: String, isGroup: Bool)? {
@@ -1431,63 +1628,64 @@ private struct ShareLoginSheet: View {
             }
             return true
         } content: {
-            if manages {
-                if people.isEmpty && groups.isEmpty {
-                    Text(model.users.contains { $0.approved && !$0.removed && $0.userId != model.identity?.userId }
-                        ? "Everyone approved, and every group, can already open this login."
-                        : "There's no one approved to share with yet. "
-                            + (model.isOwner
-                                ? "Invite people from People, then approve them once they've joined."
-                                : "The owner approves people as they join."))
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Form {
-                        Picker("With", selection: $recipient) {
-                            RecipientOptions(people: people, groups: groups)
-                        }
-                        Picker("Access", selection: $role) {
-                            ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
-                        }
-                    }
-                    .sheetForm()
-                    if let chosen {
-                        Text((chosen.isGroup ? "Everyone in \(chosen.name)" : chosen.name)
-                            + " will see this login"
-                            + (item.folder.map { ", not the rest of \u{201C}\($0)\u{201D}" } ?? "")
-                            + ".")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            } else {
+            if manages && people.isEmpty && groups.isEmpty {
+                Text(model.users.contains { $0.approved && !$0.removed && $0.userId != model.identity?.userId }
+                    ? "Everyone approved, and every group, can already open this login."
+                    : "There's no one approved to share with yet. "
+                        + (model.isOwner
+                            ? "Invite people from People, then approve them once they've joined."
+                            : "The owner approves people as they join."))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !manages {
                 Text("Only people who manage this login can share it.")
                     .foregroundStyle(.secondary)
             }
-            if !sharing.people.isEmpty {
-                PeopleWithAccess(
-                    title: "Has it directly", people: sharing.people, canManage: manages, canLeave: false,
-                    isMaker: { $0.name == (item.owner ?? model.identity?.name) && $0.role == .manage && item.folder == nil },
-                    setRole: { person, role in
-                        try await model.setRole(role, for: person, on: item)
-                        await reload()
-                    },
-                    remove: { person in
-                        try await model.unshare(item, from: person)
-                        await reload()
-                    })
-            }
-            if !sharing.groups.isEmpty {
-                GroupsWithAccess(
-                    groups: sharing.groups, canManage: manages,
-                    setRole: { share, role in
-                        try await model.setRole(role, for: share, on: item)
-                        await reload()
-                    },
-                    remove: { share in
-                        try await model.unshare(item, from: share)
-                        await reload()
-                    })
+            if canPick || !sharing.people.isEmpty || !sharing.groups.isEmpty {
+                Form {
+                    if canPick {
+                        Section {
+                            Picker("With", selection: $recipient) {
+                                RecipientOptions(people: people, groups: groups)
+                            }
+                            Picker("Access", selection: $role) {
+                                ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
+                            }
+                        } footer: {
+                            if let chosen {
+                                FormFooter((chosen.isGroup ? "Everyone in \(chosen.name)" : chosen.name)
+                                    + " will see this login"
+                                    + (item.folder.map { ", not the rest of \u{201C}\($0)\u{201D}" } ?? "")
+                                    + ".")
+                            }
+                        }
+                    }
+                    if !sharing.people.isEmpty {
+                        PeopleWithAccess(
+                            title: "Has it directly", people: sharing.people, canManage: manages, canLeave: false,
+                            isMaker: { $0.name == (item.owner ?? model.identity?.name) && $0.role == .manage && item.folder == nil },
+                            setRole: { person, role in
+                                try await model.setRole(role, for: person, on: item)
+                                await reload()
+                            },
+                            remove: { person in
+                                try await model.unshare(item, from: person)
+                                await reload()
+                            })
+                    }
+                    if !sharing.groups.isEmpty {
+                        GroupsWithAccess(
+                            groups: sharing.groups, canManage: manages,
+                            setRole: { share, role in
+                                try await model.setRole(role, for: share, on: item)
+                                await reload()
+                            },
+                            remove: { share in
+                                try await model.unshare(item, from: share)
+                                await reload()
+                            })
+                    }
+                }
+                .sheetForm(height: sharing.people.count + sharing.groups.count > 8 ? 520 : nil)
             }
             if let problem {
                 Label(problem, systemImage: "exclamationmark.triangle.fill")
@@ -1508,8 +1706,57 @@ private struct ShareLoginSheet: View {
     }
 }
 
-/// A list of people with access and their roles. Managers change roles and remove people
-/// here; everyone else just reads it.
+/// A role as a pop-up menu that also removes: the roles to pick from, then Remove.
+private struct RoleMenu: View {
+    let role: Role
+    let removeTitle: String
+    let setRole: (Role) -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        Menu {
+            Picker("Access", selection: Binding(get: { role }, set: setRole)) {
+                ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+            Divider()
+            Button(removeTitle, role: .destructive, action: remove)
+        } label: {
+            Text(role.label)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.borderless)
+        .fixedSize()
+    }
+}
+
+/// A person or group's row: their picture and name, a note in grey, and what's on the right.
+private struct AccessRow<Picture: View, Trailing: View>: View {
+    let name: String
+    var note: String?
+    @ViewBuilder let picture: Picture
+    @ViewBuilder let trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 10) {
+            picture
+            HStack(spacing: 4) {
+                Text(name)
+                if let note {
+                    Text(note)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .lineLimit(1)
+            Spacer(minLength: 8)
+            trailing
+        }
+    }
+}
+
+/// The people with access and their roles, as a form section. Managers change roles and
+/// remove people here; everyone else just reads it.
 private struct PeopleWithAccess: View {
     let title: String
     let people: [Person]
@@ -1520,18 +1767,19 @@ private struct PeopleWithAccess: View {
     var isMaker: (Person) -> Bool = { _ in false }
     var setRole: (Person, Role) async throws -> Void
     var remove: (Person) async throws -> Void
-    var removeTitle: (Person) -> String = { $0.isMe ? "Leave" : "Remove" }
+    var removeTitle: (Person) -> String = { $0.isMe ? "Leave" : "Remove \($0.name)" }
     @State private var busy: Int64?
     @State private var error: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.headline)
+        Section {
             ForEach(people) { person in
-                HStack {
-                    Text(person.isMe ? "\(person.name) (you)" : person.name)
-                    Spacer()
+                AccessRow(name: person.name, note: person.isMe ? "(you)" : nil) {
+                    Avatar(name: person.name, size: 24)
+                } trailing: {
+                    if busy == person.userId {
+                        ProgressView().controlSize(.small)
+                    }
                     if isMaker(person) {
                         Text("Made it")
                             .foregroundStyle(.secondary)
@@ -1539,34 +1787,31 @@ private struct PeopleWithAccess: View {
                                 ? "It's your login, so you always manage it."
                                 : "It's \(person.name)'s login, so they always manage it.")
                     } else if canManage {
-                        Picker("", selection: Binding(
-                            get: { person.role },
-                            set: { role in run(person) { try await setRole(person, role) } }
-                        )) {
-                            ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                        Button(removeTitle(person)) { run(person) { try await remove(person) } }
+                        RoleMenu(
+                            role: person.role, removeTitle: removeTitle(person),
+                            setRole: { role in
+                                guard role != person.role else { return }
+                                run(person) { try await setRole(person, role) }
+                            },
+                            remove: { run(person) { try await remove(person) } })
                     } else {
                         Text(person.role.label)
                             .foregroundStyle(.secondary)
                         if person.isMe && canLeave {
                             Button(removeTitle(person)) { run(person) { try await remove(person) } }
+                                .controlSize(.small)
                         }
                     }
                 }
                 .disabled(busy != nil)
             }
+        } header: {
+            Text(title)
+        } footer: {
             if let error {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+                FormFooter(error, color: .red)
             }
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func run(_ person: Person, _ action: @escaping () async throws -> Void) {
@@ -1583,8 +1828,8 @@ private struct PeopleWithAccess: View {
     }
 }
 
-/// The groups a folder or login is shared with and their roles. Managers change roles and
-/// remove groups here; everyone else just reads it.
+/// The groups a folder or login is shared with and their roles, as a form section.
+/// Managers change roles and remove groups here; everyone else just reads it.
 private struct GroupsWithAccess: View {
     let groups: [GroupShare]
     let canManage: Bool
@@ -1594,24 +1839,22 @@ private struct GroupsWithAccess: View {
     @State private var error: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(groups.count == 1 ? "1 group" : "\(groups.count) groups")
-                .font(.headline)
+        Section {
             ForEach(groups) { share in
-                HStack {
-                    Label(share.isMine ? "\(share.name) (you're in it)" : share.name,
-                          systemImage: "person.3")
-                    Spacer()
+                AccessRow(name: share.name, note: share.isMine ? "(you're in it)" : nil) {
+                    GroupTile(size: 24)
+                } trailing: {
+                    if busy == share.groupId {
+                        ProgressView().controlSize(.small)
+                    }
                     if canManage {
-                        Picker("", selection: Binding(
-                            get: { share.role },
-                            set: { role in run(share) { try await setRole(share, role) } }
-                        )) {
-                            ForEach(Role.all, id: \.self) { Text($0.label).tag($0) }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                        Button("Remove") { run(share) { try await remove(share) } }
+                        RoleMenu(
+                            role: share.role, removeTitle: "Remove \(share.name)",
+                            setRole: { role in
+                                guard role != share.role else { return }
+                                run(share) { try await setRole(share, role) }
+                            },
+                            remove: { run(share) { try await remove(share) } })
                     } else {
                         Text(share.role.label)
                             .foregroundStyle(.secondary)
@@ -1619,15 +1862,13 @@ private struct GroupsWithAccess: View {
                 }
                 .disabled(busy != nil)
             }
+        } header: {
+            Text(groups.count == 1 ? "1 group" : "\(groups.count) groups")
+        } footer: {
             if let error {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+                FormFooter(error, color: .red)
             }
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func run(_ share: GroupShare, _ action: @escaping () async throws -> Void) {
@@ -1665,33 +1906,39 @@ private struct ManageFolderSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let sharing {
-                if !sharing.people.isEmpty {
-                    PeopleWithAccess(
-                        title: "\(sharing.people.count) \(sharing.people.count == 1 ? "person" : "people")",
-                        people: sharing.people, canManage: model.manages(folder: folder),
-                        setRole: { person, role in
-                            try await model.setRole(role, for: person, in: folder)
-                            await reload()
-                        },
-                        remove: { person in
-                            try await model.remove(person, from: folder)
-                            if person.isMe { dismiss() } else { await reload() }
-                        })
+                Form {
+                    if !sharing.people.isEmpty {
+                        PeopleWithAccess(
+                            title: "\(sharing.people.count) \(sharing.people.count == 1 ? "person" : "people")",
+                            people: sharing.people, canManage: model.manages(folder: folder),
+                            setRole: { person, role in
+                                try await model.setRole(role, for: person, in: folder)
+                                await reload()
+                            },
+                            remove: { person in
+                                try await model.remove(person, from: folder)
+                                if person.isMe { dismiss() } else { await reload() }
+                            },
+                            removeTitle: { $0.isMe ? "Leave \u{201C}\(folder)\u{201D}" : "Remove \($0.name)" })
+                    }
+                    if !sharing.groups.isEmpty {
+                        GroupsWithAccess(
+                            groups: sharing.groups, canManage: model.manages(folder: folder),
+                            setRole: { share, role in
+                                try await model.setRole(role, for: share, in: folder)
+                                await reload()
+                            },
+                            remove: { share in
+                                try await model.remove(share, from: folder)
+                                await reload()
+                            })
+                    }
                 }
-                if !sharing.groups.isEmpty {
-                    GroupsWithAccess(
-                        groups: sharing.groups, canManage: model.manages(folder: folder),
-                        setRole: { share, role in
-                            try await model.setRole(role, for: share, in: folder)
-                            await reload()
-                        },
-                        remove: { share in
-                            try await model.remove(share, from: folder)
-                            await reload()
-                        })
-                }
+                .sheetForm(height: sharing.people.count + sharing.groups.count > 8 ? 480 : nil)
             } else if problem == nil {
-                ProgressView().frame(maxWidth: .infinity)
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, minHeight: 100)
             }
             Text(model.manages(folder: folder)
                 ? "Viewers can open and copy, editors can also change logins, and managers can "
@@ -1716,7 +1963,7 @@ private struct ManageFolderSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 480)
+        .frame(width: 500)
         .task { await reload() }
     }
 
@@ -2088,27 +2335,19 @@ private struct InviteSheet: View {
             return false
         } content: {
             if let invitation {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Send it to \(name.trimmed) directly, for example in a private message. "
-                        + "It works once.")
-                    Text(invitation.command)
-                        .font(.system(.callout, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-                    Button {
-                        model.copy(invitation.command)
-                    } label: {
-                        Label("Copy Invite", systemImage: "doc.on.doc")
+                Text("Send it to \(name.trimmed) directly, for example in a private message. It "
+                    + "works once.")
+                    .fixedSize(horizontal: false, vertical: true)
+                Form {
+                    Section {
+                        LineRow(line: invitation.command) { model.copy(invitation.command) }
+                    } footer: {
+                        FormFooter("They paste it into Keystead's welcome screen. Once they've joined, "
+                            + "they show up under People: approve them after they read you their "
+                            + "fingerprint.")
                     }
-                    Text("They paste it into Keystead's welcome screen. Once they've joined, they "
-                        + "show up under People: approve them after they read you their fingerprint.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .sheetForm()
             } else {
                 Form {
                     TextField("Name", text: $name, prompt: Text("As your team will see them"))
@@ -2135,8 +2374,7 @@ private struct ApproveSheet: View {
                 + "on a call, not by message. Keystead checks it against the keys they joined with.")
                 .fixedSize(horizontal: false, vertical: true)
             Form {
-                TextField("Fingerprint", text: $fingerprint, prompt: Text("1a2b-3c4d-5e6f-7a8b-9c0d"))
-                    .font(.system(.body, design: .monospaced))
+                CodeField("Fingerprint", text: $fingerprint)
             }
             .sheetForm()
             Text("Once approved, \(user.name) can see the folders and logins you share with them.")

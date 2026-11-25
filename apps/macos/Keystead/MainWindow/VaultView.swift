@@ -144,14 +144,22 @@ private struct Sidebar: View {
                             .lineLimit(1)
                     }
                     Spacer()
-                    // Out of the toolbar, which stays for what's selected; also in the Vault menu.
-                    Button {
-                        Task { await model.refresh() }
-                    } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath")
+                    // Syncing happens on its own; this shows it, and syncs now on a click. Out
+                    // of the toolbar, which stays for what's selected; also in the Vault menu.
+                    if model.isSyncing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 16, height: 16)
+                            .help("Syncing…")
+                    } else {
+                        Button {
+                            Task { await model.refresh() }
+                        } label: {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Syncs on its own every few minutes. Sync now (⌘R)")
                     }
-                    .buttonStyle(.borderless)
-                    .help("Sync with the server (⌘R)")
                     Button {
                         model.lock()
                     } label: {
@@ -342,6 +350,19 @@ private struct LoginList: View {
                         Task { await model.copyPassword(of: item) }
                     }
                 }
+                // ⌘C and Delete while the list has focus; text fields keep their own.
+                .onCommand(#selector(NSText.copy(_:))) {
+                    if let item = model.selectedItem {
+                        Task { await model.copyPassword(of: item) }
+                    }
+                }
+                .onDeleteCommand {
+                    if let item = model.selectedItem, item.role != .view {
+                        model.sheet = .deleteLogin(item)
+                    }
+                }
+                // Logins added or deleted slide in and out; typing a search doesn't animate.
+                .animation(.snappy(duration: 0.25), value: model.items.count)
             }
         }
         .navigationTitle(title)
@@ -732,7 +753,7 @@ extension FieldRow where Accessory == EmptyView {
 }
 
 /// Shows or hides a field: there while the pointer is over its row, or while it's shown.
-private struct RevealButton: View {
+struct RevealButton: View {
     let what: String
     let shown: Bool
     let hovering: Bool

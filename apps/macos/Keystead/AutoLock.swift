@@ -57,15 +57,20 @@ final class AutoLock {
         observers.append((center, token))
     }
 
+    /// `-autoLockTest`, in Debug builds: check every second, print the time since Keystead
+    /// was last used, and lock after 5 seconds of it. A property, not a constant, so Release
+    /// builds don't warn that the test's branches never run.
+    private static var testing: Bool {
+        #if DEBUG
+        CommandLine.arguments.contains("-autoLockTest")
+        #else
+        false
+        #endif
+    }
+
     /// Checks every 15 seconds how long it's been since Keystead was last used.
     private func run() async {
-        #if DEBUG
-        // `-autoLockTest`: check every second, print the time since Keystead was last used,
-        // and lock after 5 seconds of it.
-        let testing = CommandLine.arguments.contains("-autoLockTest")
-        #else
-        let testing = false
-        #endif
+        let testing = Self.testing
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(testing ? 1 : 15))
             let limit: Duration = testing ? .seconds(5) : .seconds(Self.minutes * 60)

@@ -118,6 +118,18 @@ enum DebugSnapshots {
                         model.sheet = .helpRecover(user)
                     }
                 }),
+                ("6e12c-approve", {
+                    if let user = model.users.first(where: { !$0.approved && !$0.removed }) {
+                        model.sheet = .approve(user)
+                    }
+                }),
+                ("6e12d-invite", { model.sheet = .invite }),
+                ("6e12e-fingerprint", { model.sheet = .fingerprint }),
+                ("6e12f-remove-user", {
+                    if let user = model.users.first(where: { !$0.isOwner && $0.approved && !$0.removed }) {
+                        model.sheet = .removeUser(user)
+                    }
+                }),
                 ("6e13-rename-folder", { model.sheet = .renameFolder("Production") }),
                 ("6e14-delete-folder", { model.sheet = .deleteFolder("Production") }),
                 ("6e15-closed", { model.sheet = nil }),
@@ -131,6 +143,17 @@ enum DebugSnapshots {
                 ("6f2-quick-search-down", { pressKey(keyCode: 125) }),
                 ("6g-quick-search-closed", { QuickSearch.shared?.close() }),
                 ("7-notices", { model.showDemoNotices() }),
+                ("w1-welcome", { model.showDemoWelcome(.start) }),
+                ("w2-join", { model.welcomePage = .join }),
+                ("w3-set-up", { model.welcomePage = .setUp }),
+                ("w4-add-this-mac", { model.welcomePage = .addThisMac }),
+                ("w5-recover", { model.welcomePage = .recover }),
+                ("w6-recover-with-help", { model.welcomePage = .recoverWithHelp }),
+                ("w7-adding-this-mac", { model.showDemoJoining() }),
+                ("w8-waiting-for-owner", { model.showDemoWaitingForOwner() }),
+                ("w9-locked", { model.showDemoPhase(.locked) }),
+                ("w10-working", { model.showDemoPhase(.working("Unlocking…")) }),
+                ("w11-back", { model.showDemoPhase(.unlocked) }),
             ]
         }
         steps.append(("8-back-to-all-logins", { model.section = .allLogins }))
@@ -153,6 +176,10 @@ enum DebugSnapshots {
                 save(panel, to: directory.appending(path: "\(name)-quick-search.png"))
             }
         }
+        if model.users.count > 1 {
+            report += await captureSettings(to: directory)
+            report += await capturePanel(model, to: directory)
+        }
         if model.users.count > 1, let kit = try? await model.recoveryKit() {
             // The printed page, as the print panel would get it.
             let renderer = ImageRenderer(content: RecoveryKitPage(kit: kit, printed: .now))
@@ -168,6 +195,56 @@ enum DebugSnapshots {
         try? report.write(to: directory.appending(path: "report.txt"), atomically: true, encoding: .utf8)
         print("Snapshots in \(directory.path)")
         NSApp.terminate(nil)
+    }
+
+    /// Opens Settings from the app menu, as a person would, and saves each tab.
+    @MainActor
+    private static func captureSettings(to directory: URL) async -> String {
+        guard let menu = NSApp.mainMenu?.items.first?.submenu,
+            let index = menu.items.firstIndex(where: { $0.keyEquivalent == "," })
+        else { return "settings: no Settings menu item\n" }
+        let tabs: [SettingsView.Tab] = [.general, .security, .account]
+        let titles = ["General", "Security", "Account"]
+        let earlier = UserDefaults.standard.string(forKey: SettingsView.tabKey)
+        func settingsWindow() -> NSWindow? {
+            NSApp.windows.first { $0.isVisible && titles.contains($0.title) }
+        }
+        var report = ""
+        for tab in tabs {
+            UserDefaults.standard.set(tab.rawValue, forKey: SettingsView.tabKey)
+            if settingsWindow() == nil { menu.performActionForItem(at: index) }
+            try? await Task.sleep(for: .seconds(1.5))
+            guard let window = settingsWindow() else {
+                report += "settings-\(tab.rawValue): no window\n"
+                continue
+            }
+            report += "settings-\(tab.rawValue): window \(Int(window.frame.width))x\(Int(window.frame.height))\n"
+            save(window, to: directory.appending(path: "s-settings-\(tab.rawValue).png"))
+        }
+        settingsWindow()?.close()
+        UserDefaults.standard.set(earlier, forKey: SettingsView.tabKey)
+        return report
+    }
+
+    /// The menu bar panel, in a window of its own: unlocked, then locked.
+    @MainActor
+    private static func capturePanel(_ model: AppModel, to directory: URL) async -> String {
+        let host = NSHostingController(rootView: PanelView(model: model).background(.background))
+        host.sizingOptions = [.preferredContentSize]
+        let window = NSWindow(contentViewController: host)
+        window.styleMask = [.borderless]
+        window.center()
+        window.orderFrontRegardless()
+        var report = ""
+        for (name, phase) in [("p1-panel", AppModel.Phase.unlocked), ("p2-panel-locked", .locked)] {
+            model.showDemoPhase(phase)
+            try? await Task.sleep(for: .seconds(1))
+            report += "\(name): window \(Int(window.frame.width))x\(Int(window.frame.height))\n"
+            save(window, to: directory.appending(path: "\(name).png"))
+        }
+        model.showDemoPhase(.unlocked)
+        window.close()
+        return report
     }
 
     /// Sends a key press to the key window through the app, as the keyboard would.

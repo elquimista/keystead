@@ -129,6 +129,47 @@ private struct AppCommands: Commands {
                 .disabled(model.phase != .unlocked)
             Divider()
         }
+        CommandMenu("Login") {
+            let item = model.selectedItem
+            Button("Copy Password") {
+                if let item { Task { await model.copyPassword(of: item) } }
+            }
+            .disabled(item == nil)
+            Button("Copy Username") {
+                if let item { model.copy(item.username) }
+            }
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+            .disabled(item?.username.isEmpty ?? true)
+            Button("Copy One-Time Code") {
+                if let item { Task { await model.copyOneTimeCode(of: item) } }
+            }
+            .keyboardShortcut("c", modifiers: [.command, .option])
+            .disabled(!(item?.hasOneTimeCode ?? false))
+            Divider()
+            Button("Edit…") {
+                if let item { model.sheet = .editLogin(item) }
+            }
+            .keyboardShortcut("e")
+            .disabled(item == nil || item?.role == .view)
+            Button(item?.role == .manage || item == nil ? "Share…" : "Access…") {
+                if let item { model.sheet = .shareLogin(item) }
+            }
+            .disabled(item == nil)
+            Button("History…") {
+                if let item { model.sheet = .history(item) }
+            }
+            .keyboardShortcut("y")
+            .disabled(item == nil || item?.role == .view)
+            Button("Move To…") {
+                if let item { model.sheet = .moveLogin(item) }
+            }
+            .disabled(item.map { !model.canMove($0) } ?? true)
+            Divider()
+            Button("Delete…") {
+                if let item { model.sheet = .deleteLogin(item) }
+            }
+            .disabled(item == nil || item?.role == .view)
+        }
         CommandMenu("Vault") {
             Button("Sync") { Task { await model.refresh() } }
                 .keyboardShortcut("r")

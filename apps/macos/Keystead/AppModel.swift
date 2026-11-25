@@ -19,6 +19,30 @@ final class AppModel {
         case unlocked
     }
 
+    /// The welcome screen's page: the choices, or the form for one.
+    enum WelcomePage: Hashable {
+        case start, join, setUp, addThisMac, recover, recoverWithHelp
+    }
+
+    /// The choices, unless a Debug build was launched with `-welcome` and a page: `join`,
+    /// `setup`, `add`, `recover` or `recover-help`.
+    private static var initialWelcomePage: WelcomePage {
+        #if DEBUG
+        let arguments = CommandLine.arguments
+        if let index = arguments.firstIndex(of: "-welcome"), index + 1 < arguments.count {
+            switch arguments[index + 1] {
+            case "join": return .join
+            case "setup": return .setUp
+            case "add": return .addThisMac
+            case "recover": return .recover
+            case "recover-help": return .recoverWithHelp
+            default: break
+            }
+        }
+        #endif
+        return .start
+    }
+
     /// What the main window shows, chosen in its sidebar or the View menu.
     enum Section: Hashable {
         case allLogins
@@ -106,7 +130,15 @@ final class AppModel {
     }
 
     private(set) var phase: Phase
+    var welcomePage = AppModel.initialWelcomePage
     private(set) var identity: Identity?
+    /// A sync is under way.
+    private(set) var isSyncing = false
+    /// Another sync was asked for during this one; it runs right after.
+    @ObservationIgnored private var syncAgain = false
+    @ObservationIgnored private var lastSync: ContinuousClock.Instant?
+    @ObservationIgnored private var autoSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var activationObserver: NSObjectProtocol?
     private(set) var items: [ItemSummary] = [] {
         didSet {
             searchTexts = items.map(Self.searchText)
@@ -288,6 +320,16 @@ final class AppModel {
     /// Who lost access to this login while its password stayed the same, most recent first.
     func toChange(for item: ItemSummary) -> [ToChange] {
         toChangeByItem[item.id] ?? []
+    }
+
+    /// The login selected in the main window's list, while a list of logins shows.
+    var selectedItem: ItemSummary? {
+        guard phase == .unlocked, let id = selectedItemID else { return nil }
+        switch section ?? .allLogins {
+        case .people, .groups, .recentlyDeleted: return nil
+        case .allLogins, .sharedWithMe, .folder, .toChange, .health: break
+        }
+        return items.first { $0.id == id }
     }
 
     /// How many logins are on the To Change list.
@@ -738,11 +780,17 @@ final class AppModel {
 
     /// Drops the unlocked vault; its keys are freed with it.
     func lock() {
+        autoSyncTask?.cancel()
+        autoSyncTask = nil
         vault = nil
         items = []
         folders = []
         folderRoles = [:]
         users = []
+        groups = []
+        toChange = []
+        health = nil
+        recentlyDeleted = []
         devices = []
         devicesProblem = nil
         search = ""
@@ -768,7 +816,34 @@ final class AppModel {
         self.vault = vault
         identity = try vault.identity()
         phase = .unlocked
+        startAutoSync()
         await refresh()
+    }
+
+    /// Keeps this Mac's copy fresh without a button: every five minutes while unlocked, and
+    /// when Keystead comes back to the front after a minute or more.
+    private func startAutoSync() {
+        autoSyncTask?.cancel()
+        autoSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(300))
+                guard let self, !Task.isCancelled, self.phase == .unlocked else { return }
+                await self.refresh()
+            }
+        }
+        if activationObserver == nil {
+            activationObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.syncIfStale() }
+            }
+        }
+    }
+
+    private func syncIfStale() {
+        guard phase == .unlocked, vault != nil else { return }
+        if let lastSync, ContinuousClock.now - lastSync < .seconds(60) { return }
+        Task { await refresh() }
     }
 
     // MARK: - Reading
@@ -776,6 +851,21 @@ final class AppModel {
     /// Fetches changes and the people on the server. If the server can't be reached,
     /// keeps showing the copy on this Mac.
     func refresh() async {
+        // One at a time: a sync asked for during another runs right after it.
+        if isSyncing {
+            syncAgain = true
+            return
+        }
+        isSyncing = true
+        repeat {
+            syncAgain = false
+            await syncOnce()
+        } while syncAgain
+        isSyncing = false
+        lastSync = .now
+    }
+
+    private func syncOnce() async {
         do {
             let result = try await perform { try $0.sync() }
             // The sync fetched the directory already.
@@ -1652,6 +1742,26 @@ extension AppModel {
     func showDemoJoining(_ joining: Bool = true) {
         phase = joining ? .welcome : .unlocked
         joiningCode = joining ? "e0df-9242-f81b-7272-aa2f" : nil
+    }
+
+    func showDemoWelcome(_ page: WelcomePage) {
+        joiningCode = nil
+        recoveryClaim = nil
+        approvedKeys = nil
+        message = nil
+        welcomePage = page
+        phase = .welcome
+    }
+
+    func showDemoWaitingForOwner() {
+        showDemoWelcome(.recoverWithHelp)
+        recoveryClaim = RecoveryClaimInfo(
+            userId: 2, name: "Mo", fingerprint: "7e3a-91c4-0b2d-58f6-a1e9")
+    }
+
+    func showDemoPhase(_ phase: Phase) {
+        recoveryClaim = nil
+        self.phase = phase
     }
 
     func showDemoNotices() {

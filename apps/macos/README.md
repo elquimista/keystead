@@ -9,10 +9,16 @@ account back on a new Mac with a Recovery Kit.
 
 - **Main window:** on first launch, a welcome screen to join a team with an invite, set
   up a new one with the server's setup code, or recover an account with a Recovery Kit. Then folders and people on the left, logins
-  and their details on the right. Double-click a login (or press Return) to copy its
+  and their details on the right. Double-click a login (or press Return or ⌘C) to copy its
   password. Each login can be edited (name, username, website, password and notes; notes
   stay hidden until shown, like the password), shared with a person or a group, or
   deleted for everyone who can open it.
+- **Login menu:** what can be done with the selected login, greyed out when its role
+  doesn't allow it: Copy Username (⇧⌘C), Copy One-Time Code (⌥⌘C), Edit… (⌘E), Share… or
+  Access…, History… (⌘Y), Move To… and Delete… (also the Delete key; it asks first).
+- **Syncing:** on its own every 5 minutes while unlocked, and when you come back to the app
+  after a minute or more; Vault › Sync (⌘R) syncs now. A sync asked for while one runs
+  waits for it and then runs once, and a spinner stands in for the sync button meanwhile.
 - **Moving logins:** Move To… (in a login's "⋯" toolbar menu or right-click menu) moves it to
   another folder you can add to, or out of folders as yours. Whoever had it only through
   the old folder loses it, and its password goes on their To Change list; people and
@@ -61,8 +67,9 @@ account back on a new Mac with a Recovery Kit.
   Nothing decrypted is written to disk.
 - **Recovering with the owner's help:** someone who lost every device and their Recovery
   Kit gets back in with new keys. The owner chooses Help Recover… on their page and sends
-  the line it shows; on a new Mac they choose Recover an Account › No Recovery Kit?, paste
-  it, and read the new fingerprint to the owner, who approves it. Their old devices stop
+  the line it shows; on a new Mac they choose "Recover your account", then "Recover with
+  your team owner's help", paste it, and read the new fingerprint to the owner, who
+  approves it. Their old devices stop
   working, and what's shared with them comes back as everyone's Keystead syncs. Under
   People › You, "Let the owner recover my own logins and folders" (escrow) brings back
   their own logins and the folders only they are in too, at the cost of the owner being
@@ -83,7 +90,8 @@ account back on a new Mac with a Recovery Kit.
   still in front to paste into. It
   unlocks with Touch ID first if needed. It uses Carbon's hot key API, which needs no
   Accessibility permission and works in the App Sandbox.
-- **Menu bar icon:** a quick panel to search and copy without opening the window.
+- **Menu bar icon:** a quick panel to search and copy without opening the window. Clicking
+  a login copies its password, and so does Return for the first match.
 - **Dock icon:** shown by default. Settings > General can turn it off, leaving only the
   menu bar icon.
 - **Approving people:** the owner types in the fingerprint the new person reads out (in
@@ -160,6 +168,12 @@ columns are laid out, and quit:
 build/DerivedData/Build/Products/Debug/Keystead.app/Contents/MacOS/Keystead -demo -snapshot
 open ~/Library/Containers/io.github.elquimista.Keystead.dev/Data/tmp/snapshots
 ```
+
+With the team of three, that includes each sheet, the welcome and lock screens (`w…`),
+each Settings tab (`s-settings-…`) and the menu bar panel (`p…`, drawn in a window of its
+own). Add `-NSRequiresAquaSystemAppearance YES` for light mode. Without `-demo`, on a Mac
+where Keystead Dev isn't set up yet, `-welcome join|setup|add|recover|recover-help` opens
+the welcome screen on that page.
 
 To see how the window copes with a big team, `-demo big` has 5,000 logins, and `-measure`
 prints how long the list's search and quick search take per keystroke and how much memory
