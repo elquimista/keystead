@@ -38,6 +38,14 @@ use crate::http::{Client, Failure};
 use crate::import::ImportedLogin;
 use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile};
 
+mod recovery;
+
+use recovery::RecoveryDuties;
+pub use recovery::{
+    ApprovedRecovery, RecoveryClaim, RecoveryLine, RecoveryRequest, claim_recovery,
+    finish_recovery, recovery_approved,
+};
+
 /// What an older server answers for something it doesn't have yet: 404 on the whole route.
 const NEEDS_0_2: &str = "the server is older than Keystead 0.2.0 and can't do this yet; \
                          update it to 0.2.0 or later";
@@ -77,6 +85,10 @@ pub struct Whoami {
     pub is_owner: bool,
     /// The owner's fingerprint, as this device pinned it. A recovery kit carries it.
     pub owner_fingerprint: String,
+    /// The owner keeps this account's personal key in escrow, to recover its own logins.
+    pub escrow: bool,
+    /// The owner has started a recovery for this account. If it wasn't asked for, cancel it.
+    pub recovering: bool,
 }
 
 /// An invite: everything a new user needs to join, including the owner's fingerprint so
@@ -246,6 +258,12 @@ pub struct UserRow {
     /// The owner removed them from the team.
     pub removed: bool,
     pub fingerprint: String,
+    /// They let the owner recover their own logins.
+    pub escrow: bool,
+    /// The owner has started a recovery for them that isn't approved yet.
+    pub recovering: bool,
+    /// Their keys were replaced, after recovering with the owner's help.
+    pub keys_replaced: bool,
 }
 
 /// Someone who can open a folder or a login, with their role.
@@ -484,6 +502,8 @@ pub struct SyncSummary {
     pub rekeyed: usize,
     /// Why a folder that needs a new key didn't get one this time; the next sync retries.
     pub rekey_problems: Vec<String>,
+    /// Copies made for people who recovered with the owner's help.
+    pub restored: usize,
 }
 
 /// What enrolling a new device needs, whatever the platform.
@@ -499,13 +519,7 @@ pub struct NewAccount<'a> {
 /// Claims a new server with its setup code. The caller becomes user 1, the owner.
 pub fn setup(path: &Path, account: NewAccount<'_>, setup_code: &str, name: &str) -> Result<Vault> {
     let keys = AccountKeys::derive(account.secret);
-    let mut entry = DirectoryEntry {
-        user_id: OWNER,
-        name: name.to_owned(),
-        keys: keys.public(),
-        approval: None,
-        removed: false,
-    };
+    let mut entry = DirectoryEntry::new(OWNER, name, keys.public());
     entry.approve(&keys);
     let enrolled: Enrolled = Client::new(account.server).post(
         "/v1/setup",
@@ -573,7 +587,7 @@ pub fn join(
         account.device_id,
         owner.keys.clone(),
     );
-    profile.directory = directory.entries;
+    profile.set_directory(directory.entries);
     Vault::create(path, profile, keys, account.signer)
 }
 
@@ -646,7 +660,7 @@ pub fn recover(
         account.device_id,
         owner.keys.clone(),
     );
-    profile.directory = directory.entries;
+    profile.set_directory(directory.entries);
     Vault::create(path, profile, keys, account.signer)
 }
 
@@ -782,6 +796,11 @@ impl Vault {
     }
 
     pub fn whoami(&self) -> Whoami {
+        let me = self
+            .profile
+            .directory
+            .iter()
+            .find(|entry| entry.user_id == self.profile.user_id);
         Whoami {
             name: self.profile.name.clone(),
             user_id: self.profile.user_id,
@@ -789,6 +808,8 @@ impl Vault {
             server: self.profile.server.clone(),
             is_owner: self.profile.user_id == OWNER,
             owner_fingerprint: self.profile.owner.fingerprint(),
+            escrow: me.is_some_and(|entry| entry.escrow),
+            recovering: me.is_some_and(|entry| entry.recovering),
         }
     }
 
@@ -796,7 +817,7 @@ impl Vault {
     /// author the owner approved; anything else is dropped.
     pub fn sync(&mut self) -> Result<SyncSummary> {
         let mut summary = SyncSummary::default();
-        let (mut folders, groups) = self.pull(&mut summary)?;
+        let (mut folders, groups, mut duties) = self.pull(&mut summary)?;
         // Someone left these groups: give each a new key first, as folders shared with them
         // wait for it.
         if !groups.is_empty() {
@@ -806,7 +827,7 @@ impl Vault {
                     Err(error) => summary.rekey_problems.push(format!("{error:#}")),
                 }
             }
-            (folders, _) = self.pull(&mut summary)?;
+            (folders, _, duties) = self.pull(&mut summary)?;
         }
         // Someone lost access to these folders: give each a new key, so what's saved from
         // now on is out of their reach. If it fails, the next sync asks again.
@@ -816,14 +837,19 @@ impl Vault {
                 Err(error) => summary.rekey_problems.push(format!("{error:#}")),
             }
         }
+        self.do_recovery_duties(duties, &mut summary);
         Ok(summary)
     }
 
     /// The directory, the team's groups, and the feed until caught up; then saves. Returns
-    /// the folders and groups this account should give new keys.
-    fn pull(&mut self, summary: &mut SyncSummary) -> Result<(Vec<FolderId>, Vec<GroupId>)> {
+    /// the folders and groups this account should give new keys, and what it should do for
+    /// people who recovered.
+    fn pull(
+        &mut self,
+        summary: &mut SyncSummary,
+    ) -> Result<(Vec<FolderId>, Vec<GroupId>, RecoveryDuties)> {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
-        self.profile.directory = directory.entries;
+        self.profile.set_directory(directory.entries);
         // Servers before 0.4.0 have no groups.
         match self.call(|client| client.get::<Groups>("/v1/groups", &[]))? {
             Ok(groups) => self.profile.team_groups = groups.groups,
@@ -851,7 +877,12 @@ impl Vault {
                 if page.roles.is_some() {
                     self.profile.roles = page.roles;
                 }
-                break (page.rekey_needed, page.group_rekey_needed);
+                let duties = RecoveryDuties {
+                    restore: page.restore,
+                    recovered_key: page.recovered_key,
+                    escrow_needed: page.escrow_needed,
+                };
+                break (page.rekey_needed, page.group_rekey_needed, duties);
             }
         };
         self.save()?;
@@ -861,7 +892,7 @@ impl Vault {
     /// Everyone on the server, and whether the pinned owner approved them.
     pub fn users(&mut self) -> Result<Vec<UserRow>> {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
-        self.profile.directory = directory.entries;
+        self.profile.set_directory(directory.entries);
         self.save()?;
         Ok(self
             .profile
@@ -874,6 +905,9 @@ impl Vault {
                 is_owner: entry.user_id == OWNER,
                 removed: entry.removed,
                 fingerprint: entry.keys.fingerprint(),
+                escrow: entry.escrow,
+                recovering: entry.recovering,
+                keys_replaced: entry.revision > 0,
             })
             .collect())
     }
@@ -1789,7 +1823,9 @@ impl Vault {
             let folder_keys = folder.map_or(&no_keys, |(keys, _)| keys);
             // One that can't be opened here (a copy left behind by a move, say) is left
             // out rather than failing the whole list.
-            let Ok(key) = unlock_with(item, folder_keys, &self.keys, me, &self.groups) else {
+            let Ok(key) = unlock_with(item, folder_keys, &self.keys, me, &self.groups)
+                .or_else(|error| self.recovered_owner_key(item).ok_or(error))
+            else {
                 continue;
             };
             let overview = item.open_overview(&key)?;
@@ -1924,10 +1960,7 @@ impl Vault {
         let mut versions = Vec::new();
         for saved in list.versions {
             let item = saved.item;
-            let signed = self
-                .profile
-                .trusted_keys(item.author)
-                .is_some_and(|keys| item.verify(&keys).is_ok());
+            let signed = self.profile.signed_by_author(&item);
             if item.id != item_id || item.deleted || item.format > ITEM_FORMAT || !signed {
                 continue;
             }
@@ -1972,11 +2005,7 @@ impl Vault {
             Err(Failure::Status { code: 404, .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let signed = |item: &EncryptedItem| {
-            self.profile
-                .trusted_keys(item.author)
-                .is_some_and(|keys| item.verify(&keys).is_ok())
-        };
+        let signed = |item: &EncryptedItem| self.profile.signed_by_author(item);
         let mut rows = Vec::new();
         let mut kept = HashMap::new();
         for entry in list.items {
@@ -2795,12 +2824,20 @@ impl Vault {
             }
             (key, keys)
         } else {
+            let key = self.item_key(current)?;
             let mut keys = current.keys.clone();
             keys.people
                 .retain(|person| !self.profile.is_removed(person.user_id));
+            // Each person's copy is made again for their current keys: someone who recovered
+            // with the owner's help gets one for their new keys.
+            for person in &mut keys.people {
+                if let Some(recipient) = self.profile.trusted_keys(person.user_id) {
+                    person.wrapped_key = recipient.wrap_item_key(&key, current.id)?;
+                }
+            }
             keys.groups
                 .retain(|copy| self.profile.group_exists(copy.group_id));
-            (self.item_key(current)?, keys)
+            (key, keys)
         };
         let mut roles = Vec::new();
         let mut group_roles = Vec::new();
@@ -2907,11 +2944,9 @@ impl Vault {
                 }
                 Err(Failure::Status { code: 409, body }) => {
                     let theirs = serde_json::from_value::<Conflict>(body)?.current;
-                    let author_keys = self
-                        .profile
-                        .trusted_keys(theirs.author)
-                        .context("the newer version's author isn't approved")?;
-                    theirs.verify(&author_keys)?;
+                    if !self.profile.signed_by_author(&theirs) {
+                        bail!("the newer version isn't signed by an approved author");
+                    }
                     let outcome = EditOutcome::Conflict {
                         version: theirs.version,
                         author: self.profile.user_name(theirs.author),
@@ -2948,6 +2983,7 @@ impl Vault {
             self.profile.user_id,
             &self.groups,
         )
+        .or_else(|error| self.recovered_owner_key(item).ok_or(error))
     }
 
     /// Servers older than 0.2.0 store only format 1 items; saving to one would fail with
@@ -3095,11 +3131,7 @@ impl Vault {
     }
 
     fn apply_item(&mut self, item: EncryptedItem, summary: &mut SyncSummary) {
-        let trusted = self
-            .profile
-            .trusted_keys(item.author)
-            .is_some_and(|keys| item.verify(&keys).is_ok());
-        if !trusted {
+        if !self.profile.signed_by_author(&item) {
             summary.rejected += 1;
             return;
         }

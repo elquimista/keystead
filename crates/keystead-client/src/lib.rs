@@ -16,11 +16,12 @@ pub mod import;
 pub use export::MIN_EXPORT_PASSPHRASE;
 pub use import::{ImportedLogin, read_kdbx};
 pub use vault::{
-    DeletedRow, DeviceRow, DeviceSetupLine, EditOutcome, FOLDER_SEPARATOR, FolderDeletion,
-    GroupMemberRow, GroupRow, GroupShareRow, HistoryRow, ImportFolder, ImportPlan, ImportSummary,
-    InviteInfo, ItemRow, JoiningDevice, KdbxExport, MemberRow, NewAccount, NewFolder,
-    RenamedFolder, SyncSummary, ToChangeRow, UserRow, Vault, Whoami, generate_password, join,
-    recover, setup,
+    ApprovedRecovery, DeletedRow, DeviceRow, DeviceSetupLine, EditOutcome, FOLDER_SEPARATOR,
+    FolderDeletion, GroupMemberRow, GroupRow, GroupShareRow, HistoryRow, ImportFolder, ImportPlan,
+    ImportSummary, InviteInfo, ItemRow, JoiningDevice, KdbxExport, MemberRow, NewAccount,
+    NewFolder, RecoveryClaim, RecoveryLine, RecoveryRequest, RenamedFolder, SyncSummary,
+    ToChangeRow, UserRow, Vault, Whoami, claim_recovery, finish_recovery, generate_password, join,
+    recover, recovery_approved, setup,
 };
 
 use keystead_core::encoding::Bytes;

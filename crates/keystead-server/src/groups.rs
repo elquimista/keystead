@@ -14,7 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use keystead_core::api::{
     AddGroupMemberRequest, CreateGroupRequest, GroupInfo, GroupMemberKey, GroupRekeyRequest,
-    Groups, KeyLink, SyncEntry, UpdateGroupRequest,
+    Groups, KeyLink, RestoreGroupSecretRequest, SyncEntry, UpdateGroupRequest,
 };
 use keystead_core::groups::GroupEntry;
 use keystead_core::ids::{GroupId, UserId};
@@ -327,6 +327,72 @@ pub(crate) async fn rekey_group(
         .await?;
         log(&mut tx, member.user_id, group_id, true).await?;
     }
+    // Members who recovered got a copy for their new keys with everyone else.
+    let restored: Vec<i64> = sqlx::query_scalar(
+        "UPDATE group_members SET pending = 0 WHERE group_id = ? AND pending = 1 RETURNING user_id",
+    )
+    .bind(group_id.to_string())
+    .fetch_all(&mut *tx)
+    .await?;
+    for user in restored {
+        reconcile(&mut tx, UserId(user)).await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /v1/groups/{group_id}/members/{user_id}/secret`: anyone in the group gives a
+/// member who recovered a copy of its current secret for their new keys. Only for members
+/// waiting for one.
+pub(crate) async fn restore_group_secret(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((group_id, user_id)): Path<(GroupId, i64)>,
+    Json(request): Json<RestoreGroupSecretRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user = UserId(user_id);
+    let mut tx = state.writer.begin().await?;
+    let in_group: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM group_members
+                        WHERE group_id = ? AND user_id = ? AND NOT pending)",
+    )
+    .bind(group_id.to_string())
+    .bind(auth.user_id.0)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !in_group {
+        return Err(ApiError::Forbidden(
+            "only someone in the group can give its secret".into(),
+        ));
+    }
+    let waiting: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND pending)",
+    )
+    .bind(group_id.to_string())
+    .bind(user.0)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !waiting {
+        return Err(ApiError::Conflict(
+            "they aren't waiting for this group's secret".into(),
+        ));
+    }
+    let (generation, _) = group_key_state(&mut tx, group_id).await?;
+    if request.generation != generation {
+        return Err(ApiError::Conflict(
+            "the group's key changed; sync and try again".into(),
+        ));
+    }
+    sqlx::query(
+        "UPDATE group_members SET wrapped_secret = ?, pending = 0 WHERE group_id = ? AND user_id = ?",
+    )
+    .bind(serde_json::to_string(&request.wrapped_secret)?)
+    .bind(group_id.to_string())
+    .bind(user.0)
+    .execute(&mut *tx)
+    .await?;
+    log(&mut tx, user, group_id, true).await?;
+    reconcile(&mut tx, user).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -539,8 +605,9 @@ pub(crate) async fn group_state(
     group_id: GroupId,
     seq: i64,
 ) -> Result<Option<SyncEntry>, ApiError> {
+    // A member who recovered has no copy for their new keys yet: not in it until then.
     let wrapped: Option<String> = sqlx::query_scalar(
-        "SELECT wrapped_secret FROM group_members WHERE user_id = ? AND group_id = ?",
+        "SELECT wrapped_secret FROM group_members WHERE user_id = ? AND group_id = ? AND NOT pending",
     )
     .bind(user.0)
     .bind(group_id.to_string())
@@ -583,7 +650,7 @@ pub(crate) async fn rekey_needed(
 ) -> Result<Vec<GroupId>, ApiError> {
     let waiting: Vec<String> = sqlx::query_scalar(
         "SELECT g.id FROM team_groups g JOIN group_members gm ON gm.group_id = g.id
-         WHERE gm.user_id = ? AND g.needs_rekey = 1 ORDER BY g.id",
+         WHERE gm.user_id = ? AND NOT gm.pending AND g.needs_rekey = 1 ORDER BY g.id",
     )
     .bind(user.0)
     .fetch_all(&mut *conn)

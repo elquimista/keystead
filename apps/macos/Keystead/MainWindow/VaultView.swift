@@ -808,8 +808,25 @@ private struct PeopleList: View {
 private struct PersonDetail: View {
     let model: AppModel
     let user: User
+    @State private var problem: String?
 
     private var isMe: Bool { user.userId == model.identity?.userId }
+
+    /// Turns escrow on or off from the toggle, saying why if it can't.
+    private func escrow(_ identity: Identity) -> Binding<Bool> {
+        Binding(
+            get: { identity.escrow },
+            set: { on in
+                Task {
+                    do {
+                        try await model.setEscrow(on)
+                        problem = nil
+                    } catch {
+                        problem = describe(error)
+                    }
+                }
+            })
+    }
 
     var body: some View {
         Form {
@@ -835,6 +852,42 @@ private struct PersonDetail: View {
                         + "account back on a new one.")
                         .fixedSize(horizontal: false, vertical: true)
                     Button("Show Recovery Kit…") { model.sheet = .recoveryKit(afterSetup: false) }
+                }
+                if identity.recovering {
+                    Section {
+                        Label("The owner has started a recovery for your account.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("If you didn't ask for one, cancel it: someone may be trying to get new "
+                            + "keys for your account.")
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Cancel Recovery", role: .destructive) {
+                            Task {
+                                do {
+                                    try await model.cancelRecovery(for: identity.userId)
+                                } catch {
+                                    problem = describe(error)
+                                }
+                            }
+                        }
+                    }
+                }
+                if !identity.isOwner {
+                    Section("If you lose everything") {
+                        Toggle("Let the owner recover my own logins", isOn: escrow(identity))
+                        Text("If you lose every device and your Recovery Kit, the owner can help you "
+                            + "back in, and what's shared with you comes back. With this on, your "
+                            + "own logins outside folders come back too, but the owner can open "
+                            + "them at any time.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let problem {
+                            Text(problem)
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
                 Section("Your devices") {
                     if let problem = model.devicesProblem {
@@ -879,6 +932,21 @@ private struct PersonDetail: View {
                 }
                 PasswordsToChange(model: model, user: user)
                 if model.isOwner && !user.isOwner {
+                    Section("If \(user.name) loses everything") {
+                        Text(user.recovering
+                            ? "A recovery for \(user.name) is waiting for your approval."
+                            : "If \(user.name) loses every device and their Recovery Kit, you can "
+                                + "help them back in with new keys.")
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(user.escrow
+                            ? "Their own logins would come back too: they keep them in escrow with you."
+                            : "Their own logins outside folders wouldn't come back: escrow is off.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button(user.recovering ? "Continue Recovery…" : "Help Recover…") {
+                            model.sheet = .helpRecover(user)
+                        }
+                    }
                     Section {
                         Text("Removing \(user.name) stops their devices and takes away every "
                             + "folder and login, for example when they leave the company.")
@@ -1234,6 +1302,7 @@ private extension View {
 func status(of user: User) -> String {
     if user.isOwner { return "Owner" }
     if user.removed { return "Removed" }
+    if user.recovering { return "Recovering" }
     return user.approved ? "Approved" : "Waiting for approval"
 }
 

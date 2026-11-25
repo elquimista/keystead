@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use keystead_core::api::Health;
-use keystead_core::directory::DirectoryEntry;
+use keystead_core::directory::{DirectoryEntry, RetiredKeys};
 use keystead_core::encoding::Key32;
 use keystead_core::ids::UserId;
 use keystead_core::keys::AccountPublicKeys;
@@ -187,6 +187,33 @@ const MIGRATIONS: &[&str] = &[
     // 8 (0.12.0): moving items between folders. Members of the folder an item left are
     // told it moved, so their devices drop the copy that still says it's theirs.
     "ALTER TABLE item_leave_log ADD COLUMN moved INTEGER NOT NULL DEFAULT 0;",
+    "ALTER TABLE users ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE users ADD COLUMN escrow_on INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE users ADD COLUMN escrow TEXT;
+     ALTER TABLE users ADD COLUMN recovered_key TEXT;
+     CREATE TABLE retired_keys (
+         user_id INTEGER NOT NULL REFERENCES users (id),
+         revision INTEGER NOT NULL,
+         name TEXT NOT NULL,
+         encryption_key BLOB NOT NULL,
+         signing_key BLOB NOT NULL,
+         approval BLOB NOT NULL,
+         PRIMARY KEY (user_id, revision)
+     ) WITHOUT ROWID;
+     CREATE TABLE recoveries (
+         user_id INTEGER PRIMARY KEY REFERENCES users (id),
+         token_hash BLOB NOT NULL UNIQUE,
+         expires_at INTEGER NOT NULL,
+         approved INTEGER NOT NULL DEFAULT 0,
+         encryption_key BLOB,
+         signing_key BLOB,
+         device_id TEXT,
+         device_key TEXT,
+         device_name TEXT
+     );
+     ALTER TABLE members ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE group_members ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE item_access ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -264,6 +291,22 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sign-out", post(accounts::sign_out))
         .route("/v1/users/{user_id}/approval", post(accounts::approve))
         .route("/v1/users/{user_id}", delete(accounts::remove_user))
+        .route(
+            "/v1/users/{user_id}/recovery",
+            post(accounts::start_recovery)
+                .get(accounts::recovery_in_progress)
+                .delete(accounts::cancel_recovery),
+        )
+        .route(
+            "/v1/users/{user_id}/recovery/approval",
+            post(accounts::approve_recovery),
+        )
+        .route("/v1/recovery/claim", post(accounts::claim_recovery))
+        .route("/v1/recovery/state", post(accounts::recovery_state))
+        .route(
+            "/v1/escrow",
+            put(accounts::put_escrow).delete(accounts::delete_escrow),
+        )
         .route("/v1/directory", get(accounts::directory))
         .route("/v1/device-transfers", post(transfers::start))
         .route("/v1/device-transfers/join", post(transfers::join))
@@ -285,6 +328,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/folders/{folder_id}/members/{user_id}",
             put(vault::set_member_role).delete(vault::remove_member),
+        )
+        .route(
+            "/v1/folders/{folder_id}/members/{user_id}/key",
+            put(vault::restore_folder_key),
         )
         .route("/v1/folders/{folder_id}/rekey", post(vault::rekey))
         .route(
@@ -309,6 +356,10 @@ pub fn router(state: AppState) -> Router {
             delete(groups::remove_group_member),
         )
         .route("/v1/groups/{group_id}/rekey", post(groups::rekey_group))
+        .route(
+            "/v1/groups/{group_id}/members/{user_id}/secret",
+            put(groups::restore_group_secret),
+        )
         .route("/v1/items/{item_id}", put(vault::put_item))
         .route("/v1/items/{item_id}/people", get(vault::item_people))
         .route("/v1/items/{item_id}/history", get(vault::item_history))
@@ -377,10 +428,26 @@ async fn next_seq(conn: &mut SqliteConnection) -> Result<i64, sqlx::Error> {
     .await
 }
 
-type UserRow = (i64, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool);
+type UserRow = (
+    i64,
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    bool,
+    u32,
+    bool,
+    bool,
+);
 
 const USER_COLUMNS: &str = "SELECT id, name, encryption_key, signing_key, approval, \
-                            removed_at IS NOT NULL FROM users";
+                            removed_at IS NOT NULL, revision, escrow_on, \
+                            EXISTS (SELECT 1 FROM recoveries r WHERE r.user_id = users.id \
+                                    AND NOT r.approved \
+                                    AND r.expires_at > CAST(strftime('%s', 'now') AS INTEGER)) \
+                            FROM users";
+
+type RetiredRow = (i64, u32, String, Vec<u8>, Vec<u8>, Vec<u8>);
 
 async fn user_entry(
     conn: &mut SqliteConnection,
@@ -388,28 +455,74 @@ async fn user_entry(
 ) -> Result<Option<DirectoryEntry>, ApiError> {
     let row: Option<UserRow> = sqlx::query_as(&format!("{USER_COLUMNS} WHERE id = ?"))
         .bind(user.0)
-        .fetch_optional(conn)
+        .fetch_optional(&mut *conn)
         .await?;
-    row.map(entry_from_row).transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let retired: Vec<RetiredRow> = sqlx::query_as(
+        "SELECT user_id, revision, name, encryption_key, signing_key, approval
+         FROM retired_keys WHERE user_id = ? ORDER BY revision",
+    )
+    .bind(user.0)
+    .fetch_all(conn)
+    .await?;
+    entry_from_row(row, retired).map(Some)
+}
+
+/// Everyone's retired keys, by user.
+async fn all_retired(
+    conn: &mut SqliteConnection,
+) -> Result<HashMap<i64, Vec<RetiredRow>>, ApiError> {
+    let rows: Vec<RetiredRow> = sqlx::query_as(
+        "SELECT user_id, revision, name, encryption_key, signing_key, approval
+         FROM retired_keys ORDER BY user_id, revision",
+    )
+    .fetch_all(conn)
+    .await?;
+    let mut by_user: HashMap<i64, Vec<RetiredRow>> = HashMap::new();
+    for row in rows {
+        by_user.entry(row.0).or_default().push(row);
+    }
+    Ok(by_user)
+}
+
+fn stored_key(bytes: Vec<u8>) -> Result<Key32, ApiError> {
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| ApiError::Internal("stored key has the wrong length".into()))?;
+    Ok(Key32(bytes))
 }
 
 fn entry_from_row(
-    (id, name, encryption, signing, approval, removed): UserRow,
+    (id, name, encryption, signing, approval, removed, revision, escrow, recovering): UserRow,
+    retired: Vec<RetiredRow>,
 ) -> Result<DirectoryEntry, ApiError> {
-    let key = |bytes: Vec<u8>| -> Result<Key32, ApiError> {
-        let bytes: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| ApiError::Internal("stored key has the wrong length".into()))?;
-        Ok(Key32(bytes))
-    };
     Ok(DirectoryEntry {
         user_id: UserId(id),
         name,
         keys: AccountPublicKeys {
-            encryption: key(encryption)?,
-            signing: key(signing)?,
+            encryption: stored_key(encryption)?,
+            signing: stored_key(signing)?,
         },
         approval: approval.map(Into::into),
         removed,
+        revision,
+        retired: retired
+            .into_iter()
+            .map(|(_, revision, name, encryption, signing, approval)| {
+                Ok(RetiredKeys {
+                    revision,
+                    name,
+                    keys: AccountPublicKeys {
+                        encryption: stored_key(encryption)?,
+                        signing: stored_key(signing)?,
+                    },
+                    approval: approval.into(),
+                })
+            })
+            .collect::<Result<_, ApiError>>()?,
+        escrow,
+        recovering,
     })
 }

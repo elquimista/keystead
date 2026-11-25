@@ -87,6 +87,43 @@ pub struct Identity {
     pub is_owner: bool,
     /// The owner's fingerprint, as this device pinned it. Recovery kits carry it.
     pub owner_fingerprint: String,
+    /// The owner keeps this account's personal key in escrow, to recover its own logins.
+    pub escrow: bool,
+    /// The owner has started a recovery for this account; cancel it if it wasn't asked for.
+    pub recovering: bool,
+}
+
+/// A recovery the owner started, waiting for approval.
+#[derive(uniffi::Record)]
+pub struct PendingRecovery {
+    /// The new keys' fingerprint, once the person has used the line on their new device.
+    pub fingerprint: Option<String>,
+    /// Their own logins come back too: their personal key is in escrow.
+    pub escrow: bool,
+}
+
+/// A recovery the owner approved.
+#[derive(uniffi::Record)]
+pub struct RecoveryApproval {
+    pub name: String,
+    /// Their own logins come back: their personal key was in escrow.
+    pub own_logins: bool,
+}
+
+/// A line from the owner for recovering with their help.
+#[derive(uniffi::Record)]
+pub struct RecoveryLineInfo {
+    pub server: String,
+    pub owner_fingerprint: String,
+}
+
+/// Whose account a recovery line is for, and the new keys' fingerprint to read to the
+/// owner.
+#[derive(uniffi::Record)]
+pub struct RecoveryClaimInfo {
+    pub user_id: i64,
+    pub name: String,
+    pub fingerprint: String,
 }
 
 /// One of the account's devices.
@@ -132,6 +169,12 @@ pub struct User {
     pub is_owner: bool,
     /// The owner removed them from the team.
     pub removed: bool,
+    /// They let the owner recover their own logins (escrow).
+    pub escrow: bool,
+    /// The owner has started a recovery for them that isn't approved yet.
+    pub recovering: bool,
+    /// Their keys were replaced after recovering with the owner's help.
+    pub keys_replaced: bool,
 }
 
 /// What someone may do with a folder or a login.
@@ -597,6 +640,36 @@ impl Vault {
         }))
     }
 
+    /// Finishes recovering with the owner's help once they approved the new keys (see
+    /// `claim_recovery`): signs in and saves the profile, after checking the owner against
+    /// the line. Sync afterwards to fetch folders and logins.
+    #[uniffi::constructor]
+    pub fn finish_recovery(
+        profile_path: String,
+        line: String,
+        account_secret: Vec<u8>,
+        device_id: String,
+        device_name: String,
+        signer: Arc<dyn DeviceSigner>,
+    ) -> Result<Arc<Self>, CoreError> {
+        let line = recovery_line(&line)?;
+        let secret = account_secret_from(account_secret)?;
+        let vault = keystead_client::finish_recovery(
+            Path::new(&profile_path),
+            NewAccount {
+                server: &line.server,
+                secret: &secret,
+                device_id: device_id_from(&device_id)?,
+                device_name: &device_name,
+                signer: Arc::new(SignerAdapter(signer)),
+            },
+            &line,
+        )?;
+        Ok(Arc::new(Self {
+            inner: Mutex::new(vault),
+        }))
+    }
+
     /// Unlocks an enrolled device's vault from its saved profile. Doesn't use the network.
     #[uniffi::constructor]
     pub fn open(
@@ -624,7 +697,51 @@ impl Vault {
             server: whoami.server,
             is_owner: whoami.is_owner,
             owner_fingerprint: whoami.owner_fingerprint,
+            escrow: whoami.escrow,
+            recovering: whoami.recovering,
         })
+    }
+
+    /// Starts a recovery with the owner's help for someone who lost every device and their
+    /// recovery kit (owner only). Returns the line to send them.
+    pub fn start_recovery(&self, user_id: i64) -> Result<String, CoreError> {
+        Ok(self.vault()?.start_recovery(UserId(user_id))?.command())
+    }
+
+    /// Someone's recovery waiting for approval, if any (owner only).
+    pub fn recovery_request(&self, user_id: i64) -> Result<Option<PendingRecovery>, CoreError> {
+        Ok(self
+            .vault()?
+            .recovery_request(UserId(user_id))?
+            .map(|request| PendingRecovery {
+                fingerprint: request.fingerprint,
+                escrow: request.escrow,
+            }))
+    }
+
+    /// Approves someone's new keys after they read out the fingerprint (owner only).
+    pub fn approve_recovery(
+        &self,
+        user_id: i64,
+        fingerprint: String,
+    ) -> Result<RecoveryApproval, CoreError> {
+        let approved = self
+            .vault()?
+            .approve_recovery(UserId(user_id), &fingerprint)?;
+        Ok(RecoveryApproval {
+            name: approved.name,
+            own_logins: approved.own_logins,
+        })
+    }
+
+    /// Cancels a recovery that isn't approved yet: the owner, anyone's; anyone, their own.
+    pub fn cancel_recovery(&self, user_id: i64) -> Result<(), CoreError> {
+        Ok(self.vault()?.cancel_recovery(UserId(user_id))?)
+    }
+
+    /// Lets the owner recover this account's own logins (escrow), or stops it.
+    pub fn set_escrow(&self, on: bool) -> Result<(), CoreError> {
+        Ok(self.vault()?.set_escrow(on)?)
     }
 
     /// The account's devices, from the server.
@@ -919,6 +1036,9 @@ impl Vault {
                 approved: user.approved,
                 is_owner: user.is_owner,
                 removed: user.removed,
+                escrow: user.escrow,
+                recovering: user.recovering,
+                keys_replaced: user.keys_replaced,
             })
             .collect())
     }
@@ -1408,6 +1528,57 @@ impl DeviceJoin {
     pub fn poll(&self) -> Result<Option<Vec<u8>>, CoreError> {
         Ok(self.inner.poll()?.map(|secret| secret.as_bytes().to_vec()))
     }
+}
+
+/// Reads a line from the owner for recovering with their help.
+#[uniffi::export]
+pub fn parse_recovery_line(text: String) -> Result<RecoveryLineInfo, CoreError> {
+    let line = recovery_line(&text)?;
+    Ok(RecoveryLineInfo {
+        server: line.server,
+        owner_fingerprint: line.owner_fingerprint,
+    })
+}
+
+/// Sends this device's new account keys for a recovery the owner started; nothing changes
+/// until the owner approves. The signer only gives its public key here.
+#[uniffi::export]
+pub fn claim_recovery(
+    line: String,
+    account_secret: Vec<u8>,
+    device_id: String,
+    device_name: String,
+    signer: Arc<dyn DeviceSigner>,
+) -> Result<RecoveryClaimInfo, CoreError> {
+    let line = recovery_line(&line)?;
+    let secret = account_secret_from(account_secret)?;
+    let claim = keystead_client::claim_recovery(
+        &line,
+        &NewAccount {
+            server: &line.server,
+            secret: &secret,
+            device_id: device_id_from(&device_id)?,
+            device_name: &device_name,
+            signer: Arc::new(SignerAdapter(signer)),
+        },
+    )?;
+    Ok(RecoveryClaimInfo {
+        user_id: claim.user_id.0,
+        name: claim.name,
+        fingerprint: claim.fingerprint,
+    })
+}
+
+/// Whether the owner has approved a recovery yet; a cancelled or expired one is an error.
+#[uniffi::export]
+pub fn recovery_approved(line: String) -> Result<bool, CoreError> {
+    Ok(keystead_client::recovery_approved(&recovery_line(&line)?)?)
+}
+
+fn recovery_line(text: &str) -> Result<keystead_client::RecoveryLine, CoreError> {
+    keystead_client::RecoveryLine::parse(text).map_err(|error| CoreError::InvalidInput {
+        message: format!("{error:#}"),
+    })
 }
 
 /// Reads an invite pasted from a message.

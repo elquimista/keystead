@@ -218,6 +218,19 @@ keystead devices remove <device id>  # lock out a lost one
 keystead sign-out                    # this machine forgets the account (asks first)
 ```
 
+Lost every device and the recovery kit too? The owner can help you back in with new keys
+(needs a 0.13.0 server). Once the owner approves them, what's shared with you comes back as
+everyone's apps sync. Your own logins outside folders come back only if you turned on
+escrow beforehand, which lets the owner open them:
+
+```sh
+keystead escrow on                   # Bob, beforehand: let the owner recover his own logins
+keystead recovery start 2            # Alice: prints a line to send Bob
+keystead recover-with-help http://127.0.0.1:8080 <token> --owner <owner's fingerprint>  # Bob, on a new machine: shows his new fingerprint and waits
+keystead recovery approve 2 --fingerprint <Bob's new fingerprint>  # Alice, after he reads it out
+keystead recovery cancel             # Bob, on a device he still has, if he didn't ask for it
+```
+
 The CLI keeps the shared `profile.json` (the same format the Mac app uses) and its keys in
 `device.json`. For now those keys are stored unencrypted in `$KEYSTEAD_HOME/device.json` (readable only
 by you). Use it for trying things out, not for real secrets yet.

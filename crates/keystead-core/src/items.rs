@@ -25,7 +25,7 @@ use crate::Error;
 use crate::encoding::{Bytes, transcript};
 use crate::groups::GroupKeyring;
 use crate::ids::{FolderId, GroupId, ItemId, UserId};
-use crate::keys::{AccountKeys, AccountPublicKeys, FolderKey, ItemKey, WrappedKey};
+use crate::keys::{AccountKeys, AccountPublicKeys, FolderKey, ItemKey, PersonalKey, WrappedKey};
 
 impl FolderKey {
     /// Seals the folder's previous key with this one, the key of `generation`: one link of
@@ -353,6 +353,17 @@ impl EncryptedItem {
                     .ok_or(Error::Decrypt)
             }
             other => Err(Error::UnsupportedFormat(other)),
+        }
+    }
+
+    /// The key of one of `me`'s own items, from the owner's copy sealed with an earlier
+    /// personal key, brought back after a recovery.
+    pub fn unlock_as_owner(&self, personal: &PersonalKey, me: UserId) -> Result<ItemKey, Error> {
+        match (&self.keys.owner, self.owner == Some(me), self.format) {
+            (Some(sealed), true, 2..=4) => {
+                open_key(&personal.cipher(), &owner_copy_aad(self.id, me), sealed)
+            }
+            _ => Err(Error::Decrypt),
         }
     }
 

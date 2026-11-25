@@ -69,6 +69,8 @@ final class AppModel {
         case exportLogins
         case addToGroup(GroupSummary)
         case renameGroup(GroupSummary)
+        /// The owner helps someone who lost every device and their Recovery Kit.
+        case helpRecover(User)
 
         var id: String {
             switch self {
@@ -96,6 +98,7 @@ final class AppModel {
             case .exportLogins: "export-logins"
             case .addToGroup(let group): "add-to-group-\(group.id)"
             case .renameGroup(let group): "rename-group-\(group.id)"
+            case .helpRecover(let user): "help-recover-\(user.userId)"
             }
         }
     }
@@ -342,6 +345,124 @@ final class AppModel {
         }
     }
 
+    // MARK: Recovering with the owner's help
+
+    /// While this Mac waits for the owner to approve its new keys: whose account, and the
+    /// fingerprint to read to the owner.
+    private(set) var recoveryClaim: RecoveryClaimInfo?
+    private var recoveryTask: Task<Void, Never>?
+
+    /// Recovers an account with the line the owner sent, when every device and the Recovery
+    /// Kit are gone: makes new keys, shows their fingerprint to read to the owner, and waits
+    /// for their approval. Nothing is kept on this Mac unless they approve.
+    func startRecoveringWithHelp(line: String) {
+        recoveryTask?.cancel()
+        recoveryTask = Task { await recoverWithHelp(line: line) }
+    }
+
+    func cancelRecoveringWithHelp() {
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        recoveryClaim = nil
+    }
+
+    private func recoverWithHelp(line: String) async {
+        message = nil
+        do {
+            _ = try parseRecoveryLine(text: line)
+        } catch {
+            message = "That doesn't look like a recovery line. Paste the whole line, starting "
+                + "with \"keystead recover-with-help\"."
+            return
+        }
+        do {
+            let secret = SymmetricKey(size: .bits256)
+            let agreementKey = try SecureEnclaveDeviceKey.create()
+            let signingKey = try SecureEnclaveSigningKey.create()
+            let device = DeviceStore.Device(
+                deviceId: newDeviceId(),
+                agreementKey: agreementKey.dataRepresentation,
+                signingKey: signingKey.dataRepresentation,
+                accountSecret: try AccountSecretWrap.wrap(secret, to: agreementKey.publicKey))
+            let secretBytes = secret.withUnsafeBytes { Data($0) }
+            let deviceName = Self.thisMacName
+            // Claiming only needs the public half of this Mac's key: no Touch ID yet.
+            let publicSigner = SecureEnclaveSigner(key: signingKey)
+            let deviceId = device.deviceId
+            recoveryClaim = try await Task.detached {
+                try claimRecovery(
+                    line: line, accountSecret: secretBytes, deviceId: deviceId,
+                    deviceName: deviceName, signer: publicSigner)
+            }.value
+            while try await !Task.detached(operation: { try recoveryApproved(line: line) }).value {
+                try await Task.sleep(for: .seconds(3))
+            }
+            recoveryClaim = nil
+            try store.save(device)
+            phase = .working("Recovering your account…")
+            let context = try await DeviceAuthentication.authenticate(
+                reason: "set up Keystead on this Mac")
+            let signer = SecureEnclaveSigner(
+                key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context))
+            let profilePath = store.profileURL.path
+            let vault = try await Task.detached {
+                try Vault.finishRecovery(
+                    profilePath: profilePath, line: line, accountSecret: secretBytes,
+                    deviceId: deviceId, deviceName: deviceName, signer: signer)
+            }.value
+            try await finishUnlocking(vault)
+            // New keys mean a new kit; the old one no longer works.
+            sheet = .recoveryKit(afterSetup: false)
+        } catch is CancellationError {
+            recoveryClaim = nil
+        } catch {
+            recoveryClaim = nil
+            if store.isEnrolled && vault == nil { store.removeDevice() }
+            phase = .welcome
+            message = describe(error)
+        }
+    }
+
+    /// Starts helping someone recover (owner only); returns the line to send them.
+    func startRecovery(for user: User) async throws -> String {
+        #if DEBUG
+        if isDemo { return "keystead recover-with-help https://keys.example.com 3Fq…x9 --owner 1a2b-3c4d-5e6f-7a8b-9c0d" }
+        #endif
+        let id = user.userId
+        let line = try await perform { try $0.startRecovery(userId: id) }
+        users = try await perform { try $0.users() }
+        return line
+    }
+
+    /// Someone's recovery waiting for approval, fetched fresh (owner only).
+    func recoveryRequest(for user: User) async throws -> PendingRecovery? {
+        #if DEBUG
+        if isDemo { return PendingRecovery(fingerprint: "7e3a-91c4-0b2d-58f6-a1e9", escrow: true) }
+        #endif
+        let id = user.userId
+        return try await perform { try $0.recoveryRequest(userId: id) }
+    }
+
+    func approveRecovery(for user: User, fingerprint: String) async throws -> RecoveryApproval {
+        let id = user.userId
+        let approval = try await perform { try $0.approveRecovery(userId: id, fingerprint: fingerprint) }
+        await refresh()
+        return approval
+    }
+
+    /// Cancels a recovery: someone's (owner), or your own from this Mac.
+    func cancelRecovery(for userId: Int64) async throws {
+        try await perform { try $0.cancelRecovery(userId: userId) }
+        await refresh()
+    }
+
+    /// Lets the owner recover your own logins if you lose everything, or stops it.
+    func setEscrow(_ on: Bool) async throws {
+        try await perform { try $0.setEscrow(on: on) }
+        identity = try await perform { try $0.identity() }
+        users = try await perform { try $0.users() }
+    }
+
     /// Creates both Secure Enclave keys, wraps the account secret (a new one, unless
     /// recovering) to them, then runs `create` to set up, join or recover. One Touch ID
     /// approval covers the whole thing.
@@ -455,11 +576,15 @@ final class AppModel {
         do {
             let result = try await perform { try $0.sync() }
             users = try await perform { try $0.users() }
+            identity = try await perform { try $0.identity() }
             if result.rejected > 0 {
                 message = "Ignored \(result.rejected) item(s) not signed by an approved user."
             } else if let problem = result.rekeyProblems.first {
-                message = "Couldn't give a folder or group its new key (\(problem)). "
-                    + "The next sync tries again."
+                // Copies for someone who recovered say what they are; new keys don't.
+                let what = problem.hasPrefix("couldn't")
+                    ? problem.prefix(1).uppercased() + problem.dropFirst()
+                    : "Couldn't give a folder or group its new key (\(problem))"
+                message = what + ". The next sync tries again."
             } else {
                 message = nil
             }
@@ -1104,6 +1229,15 @@ extension AppModel {
     /// without a server or Touch ID. Debug builds only: launch with `-demo`, or with
     /// `-demo alone` for an owner who hasn't invited anyone yet. Actions that need the
     /// vault fail with "Keystead is locked."
+    private static func demoUser(
+        _ id: Int64, _ name: String, owner: Bool = false, approved: Bool = true,
+        removed: Bool = false, escrow: Bool = false
+    ) -> User {
+        User(
+            userId: id, name: name, approved: approved, isOwner: owner, removed: removed,
+            escrow: escrow, recovering: false, keysReplaced: false)
+    }
+
     static func demo(alone: Bool) -> AppModel {
         let model = AppModel()
         model.isDemo = true
@@ -1111,8 +1245,8 @@ extension AppModel {
         model.identity = Identity(
             name: "Olivia", userId: 1, fingerprint: "ab12-cd34-ef56-7890-abcd",
             server: "https://keys.example.com", isOwner: true,
-            ownerFingerprint: "ab12-cd34-ef56-7890-abcd")
-        model.users = [User(userId: 1, name: "Olivia", approved: true, isOwner: true, removed: false)]
+            ownerFingerprint: "ab12-cd34-ef56-7890-abcd", escrow: false, recovering: false)
+        model.users = [demoUser(1, "Olivia", owner: true)]
         model.devices = [
             AccountDevice(
                 deviceId: "00000000-0000-4000-8000-0000000000d1", name: "Olivia's MacBook Air",
@@ -1127,9 +1261,9 @@ extension AppModel {
         }
         if !alone {
             model.users += [
-                User(userId: 2, name: "Mo", approved: true, isOwner: false, removed: false),
-                User(userId: 3, name: "Sam", approved: false, isOwner: false, removed: false),
-                User(userId: 4, name: "Pat", approved: true, isOwner: false, removed: true),
+                demoUser(2, "Mo", escrow: true),
+                demoUser(3, "Sam", approved: false),
+                demoUser(4, "Pat", removed: true),
             ]
             model.folders = ["Production", "Production / Databases", "Staging"]
             // Mo's Staging folder, shared with Olivia to view.

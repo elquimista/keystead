@@ -113,6 +113,11 @@ enum DebugSnapshots {
                     model.sheet = nil
                     model.section = .folder("Production / Databases")
                 }),
+                ("6e12b-help-recover", {
+                    if let user = model.users.first(where: { !$0.isOwner && $0.approved }) {
+                        model.sheet = .helpRecover(user)
+                    }
+                }),
                 ("6e13-rename-folder", { model.sheet = .renameFolder("Production") }),
                 ("6e14-delete-folder", { model.sheet = .deleteFolder("Production") }),
                 ("6e15-closed", { model.sheet = nil }),

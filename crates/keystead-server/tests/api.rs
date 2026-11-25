@@ -136,13 +136,7 @@ impl Person {
     }
 
     fn entry(&self) -> DirectoryEntry {
-        DirectoryEntry {
-            user_id: self.user_id,
-            name: self.name.clone(),
-            keys: self.keys.public(),
-            approval: None,
-            removed: false,
-        }
+        DirectoryEntry::new(self.user_id, &self.name, self.keys.public())
     }
 
     fn token(&self) -> Option<&str> {
@@ -1301,7 +1295,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }

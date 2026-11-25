@@ -43,6 +43,9 @@ struct WelcomeView: View {
     @State private var server = ""
     @State private var setupCode = ""
     @State private var name = ""
+    /// Recovering with the owner's help instead of a Recovery Kit.
+    @State private var withHelp = WelcomeView.initialWithHelp
+    @State private var recoveryLine = ""
 
     var body: some View {
         ScrollView {
@@ -58,6 +61,9 @@ struct WelcomeView: View {
                 }
                 if let code = model.joiningCode {
                     waitingForOtherDevice(code: code)
+                        .frame(width: 480)
+                } else if let claim = model.recoveryClaim {
+                    waitingForOwner(claim: claim)
                         .frame(width: 480)
                 } else {
                     Picker("", selection: $choice) {
@@ -75,11 +81,11 @@ struct WelcomeView: View {
                         case .join: joinForm
                         case .setUp: setUpForm
                         case .addThisMac: addThisMacForm
-                        case .recover: recoverForm
+                        case .recover: withHelp ? recoverWithHelpForm : AnyView(recoverForm)
                         }
                     }
                     // Recovering takes 24 word boxes; give them room.
-                    .frame(width: choice == .recover ? 560 : 480)
+                    .frame(width: choice == .recover && !withHelp ? 560 : 480)
                 }
 
                 if let message = model.message {
@@ -269,6 +275,9 @@ struct WelcomeView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
+                Button("No Recovery Kit?") { withHelp = true }
+                    .buttonStyle(.link)
+                    .help("Recover with your team owner's help instead")
                 Spacer()
                 Button("Recover") {
                     Task {
@@ -284,6 +293,60 @@ struct WelcomeView: View {
         }
     }
 
+    /// Recovering when every device and the Recovery Kit are gone: with a line from the owner.
+    private var recoverWithHelpForm: AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 10) {
+            Text("Lost every device and your Recovery Kit? Ask your team's owner to help you "
+                + "recover, then paste the line they send you. You'll get new keys: what's "
+                + "shared with you comes back, and your own logins too if you let the owner "
+                + "keep them in escrow.")
+                .fixedSize(horizontal: false, vertical: true)
+            TextField(
+                "", text: $recoveryLine,
+                prompt: Text("keystead recover-with-help https://… --owner …"), axis: .vertical
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(.body, design: .monospaced))
+            .lineLimit(3...5)
+            HStack {
+                Button("Use my Recovery Kit") { withHelp = false }
+                    .buttonStyle(.link)
+                Spacer()
+                Button("Continue") { model.startRecoveringWithHelp(line: recoveryLine) }
+                    .keyboardShortcut(.defaultAction)
+                    .controlSize(.large)
+                    .disabled(recoveryLine.trimmed.isEmpty)
+            }
+        })
+    }
+
+    /// The new fingerprint to read to the owner, while this Mac waits for their approval.
+    private func waitingForOwner(claim: RecoveryClaimInfo) -> some View {
+        VStack(spacing: 14) {
+            Text("Read this fingerprint to your team's owner, in person or on a call:")
+                .multilineTextAlignment(.center)
+            Text(claim.fingerprint)
+                .font(.system(.title2, design: .monospaced).weight(.semibold))
+                .textSelection(.enabled)
+            Text("It proves these new keys for \(claim.name) are really yours. Once the owner "
+                + "approves them, this Mac signs in, and your old devices stop working.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Waiting for the owner…")
+                    .foregroundStyle(.secondary)
+            }
+            Button("Cancel") { model.cancelRecoveringWithHelp() }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+    }
+
     /// Join, unless a Debug build was launched with `-welcome setup` or `-welcome recover`.
     private static var initialChoice: Choice {
         #if DEBUG
@@ -292,12 +355,21 @@ struct WelcomeView: View {
             switch arguments[index + 1] {
             case "setup": return .setUp
             case "add": return .addThisMac
-            case "recover": return .recover
+            case "recover", "recover-help": return .recover
             default: break
             }
         }
         #endif
         return .join
+    }
+
+    /// The owner's-help form, if a Debug build was launched with `-welcome recover-help`.
+    private static var initialWithHelp: Bool {
+        #if DEBUG
+        CommandLine.arguments.contains("recover-help")
+        #else
+        false
+        #endif
     }
 
     private var hasScheme: Bool {

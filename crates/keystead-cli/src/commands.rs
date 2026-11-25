@@ -6,13 +6,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use keystead_client::{
+    ApprovedRecovery, DeviceSetupLine, FolderDeletion, ImportPlan, ImportSummary, ImportedLogin,
+    JoiningDevice, KdbxExport, NewAccount, NewFolder, RecoveryClaim, RecoveryLine, RecoveryRequest,
+    RenamedFolder, Vault, claim_recovery, finish_recovery, read_kdbx, recovery_approved,
+};
 pub use keystead_client::{
     DeletedRow, DeviceRow, EditOutcome, GroupRow, GroupShareRow, HistoryRow, InviteInfo, ItemRow,
     MemberRow, SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
-};
-use keystead_client::{
-    DeviceSetupLine, FolderDeletion, ImportPlan, ImportSummary, ImportedLogin, JoiningDevice,
-    KdbxExport, NewAccount, NewFolder, RenamedFolder, Vault, read_kdbx,
 };
 pub use keystead_core::api::Role;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
@@ -73,6 +74,72 @@ pub fn recover(
         eprintln!("warning: recovered, but couldn't sync yet ({error:#}); run `keystead sync`");
     }
     Ok(vault.whoami())
+}
+
+/// Recovers an account onto this machine with the owner's help: makes new keys, sends them
+/// with the owner's line, shows their fingerprint to read to the owner, and waits until the
+/// owner approves them; then fetches what's there. Nothing is kept unless approved.
+pub fn recover_with_help(
+    home: &Path,
+    line: &str,
+    device_name: &str,
+    show: impl Fn(&RecoveryClaim),
+) -> Result<Whoami> {
+    refuse_existing(home)?;
+    let line = RecoveryLine::parse(line)?;
+    let secret = AccountSecret::generate();
+    let key = Arc::new(SoftwareDeviceKey::generate());
+    let account = NewAccount {
+        server: &line.server,
+        secret: &secret,
+        device_id: DeviceId::random(),
+        device_name,
+        signer: key.clone(),
+    };
+    let claim = claim_recovery(&line, &account)?;
+    show(&claim);
+    while !recovery_approved(&line)? {
+        std::thread::sleep(RECOVERY_POLL);
+    }
+    let mut vault = finish_recovery(&profile_path(home), account, &line)?;
+    DeviceFile::new(&key, &secret).save(home)?;
+    if let Err(error) = vault.sync() {
+        eprintln!("warning: recovered, but couldn't sync yet ({error:#}); run `keystead sync`");
+    }
+    Ok(vault.whoami())
+}
+
+/// How often a machine recovering with the owner's help asks whether they've approved.
+const RECOVERY_POLL: Duration = Duration::from_secs(3);
+
+/// Starts a recovery with the owner's help for someone (owner only); returns the line to
+/// send them.
+pub fn start_recovery(home: &Path, user: UserId) -> Result<RecoveryLine> {
+    open(home)?.start_recovery(user)
+}
+
+pub fn recovery_request(home: &Path, user: UserId) -> Result<Option<RecoveryRequest>> {
+    open(home)?.recovery_request(user)
+}
+
+pub fn approve_recovery(home: &Path, user: UserId, fingerprint: &str) -> Result<ApprovedRecovery> {
+    open(home)?.approve_recovery(user, fingerprint)
+}
+
+/// Cancels a recovery: someone's (owner), or this account's own.
+pub fn cancel_recovery(home: &Path, user: Option<UserId>) -> Result<()> {
+    let mut vault = open(home)?;
+    let user = user.unwrap_or(vault.whoami().user_id);
+    vault.cancel_recovery(user)
+}
+
+/// Turns escrow on or off; `None` only says whether it's on.
+pub fn escrow(home: &Path, on: Option<bool>) -> Result<bool> {
+    let mut vault = refreshed(home)?;
+    if let Some(on) = on {
+        vault.set_escrow(on)?;
+    }
+    Ok(vault.whoami().escrow)
 }
 
 /// Adds another device to this account from this machine: shows the setup line, waits for

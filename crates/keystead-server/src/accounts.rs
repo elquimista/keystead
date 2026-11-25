@@ -10,26 +10,33 @@ use axum::http::request::Parts;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use keystead_core::api::{
-    AcceptInviteRequest, ApprovalRequest, Challenge, ChallengeRequest, DeviceInfo, DeviceList,
-    Directory, Enrolled, Invite, InviteRequest, RecoverRequest, RecoveryChallenge,
-    RecoveryChallengeRequest, Session, SetupRequest, SignInRequest,
+    AcceptInviteRequest, ApprovalRequest, ApproveRecoveryRequest, Challenge, ChallengeRequest,
+    ClaimRecoveryRequest, DeviceInfo, DeviceList, Directory, Enrolled, EscrowRequest, Invite,
+    InviteRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RecoveryClaimed,
+    RecoveryInProgress, RecoveryStarted, RecoveryState, RecoveryTokenRequest, Session,
+    SetupRequest, SignInRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::encoding::Bytes;
 use keystead_core::ids::{DeviceId, UserId};
-use keystead_core::keys::{DevicePublicKey, recovery_message, sign_in_message};
+use keystead_core::keys::{AccountPublicKeys, DevicePublicKey, recovery_message, sign_in_message};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
-use crate::groups::{leave_group, parse_group};
-use crate::vault::{leave, leave_item, parse_folder};
-use crate::{ApiError, AppState, USER_COLUMNS, UserRow, entry_from_row, user_entry};
+use crate::groups::{is_owner, leave_group, parse_group};
+use crate::vault::{leave, leave_item, parse_folder, recovered};
+use crate::{
+    ApiError, AppState, USER_COLUMNS, UserRow, all_retired, entry_from_row, stored_key, user_entry,
+};
 
 const SESSION_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(60);
 const MAX_NAME_LENGTH: usize = 100;
+/// How long a line for recovering with the owner's help works.
+const RECOVERY_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
+const NOW: &str = "CAST(strftime('%s', 'now') AS INTEGER)";
 
 pub(crate) struct SessionInfo {
     user_id: UserId,
@@ -85,13 +92,8 @@ pub(crate) async fn setup(
 ) -> Result<Json<Enrolled>, ApiError> {
     check_name(&request.name)?;
     let owner = UserId(1);
-    let entry = DirectoryEntry {
-        user_id: owner,
-        name: request.name.clone(),
-        keys: request.keys.clone(),
-        approval: Some(request.approval.clone()),
-        removed: false,
-    };
+    let mut entry = DirectoryEntry::new(owner, &request.name, request.keys.clone());
+    entry.approval = Some(request.approval.clone());
     entry
         .verify(&request.keys)
         .map_err(|_| ApiError::BadRequest("the owner's self-approval does not verify".into()))?;
@@ -462,12 +464,17 @@ pub(crate) async fn directory(
     State(state): State<AppState>,
     _auth: Auth,
 ) -> Result<Json<Directory>, ApiError> {
+    let mut conn = state.readers.acquire().await?;
     let rows: Vec<UserRow> = sqlx::query_as(&format!("{USER_COLUMNS} ORDER BY id"))
-        .fetch_all(&state.readers)
+        .fetch_all(&mut *conn)
         .await?;
+    let mut retired = all_retired(&mut conn).await?;
     let entries = rows
         .into_iter()
-        .map(entry_from_row)
+        .map(|row| {
+            let user_retired = retired.remove(&row.0).unwrap_or_default();
+            entry_from_row(row, user_retired)
+        })
         .collect::<Result<_, _>>()?;
     Ok(Json(Directory { entries }))
 }
@@ -498,6 +505,10 @@ pub(crate) async fn remove_user(
     .execute(&mut *tx)
     .await?;
     sqlx::query("DELETE FROM devices WHERE user_id = ?")
+        .bind(user.0)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM recoveries WHERE user_id = ?")
         .bind(user.0)
         .execute(&mut *tx)
         .await?;
@@ -554,6 +565,359 @@ pub(crate) async fn remove_user(
         .lock()
         .expect("session lock poisoned")
         .retain(|_, session| session.user_id != user);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// MARK: - Recovering with the owner's help
+
+/// `POST /v1/users/{user_id}/recovery` (owner): starts helping someone who lost every device
+/// and their recovery kit. Returns a one-time token to send them; an earlier one stops
+/// working.
+pub(crate) async fn start_recovery(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(user_id): Path<i64>,
+) -> Result<Json<RecoveryStarted>, ApiError> {
+    let user = UserId(user_id);
+    let mut tx = state.writer.begin().await?;
+    require_owner(&mut tx, auth.user_id).await?;
+    if user == auth.user_id {
+        return Err(ApiError::BadRequest(
+            "nobody can approve new keys for the owner; the owner's recovery kit is the way back"
+                .into(),
+        ));
+    }
+    let entry = user_entry(&mut tx, user).await?.ok_or(ApiError::NotFound)?;
+    if entry.removed {
+        return Err(ApiError::BadRequest(
+            "they were removed from the team".into(),
+        ));
+    }
+    if entry.approval.is_none() {
+        return Err(ApiError::BadRequest(
+            "they aren't approved yet: approve them, or invite them again".into(),
+        ));
+    }
+    let mut token = [0u8; 32];
+    OsRng.fill_bytes(&mut token);
+    sqlx::query(&format!(
+        "INSERT INTO recoveries (user_id, token_hash, expires_at) VALUES (?, ?, {NOW} + ?)
+         ON CONFLICT (user_id) DO UPDATE SET token_hash = excluded.token_hash,
+             expires_at = excluded.expires_at, approved = 0, encryption_key = NULL,
+             signing_key = NULL, device_id = NULL, device_key = NULL, device_name = NULL"
+    ))
+    .bind(user.0)
+    .bind(&hash(&token)[..])
+    .bind(RECOVERY_LIFETIME_SECONDS)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(RecoveryStarted {
+        token: URL_SAFE_NO_PAD.encode(token),
+    }))
+}
+
+/// `GET /v1/users/{user_id}/recovery` (owner): the recovery waiting for approval: the new
+/// keys once claimed, and the person's personal key in escrow, if they turned it on.
+pub(crate) async fn recovery_in_progress(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(user_id): Path<i64>,
+) -> Result<Json<RecoveryInProgress>, ApiError> {
+    let mut conn = state.readers.acquire().await?;
+    require_owner(&mut conn, auth.user_id).await?;
+    // The new keys, if claimed, and the escrowed personal key, if any.
+    type Waiting = (Option<Vec<u8>>, Option<Vec<u8>>, Option<String>);
+    let row: Option<Waiting> = sqlx::query_as(&format!(
+        "SELECT r.encryption_key, r.signing_key, u.escrow
+             FROM recoveries r JOIN users u ON u.id = r.user_id
+             WHERE r.user_id = ? AND NOT r.approved AND r.expires_at > {NOW}"
+    ))
+    .bind(user_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let (encryption, signing, escrow) = row.ok_or(ApiError::NotFound)?;
+    let keys = match (encryption, signing) {
+        (Some(encryption), Some(signing)) => Some(AccountPublicKeys {
+            encryption: stored_key(encryption)?,
+            signing: stored_key(signing)?,
+        }),
+        _ => None,
+    };
+    Ok(Json(RecoveryInProgress {
+        keys,
+        escrow: escrow.as_deref().map(serde_json::from_str).transpose()?,
+    }))
+}
+
+/// `DELETE /v1/users/{user_id}/recovery`: the owner, or the person on a device they still
+/// have, stops a recovery that isn't approved yet.
+pub(crate) async fn cancel_recovery(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(user_id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    if auth.user_id.0 != user_id {
+        require_owner(&mut tx, auth.user_id).await?;
+    }
+    let removed = sqlx::query("DELETE FROM recoveries WHERE user_id = ? AND NOT approved")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if removed == 0 {
+        return Err(ApiError::NotFound);
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/recovery/claim`: the new device sends the account's new keys and its own
+/// device key with the token. Nothing changes until the owner approves them; the same
+/// device may send them again, but no other.
+pub(crate) async fn claim_recovery(
+    State(state): State<AppState>,
+    Json(request): Json<ClaimRecoveryRequest>,
+) -> Result<Json<RecoveryClaimed>, ApiError> {
+    let token = URL_SAFE_NO_PAD
+        .decode(request.token.trim())
+        .map_err(|_| ApiError::Forbidden("that isn't a recovery line".into()))?;
+    if request.device_name.chars().count() > MAX_NAME_LENGTH {
+        return Err(ApiError::BadRequest(format!(
+            "device name must be at most {MAX_NAME_LENGTH} characters"
+        )));
+    }
+    let mut tx = state.writer.begin().await?;
+    let row: Option<(i64, Option<String>, Option<Vec<u8>>)> = sqlx::query_as(&format!(
+        "SELECT user_id, device_id, encryption_key FROM recoveries
+         WHERE token_hash = ? AND NOT approved AND expires_at > {NOW}"
+    ))
+    .bind(&hash(&token)[..])
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (user_id, device_id, encryption) = row.ok_or_else(|| {
+        ApiError::Forbidden(
+            "this recovery line was cancelled, has expired or was already approved; ask the \
+             owner for a new one"
+                .into(),
+        )
+    })?;
+    match device_id {
+        Some(device_id) => {
+            if device_id != request.device_id.to_string()
+                || encryption.as_deref() != Some(&request.keys.encryption.0[..])
+            {
+                return Err(ApiError::Conflict(
+                    "this recovery line was already used on another device; ask the owner to \
+                     start again"
+                        .into(),
+                ));
+            }
+        }
+        None => {
+            let taken: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM devices WHERE id = ?)")
+                    .bind(request.device_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if taken {
+                return Err(ApiError::Conflict("device id already registered".into()));
+            }
+            sqlx::query(
+                "UPDATE recoveries SET encryption_key = ?, signing_key = ?, device_id = ?,
+                     device_key = ?, device_name = ?
+                 WHERE user_id = ?",
+            )
+            .bind(&request.keys.encryption.0[..])
+            .bind(&request.keys.signing.0[..])
+            .bind(request.device_id.to_string())
+            .bind(serde_json::to_string(&request.device_key)?)
+            .bind(request.device_name.trim())
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    let name: String = sqlx::query_scalar("SELECT name FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(RecoveryClaimed {
+        user_id: UserId(user_id),
+        name,
+    }))
+}
+
+/// `POST /v1/recovery/state`: whether the owner has approved the new keys; then the new
+/// device can sign in. A cancelled or expired recovery answers 404.
+pub(crate) async fn recovery_state(
+    State(state): State<AppState>,
+    Json(request): Json<RecoveryTokenRequest>,
+) -> Result<Json<RecoveryState>, ApiError> {
+    let token = URL_SAFE_NO_PAD
+        .decode(request.token.trim())
+        .map_err(|_| ApiError::NotFound)?;
+    let approved: bool = sqlx::query_scalar(&format!(
+        "SELECT approved FROM recoveries WHERE token_hash = ? AND expires_at > {NOW}"
+    ))
+    .bind(&hash(&token)[..])
+    .fetch_optional(&state.readers)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(Json(RecoveryState { approved }))
+}
+
+/// `POST /v1/users/{user_id}/recovery/approval` (owner): after checking the new keys'
+/// fingerprint with the person, the owner approves them at the next revision. The current
+/// keys are retired, kept so what they signed still verifies; the old devices stop working
+/// and the new one is registered; everything the old keys could open waits for a copy for
+/// the new ones, and gets new keys itself.
+pub(crate) async fn approve_recovery(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(user_id): Path<i64>,
+    Json(request): Json<ApproveRecoveryRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user = UserId(user_id);
+    let mut tx = state.writer.begin().await?;
+    let owner = require_owner(&mut tx, auth.user_id).await?;
+    let entry = user_entry(&mut tx, user).await?.ok_or(ApiError::NotFound)?;
+    type Claim = (
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let claim: Option<Claim> = sqlx::query_as(&format!(
+        "SELECT encryption_key, signing_key, device_id, device_key, device_name FROM recoveries
+         WHERE user_id = ? AND NOT approved AND expires_at > {NOW}"
+    ))
+    .bind(user.0)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (Some(encryption), Some(signing), Some(device_id), Some(device_key), device_name) =
+        claim.ok_or(ApiError::NotFound)?
+    else {
+        return Err(ApiError::Conflict(
+            "they haven't used the recovery line on their new device yet".into(),
+        ));
+    };
+    if request.revision != entry.revision + 1 {
+        return Err(ApiError::Conflict(format!(
+            "their keys are at revision {}; sync and try again",
+            entry.revision
+        )));
+    }
+    let old_approval = entry
+        .approval
+        .clone()
+        .ok_or_else(|| ApiError::BadRequest("they were never approved".into()))?;
+    let mut approved = entry.clone();
+    approved.keys = AccountPublicKeys {
+        encryption: stored_key(encryption)?,
+        signing: stored_key(signing)?,
+    };
+    approved.revision = request.revision;
+    approved.approval = Some(request.approval.clone());
+    approved
+        .verify(&owner.keys)
+        .map_err(|_| ApiError::BadRequest("approval does not verify".into()))?;
+
+    sqlx::query(
+        "INSERT INTO retired_keys (user_id, revision, name, encryption_key, signing_key, approval)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(user.0)
+    .bind(entry.revision)
+    .bind(&entry.name)
+    .bind(&entry.keys.encryption.0[..])
+    .bind(&entry.keys.signing.0[..])
+    .bind(old_approval.as_slice())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE users SET encryption_key = ?, signing_key = ?, approval = ?, revision = ?,
+             escrow = NULL, recovered_key = ?
+         WHERE id = ?",
+    )
+    .bind(&approved.keys.encryption.0[..])
+    .bind(&approved.keys.signing.0[..])
+    .bind(request.approval.as_slice())
+    .bind(request.revision)
+    .bind(
+        request
+            .personal_key
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
+    .bind(user.0)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM devices WHERE user_id = ?")
+        .bind(user.0)
+        .execute(&mut *tx)
+        .await?;
+    let device_id: DeviceId = device_id
+        .parse()
+        .map_err(|_| ApiError::Internal("stored device id doesn't parse".into()))?;
+    add_device(
+        &mut tx,
+        device_id,
+        user,
+        &serde_json::from_str(&device_key)?,
+        device_name.as_deref().unwrap_or_default(),
+    )
+    .await?;
+    sqlx::query("UPDATE recoveries SET approved = 1 WHERE user_id = ?")
+        .bind(user.0)
+        .execute(&mut *tx)
+        .await?;
+    recovered(&mut tx, user).await?;
+    tx.commit().await?;
+    state
+        .sessions
+        .lock()
+        .expect("session lock poisoned")
+        .retain(|_, session| session.user_id != user);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /v1/escrow`: this account's personal key, wrapped for the owner, so the owner can
+/// bring its own logins back after a recovery. Not for the owner's own account.
+pub(crate) async fn put_escrow(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(request): Json<EscrowRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    if is_owner(&mut tx, auth.user_id).await? {
+        return Err(ApiError::BadRequest(
+            "the owner's own logins can't be in escrow; the owner's recovery kit is the way back"
+                .into(),
+        ));
+    }
+    sqlx::query("UPDATE users SET escrow = ?, escrow_on = 1 WHERE id = ?")
+        .bind(serde_json::to_string(&request.wrapped_key)?)
+        .bind(auth.user_id.0)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/escrow`: turns escrow off and forgets the escrowed key.
+pub(crate) async fn delete_escrow(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<StatusCode, ApiError> {
+    sqlx::query("UPDATE users SET escrow = NULL, escrow_on = 0 WHERE id = ?")
+        .bind(auth.user_id.0)
+        .execute(&state.writer)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

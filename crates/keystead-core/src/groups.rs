@@ -119,6 +119,16 @@ pub fn verify_entries(
     owner: UserId,
     keys_of: impl Fn(UserId) -> Option<AccountPublicKeys>,
 ) -> Result<&GroupEntry, Error> {
+    verify_entries_with(entries, owner, |user| keys_of(user).into_iter().collect())
+}
+
+/// Like [`verify_entries`], where each signer may have had several approved keys over
+/// time: someone who recovered signed earlier revisions with keys since retired.
+pub fn verify_entries_with(
+    entries: &[GroupEntry],
+    owner: UserId,
+    keys_of: impl Fn(UserId) -> Vec<AccountPublicKeys>,
+) -> Result<&GroupEntry, Error> {
     let bad = |reason: &str| Err(Error::InvalidGroup(reason.into()));
     let Some(first) = entries.first() else {
         return bad("the group has no entries");
@@ -152,10 +162,13 @@ pub fn verify_entries(
                 }
             }
         }
-        let signer = keys_of(entry.signer).ok_or_else(|| {
-            Error::InvalidGroup("a change to the group was signed by someone unknown".into())
-        })?;
-        entry.verify(&signer)?;
+        let signers = keys_of(entry.signer);
+        let Some(first_key) = signers.first() else {
+            return bad("a change to the group was signed by someone unknown");
+        };
+        if !signers.iter().any(|keys| entry.verify(keys).is_ok()) {
+            entry.verify(first_key)?;
+        }
         previous = Some(entry);
     }
     Ok(previous.unwrap_or(first))

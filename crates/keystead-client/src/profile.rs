@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{Exposure, GroupInfo, KeyLink, Role, Roles, ViaGroup};
 use keystead_core::directory::DirectoryEntry;
-use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries};
+use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries_with};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, FolderInfo, Sealed};
 use keystead_core::keys::{AccountKeys, AccountPublicKeys, FolderKey, WrappedKey};
@@ -93,6 +93,14 @@ pub struct Profile {
     /// the last sync. Empty before 0.5.0.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exposures: Vec<Exposure>,
+    /// The highest key revision seen for each person, approved by the owner. Keys from an
+    /// earlier revision are never trusted again, so a server can't swap them back in.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub key_revisions: BTreeMap<UserId, u32>,
+    /// After recovering with the owner's help: this account's earlier personal keys,
+    /// wrapped for its current keys, to open its own items sealed with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovered_personal_keys: Vec<WrappedKey>,
 }
 
 impl Profile {
@@ -117,6 +125,8 @@ impl Profile {
             groups: BTreeMap::new(),
             team_groups: Vec::new(),
             exposures: Vec::new(),
+            key_revisions: BTreeMap::new(),
+            recovered_personal_keys: Vec::new(),
         }
     }
 
@@ -247,12 +257,46 @@ impl Profile {
             .any(|entry| entry.user_id == user && entry.removed)
     }
 
-    /// A user's keys, if the pinned owner approved their directory entry.
+    /// Takes the directory from the server, and remembers the highest key revision the
+    /// owner approved for each person.
+    pub fn set_directory(&mut self, entries: Vec<DirectoryEntry>) {
+        for entry in &entries {
+            if entry.verify(&self.owner).is_ok() {
+                let pinned = self.key_revisions.entry(entry.user_id).or_insert(0);
+                *pinned = (*pinned).max(entry.revision);
+            }
+        }
+        self.directory = entries;
+    }
+
+    /// A user's entry, if the pinned owner approved it and it isn't from before keys
+    /// they've had since.
+    pub fn trusted_entry(&self, user: UserId) -> Option<&DirectoryEntry> {
+        let pinned = self.key_revisions.get(&user).copied().unwrap_or(0);
+        self.directory.iter().find(|entry| {
+            entry.user_id == user && entry.revision >= pinned && entry.verify(&self.owner).is_ok()
+        })
+    }
+
+    /// A user's keys, if the pinned owner approved their directory entry: the keys to
+    /// share with them.
     pub fn trusted_keys(&self, user: UserId) -> Option<AccountPublicKeys> {
-        self.directory
+        self.trusted_entry(user).map(|entry| entry.keys.clone())
+    }
+
+    /// Whether an item version's signature checks out against its author's approved keys.
+    pub fn signed_by_author(&self, item: &EncryptedItem) -> bool {
+        self.signing_keys(item.author)
             .iter()
-            .find(|entry| entry.user_id == user && entry.verify(&self.owner).is_ok())
-            .map(|entry| entry.keys.clone())
+            .any(|keys| item.verify(keys).is_ok())
+    }
+
+    /// Every set of keys the owner approved for a user, current first, to check what they
+    /// signed: what someone signed before recovering still verifies.
+    pub fn signing_keys(&self, user: UserId) -> Vec<AccountPublicKeys> {
+        self.trusted_entry(user)
+            .map(|entry| entry.signing_keys(&self.owner))
+            .unwrap_or_default()
     }
 
     pub fn user_name(&self, user: UserId) -> String {
@@ -265,8 +309,8 @@ impl Profile {
     /// Checks a group's entries against the owner and the approved directory, and returns
     /// the latest.
     pub fn verify_group<'a>(&self, entries: &'a [GroupEntry]) -> Result<&'a GroupEntry> {
-        Ok(verify_entries(entries, OWNER, |user| {
-            self.trusted_keys(user)
+        Ok(verify_entries_with(entries, OWNER, |user| {
+            self.signing_keys(user)
         })?)
     }
 

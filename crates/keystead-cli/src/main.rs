@@ -56,6 +56,26 @@ enum Command {
         #[arg(long, default_value = "Command line")]
         name: String,
     },
+    /// Recover your account on this machine with the owner's help, when you've lost every
+    /// device and your recovery kit: use the line the owner sends you
+    RecoverWithHelp {
+        server: String,
+        token: String,
+        /// The owner's fingerprint, from the line
+        #[arg(long)]
+        owner: String,
+        /// How this machine shows in your list of devices
+        #[arg(long, default_value = "Command line")]
+        name: String,
+    },
+    /// Help someone recover who lost every device and their recovery kit (owner only)
+    #[command(subcommand)]
+    Recovery(RecoveryCommand),
+    /// Whether the owner can recover your own logins if you lose everything (escrow)
+    Escrow {
+        #[arg(value_enum)]
+        set: Option<OnOff>,
+    },
     /// Recover your account on this machine with the words from your recovery kit
     Recover {
         server: String,
@@ -294,6 +314,28 @@ enum DevicesCommand {
 }
 
 #[derive(Subcommand)]
+enum RecoveryCommand {
+    /// Start: prints a line to send them, like an invite
+    Start { user_id: i64 },
+    /// Whether they've used the line yet, and the new fingerprint
+    Status { user_id: i64 },
+    /// Approve their new keys after they read you the fingerprint their new device shows
+    Approve {
+        user_id: i64,
+        #[arg(long)]
+        fingerprint: String,
+    },
+    /// Cancel a recovery that isn't approved yet; without a user, your own
+    Cancel { user_id: Option<i64> },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
+#[derive(Subcommand)]
 enum FolderCommand {
     /// Create a folder, or one inside another (named "Parent / Name"), which starts out
     /// shared like its parent
@@ -452,6 +494,12 @@ fn run(cli: Cli) -> Result<()> {
             let me = commands::whoami(&home)?;
             println!("{} (user {}) on {}", me.name, me.user_id, me.server);
             println!("Fingerprint: {}", me.fingerprint);
+            if me.recovering {
+                println!(
+                    "The owner has started a recovery for your account. If you didn't ask for \
+                     it, run `keystead recovery cancel`."
+                );
+            }
         }
         Command::RecoveryKit => {
             let (words, me) = commands::recovery_kit(&home)?;
@@ -490,6 +538,81 @@ fn run(cli: Cli) -> Result<()> {
                 "Added this machine to {}'s account (user {}) on {}.",
                 me.name, me.user_id, me.server
             );
+        }
+        Command::RecoverWithHelp {
+            server,
+            token,
+            owner,
+            name,
+        } => {
+            let line = format!("{server} {token} --owner {owner}");
+            let me = commands::recover_with_help(&home, &line, &name, |claim| {
+                println!("New keys for {} (user {}).", claim.name, claim.user_id);
+                println!("Your new fingerprint: {}", claim.fingerprint);
+                println!("Read it to the owner, in person or on a call, so they can approve it.");
+                println!("Waiting for them… (Ctrl-C stops; then they start again)");
+            })?;
+            println!(
+                "Recovered {} (user {}) on {}. What's shared with you comes back as others' \
+                 apps sync.",
+                me.name, me.user_id, me.server
+            );
+            println!("Save your new recovery kit now: `keystead recovery-kit`.");
+        }
+        Command::Recovery(RecoveryCommand::Start { user_id }) => {
+            let line = commands::start_recovery(&home, UserId(user_id))?;
+            println!("Send this line to them, privately; it works once, for a week:\n");
+            println!("{}\n", line.command());
+            println!("Then approve with the fingerprint their new device shows:");
+            println!("keystead recovery approve {user_id} --fingerprint <fingerprint>");
+        }
+        Command::Recovery(RecoveryCommand::Status { user_id }) => {
+            match commands::recovery_request(&home, UserId(user_id))? {
+                None => println!("No recovery is waiting for user {user_id}."),
+                Some(request) => {
+                    match request.fingerprint {
+                        Some(fingerprint) => println!("Their new fingerprint: {fingerprint}"),
+                        None => println!("They haven't used the line yet."),
+                    }
+                    println!(
+                        "{}",
+                        if request.escrow {
+                            "Their own logins come back too: they turned escrow on."
+                        } else {
+                            "Their own logins won't come back: escrow is off."
+                        }
+                    );
+                }
+            }
+        }
+        Command::Recovery(RecoveryCommand::Approve {
+            user_id,
+            fingerprint,
+        }) => {
+            let approved = commands::approve_recovery(&home, UserId(user_id), &fingerprint)?;
+            println!(
+                "Approved {}'s new keys. Their old devices no longer work; what's shared with \
+                 them comes back as apps sync.",
+                approved.name
+            );
+            if !approved.own_logins {
+                println!("Their own logins outside folders don't come back: escrow was off.");
+            }
+        }
+        Command::Recovery(RecoveryCommand::Cancel { user_id }) => {
+            commands::cancel_recovery(&home, user_id.map(UserId))?;
+            println!("Cancelled.");
+        }
+        Command::Escrow { set } => {
+            let on = commands::escrow(&home, set.map(|set| matches!(set, OnOff::On)))?;
+            if on {
+                println!(
+                    "Escrow is on: if you lose every device and your recovery kit, the owner can \
+                     bring back your own logins. The owner can open them at any time."
+                );
+            } else {
+                println!("Escrow is off: only your recovery kit can bring back your own logins.");
+            }
         }
         Command::Recover { server, owner } => {
             let words = if std::io::stdin().is_terminal() {
@@ -587,17 +710,26 @@ fn run(cli: Cli) -> Result<()> {
             let rows = commands::users(&home)?
                 .into_iter()
                 .map(|user| {
-                    let status = if user.removed {
+                    let mut status = if user.removed {
                         "removed"
+                    } else if user.recovering {
+                        "recovering"
                     } else if user.approved {
                         "approved"
                     } else {
                         "waiting"
-                    };
+                    }
+                    .to_owned();
+                    if user.keys_replaced {
+                        status.push_str(", recovered");
+                    }
+                    if user.escrow {
+                        status.push_str(", escrow");
+                    }
                     vec![
                         user.user_id.to_string(),
                         user.name,
-                        status.to_owned(),
+                        status,
                         user.fingerprint,
                     ]
                 })

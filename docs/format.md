@@ -178,6 +178,44 @@ Transfers expire after ten minutes, an account has at most three open at once, a
 claimed or cancelled one is gone. The server only ever sees the public key and the sealed
 secret.
 
+**Recovering with the owner's help** (0.13.0 and later) is for someone who lost every
+device and their recovery kit. Their old keys are gone, so they get new ones:
+
+1. The owner starts it (`POST /v1/users/{id}/recovery`) and sends the person the line it
+   gives: `keystead recover-with-help <server> <token> --owner <owner's fingerprint>`. It
+   works once, for a week; starting again replaces it. Devices the person still has see
+   `recovering` on their directory entry and can cancel (`DELETE …/recovery`).
+2. The new device makes a new account secret and device key and sends their public halves
+   with the token (`POST /v1/recovery/claim`, no session). Only that device may send them
+   again. It then asks `POST /v1/recovery/state` until the owner approves.
+3. The owner fetches the new keys (`GET …/recovery`) and compares their fingerprint with
+   the person, in person or on a call. Only if it matches does the owner sign the person's
+   entry with the new keys at the next revision (see Directory) and send it
+   (`POST …/recovery/approval`).
+4. The server keeps the old keys as retired, removes the old devices and registers the new
+   one. The new device signs in, checks the owner against the line's fingerprint, and
+   checks that the owner approved its keys.
+
+Everything wrapped for the old keys then waits for a copy for the new ones. Each sync's
+`restore` lists what the caller can give back: any member of a folder or group wraps its
+current key or secret again (`PUT /v1/folders/{id}/members/{user}/key`,
+`PUT /v1/groups/{id}/members/{user}/secret`), and anyone who can change a login shared
+with them directly saves it again. Folders and groups they had also get new keys, as when
+someone leaves, since the old keys were on a lost device. A save always wraps each
+person's copy again for their current keys. Until a copy is made, it gives no access.
+Nothing goes on passwords to change: it's the same person.
+
+**Escrow** (opt-in, not for the owner) lets the person's own items outside folders come
+back too: their app wraps the account's personal key for the owner
+(`PUT /v1/escrow`, `DELETE /v1/escrow` to stop), with HPKE, info
+`keystead/personal-key/v1` and associated data
+`transcript("keystead/personal-key/v1", user id)`. When approving, the owner's app opens
+it and wraps it the same way for the new keys; the person's sync gets it as
+`recovered_key`, opens their own items with it and saves them again under the new
+personal key, and escrows the new one (`escrow_needed`). The owner can open an escrowed
+account's own items at any time; apps say so. Without escrow, those items don't come back
+for them.
+
 ## Items
 
 An item version has two encrypted parts:
@@ -316,6 +354,22 @@ The owner approves their own entry at setup. A client joining the team pins the 
 keys (by fingerprint, from the invite) and shares only with entries whose signature
 verifies against them, and that aren't marked `"removed": true` (see Removing access).
 
+After a recovery with the owner's help, an entry has new keys at a higher `revision`
+(0.13.0 and later; absent means 0), signed as
+
+```
+transcript("keystead/directory-entry/v2", user id, revision, name, encryption key, signing key)
+```
+
+Clients remember the highest revision the owner approved for each person and never share
+with an earlier one, so a server can't swap old keys back in. The earlier keys stay
+listed under `retired`, each with its revision, name and the owner's approval as given,
+so what they signed (item versions, group entries) still verifies. Someone holding a lost
+device's secret could, with the server's help, sign as those retired keys; signed
+membership changes (not in this format yet) would narrow that. Unsigned flags show who has `escrow` on and who is
+`recovering`. Clients before 0.13.0 can't check a revision above 0, and stop trusting
+that person until they're updated.
+
 ## Groups
 
 A group is people shared with as one. Sharing a folder or item with a group is one copy
@@ -408,6 +462,14 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/users/{id}/approval` | `ApprovalRequest` | 204 | Owner |
 | `GET /v1/directory` | | `Directory` | Members |
 | `DELETE /v1/users/{id}` | | 204 | Owner, for anyone but themselves |
+| `POST /v1/users/{id}/recovery` | | `RecoveryStarted` | Owner, for anyone approved but themselves |
+| `GET /v1/users/{id}/recovery` | | `RecoveryInProgress` | Owner |
+| `DELETE /v1/users/{id}/recovery` | | 204 | Owner, or the person themselves |
+| `POST /v1/users/{id}/recovery/approval` | `ApproveRecoveryRequest` | 204 | Owner |
+| `POST /v1/recovery/claim` | `ClaimRecoveryRequest` | `RecoveryClaimed` | The new device, with the token |
+| `POST /v1/recovery/state` | `RecoveryTokenRequest` | `RecoveryState` | The new device, with the token |
+| `PUT /v1/escrow` | `EscrowRequest` | 204 | Anyone but the owner, for themselves |
+| `DELETE /v1/escrow` | | 204 | Anyone, for themselves |
 | `POST /v1/device-transfers` | | `DeviceTransfer` | Any signed-in device |
 | `POST /v1/device-transfers/join` | `JoinDeviceTransferRequest` | 204 | The new device, with the token |
 | `GET /v1/device-transfers/{id}` | | `DeviceTransferState` | The account that started it |
@@ -419,6 +481,7 @@ codes (400, 401, 403, 404, 409).
 | `GET /v1/folders/{id}/members` | | `Members` | Folder members |
 | `PUT /v1/folders/{id}/members/{user}` | `RoleRequest` | 204 | Folder managers |
 | `DELETE /v1/folders/{id}/members/{user}` | | 204 | Folder managers, or the member themselves |
+| `PUT /v1/folders/{id}/members/{user}/key` | `RestoreFolderKeyRequest` | 204 | Folder members, for someone who recovered |
 | `DELETE /v1/folders/{id}?logins=N` | | 204 | Folder managers |
 | `POST /v1/folders/{id}/rekey` | `RekeyRequest` | 204 | Folder managers |
 | `POST /v1/folders/{id}/groups` | `AddFolderGroupRequest` | 204 | Folder managers |
@@ -430,6 +493,7 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/groups/{id}/members` | `AddGroupMemberRequest` | 204 | The group's managers in it (the owner too, if in it) |
 | `DELETE /v1/groups/{id}/members/{user}` | | 204 | Owner and the group's managers in it, or the member themselves |
 | `POST /v1/groups/{id}/rekey` | `GroupRekeyRequest` | 204 | The group's managers in it (the owner too, if in it) |
+| `PUT /v1/groups/{id}/members/{user}/secret` | `RestoreGroupSecretRequest` | 204 | Group members, for someone who recovered |
 | `DELETE /v1/groups/{id}` | | 204 | Owner, and the group's managers in it |
 | `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Editors and managers of the item (see Roles) |
 | `GET /v1/items/{id}/people` | | `Members` | Anyone who can open the item |
@@ -602,13 +666,12 @@ consistent snapshot:
 
 The last page also carries the user's `roles` (in each folder, and on each item shared
 with them or their groups directly, the highest of the ways in), and every page
-`rekey_needed` and `group_rekey_needed`. The prototype in
+`rekey_needed` and `group_rekey_needed`, plus, from 0.13.0, `restore`, `recovered_key`
+and `escrow_needed` (see Recovering with the owner's help). The prototype in
 `prototypes/change-feed` shows why each item arrives exactly once.
 
 ## Not in this format yet
 
-- Recovery that the team owner approves. (A recovery kit, or another of the account's
-  devices, can already add a device.)
 - Signed membership changes. Roles and memberships are enforced by the server; a
   server that lied could let someone save who shouldn't, though every version stays
   signed by its author. A group's managers and key are signed; who is in it isn't.

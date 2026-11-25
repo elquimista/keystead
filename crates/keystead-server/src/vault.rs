@@ -19,9 +19,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use keystead_core::api::{
     AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, DeletedItem, DeletedItems,
-    Exposure, Exposures, FolderRole, GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members,
-    PutItemRequest, RekeyRequest, Role, RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage,
-    ViaGroup,
+    Exposure, Exposures, FolderMember, FolderRole, GroupMember, GroupShare, ItemHistory, ItemRole,
+    KeyLink, Member, Members, PutItemRequest, RekeyRequest, Restore, RestoreFolderKeyRequest, Role,
+    RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage, ViaGroup,
 };
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
@@ -305,6 +305,16 @@ pub(crate) async fn rekey(
         .execute(&mut *tx)
         .await?;
     }
+    // Members who recovered got a copy for their new keys with everyone else.
+    let restored: Vec<i64> = sqlx::query_scalar(
+        "UPDATE members SET pending = 0 WHERE folder_id = ? AND pending = 1 RETURNING user_id",
+    )
+    .bind(folder_id.to_string())
+    .fetch_all(&mut *tx)
+    .await?;
+    for user in restored {
+        reconcile(&mut tx, UserId(user)).await?;
+    }
     // Everyone who can open the folder, whichever way, hears about the new key.
     let users: Vec<i64> =
         sqlx::query_scalar("SELECT user_id FROM access WHERE folder_id = ? ORDER BY user_id")
@@ -322,6 +332,88 @@ pub(crate) async fn rekey(
     }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /v1/folders/{folder_id}/members/{user_id}/key`: anyone who can open the folder
+/// gives a member who recovered a copy of its current key for their new keys, so they
+/// have it back without waiting for a manager. Only for members waiting for one.
+pub(crate) async fn restore_folder_key(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((folder_id, user_id)): Path<(FolderId, i64)>,
+    Json(request): Json<RestoreFolderKeyRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user = UserId(user_id);
+    let mut tx = state.writer.begin().await?;
+    require(
+        folder_role(&mut tx, auth.user_id, folder_id).await?,
+        Role::View,
+        "give someone this folder's key",
+    )?;
+    let waiting: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM members WHERE user_id = ? AND folder_id = ? AND pending)",
+    )
+    .bind(user.0)
+    .bind(folder_id.to_string())
+    .fetch_one(&mut *tx)
+    .await?;
+    if !waiting {
+        return Err(ApiError::Conflict(
+            "they aren't waiting for this folder's key".into(),
+        ));
+    }
+    if request.generation != generation(&mut tx, folder_id).await? {
+        return Err(ApiError::Conflict(
+            "the folder's key changed; sync and try again".into(),
+        ));
+    }
+    sqlx::query(
+        "UPDATE members SET wrapped_key = ?, pending = 0 WHERE user_id = ? AND folder_id = ?",
+    )
+    .bind(serde_json::to_string(&request.wrapped_key)?)
+    .bind(user.0)
+    .bind(folder_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    reconcile(&mut tx, user).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// After someone recovered with new keys: every copy wrapped for their old keys waits
+/// until someone makes them one for the new keys, and what the old keys opened gets new
+/// keys too, in case they turn up on the lost device. Logins they own stay theirs, for
+/// their personal key, if it was in escrow. Until then they can't open any of it; nothing
+/// goes on passwords to change, as it's the same person.
+pub(crate) async fn recovered(conn: &mut SqliteConnection, user: UserId) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE folders SET needs_rekey = 1 WHERE id IN (SELECT folder_id FROM access WHERE user_id = ?)",
+    )
+    .bind(user.0)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "UPDATE team_groups SET needs_rekey = 1
+         WHERE id IN (SELECT group_id FROM group_members WHERE user_id = ?)",
+    )
+    .bind(user.0)
+    .execute(&mut *conn)
+    .await?;
+    for table in ["members", "group_members"] {
+        sqlx::query(&format!("UPDATE {table} SET pending = 1 WHERE user_id = ?"))
+            .bind(user.0)
+            .execute(&mut *conn)
+            .await?;
+    }
+    sqlx::query(
+        "UPDATE item_access SET pending = 1
+         WHERE user_id = ?1
+           AND item_id NOT IN (SELECT id FROM items WHERE json_extract(body, '$.owner') = ?1)",
+    )
+    .bind(user.0)
+    .execute(&mut *conn)
+    .await?;
+    reconcile_with(conn, user, false).await
 }
 
 #[derive(Deserialize)]
@@ -1289,6 +1381,13 @@ pub(crate) async fn sync(
         }
     }
     let group_rekey_needed = crate::groups::rekey_needed(&mut tx, auth.user_id).await?;
+    let restore = restore_needed(&mut tx, auth.user_id).await?;
+    let (recovered_key, escrow_needed): (Option<String>, bool) = sqlx::query_as(
+        "SELECT recovered_key, escrow_on AND escrow IS NULL FROM users WHERE id = ?",
+    )
+    .bind(user)
+    .fetch_one(&mut *tx)
+    .await?;
     let roles = if more {
         None
     } else {
@@ -1303,7 +1402,69 @@ pub(crate) async fn sync(
         rekey_needed: folders,
         roles,
         group_rekey_needed,
+        restore,
+        recovered_key: recovered_key
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        escrow_needed,
     }))
+}
+
+/// Copies people who recovered are waiting for, that `user` can make them: of the key of
+/// a folder `user` can open, of the secret of a group `user` is in, and of logins `user`
+/// can change, by saving them again.
+async fn restore_needed(conn: &mut SqliteConnection, user: UserId) -> Result<Restore, ApiError> {
+    let folders: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT m.folder_id, m.user_id FROM members m
+         JOIN access a ON a.folder_id = m.folder_id AND a.user_id = ?1
+         WHERE m.pending ORDER BY m.folder_id, m.user_id",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    let groups: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT p.group_id, p.user_id FROM group_members p
+         JOIN group_members me ON me.group_id = p.group_id AND me.user_id = ?1 AND NOT me.pending
+         WHERE p.pending ORDER BY p.group_id, p.user_id",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    let waiting: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT item_id FROM item_access WHERE pending AND user_id != ? ORDER BY item_id",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut items = Vec::new();
+    for item_id in waiting {
+        let item = stored_item(conn, parse_item(&item_id)?).await?;
+        if !item.deleted && item_role(conn, user, &item).await? >= Some(Role::Edit) {
+            items.push(item.id);
+        }
+    }
+    Ok(Restore {
+        folders: folders
+            .into_iter()
+            .map(|(folder_id, user_id)| {
+                Ok(FolderMember {
+                    folder_id: parse_folder(&folder_id)?,
+                    user_id: UserId(user_id),
+                })
+            })
+            .collect::<Result<_, ApiError>>()?,
+        groups: groups
+            .into_iter()
+            .map(|(group_id, user_id)| {
+                Ok(GroupMember {
+                    group_id: parse_group(&group_id)?,
+                    user_id: UserId(user_id),
+                })
+            })
+            .collect::<Result<_, ApiError>>()?,
+        items,
+    })
 }
 
 // MARK: - Helpers
@@ -1340,10 +1501,10 @@ pub(crate) async fn folder_role(
     folder_id: FolderId,
 ) -> Result<Option<Role>, ApiError> {
     let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT role FROM members WHERE user_id = ?1 AND folder_id = ?2
+        "SELECT role FROM members WHERE user_id = ?1 AND folder_id = ?2 AND NOT pending
          UNION ALL
          SELECT fg.role FROM folder_groups fg JOIN group_members gm ON gm.group_id = fg.group_id
-         WHERE gm.user_id = ?1 AND fg.folder_id = ?2",
+         WHERE gm.user_id = ?1 AND fg.folder_id = ?2 AND NOT gm.pending",
     )
     .bind(user.0)
     .bind(folder_id.to_string())
@@ -1394,10 +1555,10 @@ async fn item_role(
         None => None,
     };
     let direct: Vec<String> = sqlx::query_scalar(
-        "SELECT role FROM item_access WHERE user_id = ?1 AND item_id = ?2
+        "SELECT role FROM item_access WHERE user_id = ?1 AND item_id = ?2 AND NOT pending
          UNION ALL
          SELECT ig.role FROM item_groups ig JOIN group_members gm ON gm.group_id = ig.group_id
-         WHERE gm.user_id = ?1 AND ig.item_id = ?2",
+         WHERE gm.user_id = ?1 AND ig.item_id = ?2 AND NOT gm.pending",
     )
     .bind(user.0)
     .bind(item.id.to_string())
@@ -1722,11 +1883,22 @@ pub(crate) async fn resend_keys(
 /// groups. Each folder or item gained or lost goes in their feed as a join or a leave, and
 /// a folder they lost is marked for a new key if anyone can still open it.
 pub(crate) async fn reconcile(conn: &mut SqliteConnection, user: UserId) -> Result<(), ApiError> {
+    reconcile_with(conn, user, true).await
+}
+
+/// Like [`reconcile`]; with `expose` false, nothing lost goes on passwords to change.
+/// Copies waiting for someone who recovered give no access until they're made again.
+async fn reconcile_with(
+    conn: &mut SqliteConnection,
+    user: UserId,
+    expose: bool,
+) -> Result<(), ApiError> {
     let reachable: BTreeSet<String> = sqlx::query_scalar(
-        "SELECT folder_id FROM members WHERE user_id = ?1
+        "SELECT folder_id FROM members WHERE user_id = ?1 AND NOT pending
          UNION
          SELECT fg.folder_id FROM folder_groups fg
-         JOIN group_members gm ON gm.group_id = fg.group_id WHERE gm.user_id = ?1",
+         JOIN group_members gm ON gm.group_id = fg.group_id
+         WHERE gm.user_id = ?1 AND NOT gm.pending",
     )
     .bind(user.0)
     .fetch_all(&mut *conn)
@@ -1780,22 +1952,25 @@ pub(crate) async fn reconcile(conn: &mut SqliteConnection, user: UserId) -> Resu
         .execute(&mut *conn)
         .await?;
         // They could see every password in it.
-        sqlx::query(&format!(
-            "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
-             WHERE folder_id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
-             {EXPOSE_AGAIN}"
-        ))
-        .bind(user.0)
-        .bind(folder_id)
-        .execute(&mut *conn)
-        .await?;
+        if expose {
+            sqlx::query(&format!(
+                "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
+                 WHERE folder_id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
+                 {EXPOSE_AGAIN}"
+            ))
+            .bind(user.0)
+            .bind(folder_id)
+            .execute(&mut *conn)
+            .await?;
+        }
     }
 
     let reachable: BTreeSet<String> = sqlx::query_scalar(
-        "SELECT item_id FROM item_access WHERE user_id = ?1
+        "SELECT item_id FROM item_access WHERE user_id = ?1 AND NOT pending
          UNION
          SELECT ig.item_id FROM item_groups ig
-         JOIN group_members gm ON gm.group_id = ig.group_id WHERE gm.user_id = ?1",
+         JOIN group_members gm ON gm.group_id = ig.group_id
+         WHERE gm.user_id = ?1 AND NOT gm.pending",
     )
     .bind(user.0)
     .fetch_all(&mut *conn)
@@ -1836,15 +2011,17 @@ pub(crate) async fn reconcile(conn: &mut SqliteConnection, user: UserId) -> Resu
             .bind(item_id)
             .execute(&mut *conn)
             .await?;
-        sqlx::query(&format!(
-            "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
-             WHERE id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
-             {EXPOSE_AGAIN}"
-        ))
-        .bind(user.0)
-        .bind(item_id)
-        .execute(&mut *conn)
-        .await?;
+        if expose {
+            sqlx::query(&format!(
+                "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
+                 WHERE id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
+                 {EXPOSE_AGAIN}"
+            ))
+            .bind(user.0)
+            .bind(item_id)
+            .execute(&mut *conn)
+            .await?;
+        }
     }
     Ok(())
 }

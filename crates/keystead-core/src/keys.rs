@@ -20,7 +20,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::Error;
 use crate::encoding::{Bytes, Key32, transcript};
-use crate::ids::{DeviceId, FolderId, GroupId, ItemId};
+use crate::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 
 type Kem = X25519HkdfSha256;
 type KemPrivateKey = <Kem as hpke::Kem>::PrivateKey;
@@ -36,6 +36,7 @@ const GROUP_SECRET_INFO: &[u8] = b"keystead/group-secret/v1";
 const GROUP_ENCRYPTION_INFO: &[u8] = b"keystead/group/encryption/v1";
 const GROUP_CHAIN_INFO: &[u8] = b"keystead/group/chain/v1";
 const DEVICE_TRANSFER_INFO: &[u8] = b"keystead/device-transfer/v1";
+const PERSONAL_KEY_INFO: &[u8] = b"keystead/personal-key/v1";
 
 /// The 32 random bytes every account key comes from. Devices store it wrapped by their
 /// hardware key; it never reaches the server unwrapped.
@@ -149,6 +150,12 @@ impl AccountKeys {
         }
     }
 
+    /// The personal key on its own, to tell which of this account's items are sealed with
+    /// it and which with an earlier one.
+    pub fn personal_key(&self) -> PersonalKey {
+        PersonalKey(self.personal.clone())
+    }
+
     /// The personal key's cipher. Only this account can make it, so what it seals opens
     /// for this account alone.
     pub(crate) fn personal_cipher(&self) -> XChaCha20Poly1305 {
@@ -196,6 +203,27 @@ impl AccountKeys {
             &group_secret_aad(group, generation),
         )
         .map(GroupSecret)
+    }
+
+    /// This account's personal key, wrapped for someone else: the team owner, when the
+    /// account opts in to escrow, so its own items can come back after a recovery.
+    pub fn wrap_personal_key_for(
+        &self,
+        recipient: &AccountPublicKeys,
+        me: UserId,
+    ) -> Result<WrappedKey, Error> {
+        recipient.wrap(&self.personal, PERSONAL_KEY_INFO, &personal_key_aad(me))
+    }
+
+    /// Opens a personal key wrapped for this account: `user`'s in escrow, for the owner,
+    /// or this account's earlier one after a recovery.
+    pub fn unwrap_personal_key(
+        &self,
+        wrapped: &WrappedKey,
+        user: UserId,
+    ) -> Result<PersonalKey, Error> {
+        self.unwrap(wrapped, PERSONAL_KEY_INFO, &personal_key_aad(user))
+            .map(|bytes| PersonalKey(Zeroizing::new(bytes)))
     }
 
     fn unwrap(&self, wrapped: &WrappedKey, info: &[u8], aad: &[u8]) -> Result<[u8; 32], Error> {
@@ -249,6 +277,21 @@ fn hpke_wrap(
         encapsulated_key: Bytes(encapped.to_bytes().to_vec()),
         ciphertext: Bytes(ciphertext),
     })
+}
+
+/// Binds a wrapped personal key to the account it belongs to.
+fn personal_key_aad(user: UserId) -> Vec<u8> {
+    transcript("keystead/personal-key/v1", &[&user.to_be_bytes()])
+}
+
+/// An account's personal key on its own: in escrow with the team owner, or an earlier
+/// one brought back after a recovery, to open the account's own items sealed with it.
+pub struct PersonalKey(Zeroizing<[u8; 32]>);
+
+impl PersonalKey {
+    pub(crate) fn cipher(&self) -> XChaCha20Poly1305 {
+        XChaCha20Poly1305::new(Key::from_slice(&*self.0))
+    }
 }
 
 fn group_secret_aad(group: GroupId, generation: u32) -> Vec<u8> {
@@ -383,6 +426,12 @@ impl AccountPublicKeys {
             GROUP_SECRET_INFO,
             &group_secret_aad(group, generation),
         )
+    }
+
+    /// Wraps `user`'s personal key for this account: the owner hands an escrowed one to
+    /// the account's new keys after a recovery.
+    pub fn wrap_personal_key(&self, key: &PersonalKey, user: UserId) -> Result<WrappedKey, Error> {
+        self.wrap(&key.0, PERSONAL_KEY_INFO, &personal_key_aad(user))
     }
 
     fn wrap(&self, key: &[u8; 32], info: &[u8], aad: &[u8]) -> Result<WrappedKey, Error> {

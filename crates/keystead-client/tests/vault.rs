@@ -1779,3 +1779,228 @@ fn an_export_opens_in_keepass_and_imports_back() {
         .unwrap();
     assert_eq!(bob.open_item(copy).unwrap().1, details);
 }
+
+/// A new device for an account, with its own secret and key, as recovering makes.
+fn new_device<'a>(
+    fixture: &'a Fixture,
+    secret: &'a AccountSecret,
+    device_id: DeviceId,
+    signer: Arc<dyn DeviceSigner>,
+) -> NewAccount<'a> {
+    NewAccount {
+        server: &fixture.url,
+        secret,
+        device_id,
+        device_name: "New Mac",
+        signer,
+    }
+}
+
+#[test]
+fn recovering_with_the_owners_help_brings_back_what_was_shared_and_own_logins_in_escrow() {
+    use keystead_client::{claim_recovery, finish_recovery, recovery_approved};
+
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+    let carol_id = carol_identity.user_id;
+
+    // Bob has Production himself, Staging through the Ops group, Wiki from Carol directly,
+    // and Bank of his own; he last saved Database's password. Escrow is on.
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    let (overview, details) = login("Database", "db-pw");
+    alice.add(Some("Production"), overview, details).unwrap();
+    alice.create_group("Ops", &[bob_id, carol_id]).unwrap();
+    alice.create_folder("Staging").unwrap();
+    alice
+        .share_folder_with_group("Staging", "Ops", Role::View)
+        .unwrap();
+    let (overview, details) = login("Staging DB", "staging-pw");
+    alice.add(Some("Staging"), overview, details).unwrap();
+    carol.sync().unwrap();
+    let (overview, details) = login("Wiki", "wiki-pw");
+    carol.add(None, overview, details).unwrap();
+    let wiki = carol.find_item("Wiki", None).unwrap();
+    carol.share_item(wiki, bob_id, Role::View).unwrap();
+    bob.sync().unwrap();
+    let (overview, details) = login("Bank", "bank-pw");
+    bob.add(None, overview, details).unwrap();
+    let database = bob.find_item("Database", None).unwrap();
+    bob.edit(database, "db-pw-2").unwrap();
+    bob.set_escrow(true).unwrap();
+    assert!(bob.whoami().escrow);
+    assert!(
+        alice.set_escrow(true).is_err(),
+        "the owner has the recovery kit"
+    );
+    assert_eq!(bob.list().unwrap().len(), 4);
+
+    // Bob loses everything. Alice starts a recovery; his old device hears of it.
+    let line = alice.start_recovery(bob_id).unwrap();
+    assert!(alice.start_recovery(alice.whoami().user_id).is_err());
+    bob.sync().unwrap();
+    assert!(bob.whoami().recovering);
+
+    let secret = AccountSecret::generate();
+    let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
+    let device_id = DeviceId::random();
+    let claim = claim_recovery(
+        &line,
+        &new_device(&fixture, &secret, device_id, signer.clone()),
+    )
+    .unwrap();
+    assert_eq!((claim.user_id, claim.name.as_str()), (bob_id, "Bob"));
+    assert!(!recovery_approved(&line).unwrap());
+    let other = AccountSecret::generate();
+    let thief = new_device(
+        &fixture,
+        &other,
+        DeviceId::random(),
+        Arc::new(SoftwareDeviceKey::generate()),
+    );
+    assert!(
+        claim_recovery(&line, &thief).is_err(),
+        "the line works once"
+    );
+    let waiting = alice.recovery_request(bob_id).unwrap().unwrap();
+    assert_eq!(
+        waiting.fingerprint.as_deref(),
+        Some(claim.fingerprint.as_str())
+    );
+    assert!(waiting.escrow);
+    assert!(
+        alice
+            .approve_recovery(bob_id, "0000-0000-0000-0000-0000")
+            .is_err()
+    );
+    let approved = alice.approve_recovery(bob_id, &claim.fingerprint).unwrap();
+    assert!(approved.own_logins);
+    assert!(recovery_approved(&line).unwrap());
+    assert!(bob.sync().is_err(), "the old devices stop working");
+
+    // The new device has Bob's own login at once, sealed again with his new keys, and
+    // escrow on again.
+    let mut new_bob = finish_recovery(
+        &fixture.profile("new-bob"),
+        new_device(&fixture, &secret, device_id, signer),
+        &line,
+    )
+    .unwrap();
+    new_bob.sync().unwrap();
+    let names = |vault: &Vault| {
+        let mut names: Vec<String> = vault
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&new_bob), ["Bank"]);
+    new_bob.sync().unwrap();
+    assert!(new_bob.whoami().escrow);
+
+    // Alice's and Carol's apps give him the rest back, with new keys for what he had.
+    alice.sync().unwrap();
+    alice.sync().unwrap();
+    carol.sync().unwrap();
+    new_bob.sync().unwrap();
+    assert_eq!(names(&new_bob), ["Bank", "Database", "Staging DB", "Wiki"]);
+    let password = |vault: &Vault, name: &str| {
+        let id = vault.find_item(name, None).unwrap();
+        vault.open_item(id).unwrap().1.password.clone()
+    };
+    assert_eq!(
+        password(&new_bob, "Database"),
+        "db-pw-2",
+        "signed with his old keys"
+    );
+    assert_eq!(password(&new_bob, "Bank"), "bank-pw");
+    assert_eq!(password(&new_bob, "Wiki"), "wiki-pw");
+    assert_eq!(password(&new_bob, "Staging DB"), "staging-pw");
+    assert!(
+        alice.to_change().unwrap().is_empty(),
+        "it's the same person"
+    );
+    let row = alice
+        .users()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.user_id == bob_id)
+        .unwrap();
+    assert!(row.keys_replaced && row.approved && row.escrow && !row.recovering);
+
+    // He can save again, and everyone checks his new signature.
+    let database = new_bob.find_item("Database", None).unwrap();
+    new_bob.edit(database, "db-pw-3").unwrap();
+    alice.sync().unwrap();
+    assert_eq!(password(&alice, "Database"), "db-pw-3");
+}
+
+#[test]
+fn without_escrow_only_what_was_shared_comes_back_and_a_recovery_can_be_cancelled() {
+    use keystead_client::{claim_recovery, finish_recovery, recovery_approved};
+
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::View)
+        .unwrap();
+    let (overview, details) = login("Database", "db-pw");
+    alice.add(Some("Production"), overview, details).unwrap();
+    bob.sync().unwrap();
+    let (overview, details) = login("Bank", "bank-pw");
+    bob.add(None, overview, details).unwrap();
+
+    // A recovery Bob didn't ask for: he cancels it from his device, and the line is dead.
+    let line = alice.start_recovery(bob_id).unwrap();
+    bob.sync().unwrap();
+    bob.cancel_recovery(bob_id).unwrap();
+    assert!(recovery_approved(&line).is_err());
+    assert!(alice.recovery_request(bob_id).unwrap().is_none());
+
+    // A real one, without escrow: Production comes back, Bank doesn't.
+    let line = alice.start_recovery(bob_id).unwrap();
+    let secret = AccountSecret::generate();
+    let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
+    let device_id = DeviceId::random();
+    let claim = claim_recovery(
+        &line,
+        &new_device(&fixture, &secret, device_id, signer.clone()),
+    )
+    .unwrap();
+    let approved = alice.approve_recovery(bob_id, &claim.fingerprint).unwrap();
+    assert!(!approved.own_logins);
+    let mut new_bob = finish_recovery(
+        &fixture.profile("new-bob"),
+        new_device(&fixture, &secret, device_id, signer),
+        &line,
+    )
+    .unwrap();
+    alice.sync().unwrap();
+    new_bob.sync().unwrap();
+    let names: Vec<String> = new_bob
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(names, ["Database"]);
+}

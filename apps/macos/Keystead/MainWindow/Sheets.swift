@@ -50,6 +50,8 @@ struct SheetContent: View {
             AddToGroupSheet(model: model, group: group)
         case .renameGroup(let group):
             RenameGroupSheet(model: model, group: group)
+        case .helpRecover(let user):
+            HelpRecoverSheet(model: model, user: user)
         case .exportLogins:
             ExportLoginsSheet(model: model)
         case .renameFolder(let folder):
@@ -756,6 +758,156 @@ private struct ImportSheet: View {
         panel.message = "Choose a Passbolt export, or a KeePass or KeePassXC file (.kdbx)."
         if panel.runModal() == .OK {
             file = panel.url
+        }
+    }
+}
+
+/// The owner helps someone who lost every device and their Recovery Kit: a line to send
+/// them, then the fingerprint their new Mac shows, to approve its new keys.
+private struct HelpRecoverSheet: View {
+    let model: AppModel
+    let user: User
+    @Environment(\.dismiss) private var dismiss
+    /// The line made here; one made earlier isn't shown again.
+    @State private var line: String?
+    @State private var request: PendingRecovery?
+    @State private var loaded = false
+    @State private var fingerprint = ""
+    @State private var busy = false
+    @State private var error: String?
+    @State private var approved: RecoveryApproval?
+
+    private var claimed: Bool { request?.fingerprint != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Help \(user.name) Recover")
+                .font(.title3.weight(.semibold))
+            if let approved {
+                Text("\(approved.name)'s new keys are approved, and their old devices no longer "
+                    + "work. What's shared with them comes back as everyone's Keystead syncs.")
+                    .fixedSize(horizontal: false, vertical: true)
+                if !approved.ownLogins {
+                    Text("Their own logins outside folders don't come back: escrow was off.")
+                        .foregroundStyle(.secondary)
+                }
+            } else if !loaded {
+                ProgressView().controlSize(.small)
+            } else if let request, claimed {
+                Text("\(user.name)'s new Mac is ready. Ask them to read out the fingerprint it "
+                    + "shows, in person or on a call, and type it here. If it doesn't match, "
+                    + "don't approve: someone else may have used the line.")
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField("Their new fingerprint", text: $fingerprint)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .autocorrectionDisabled()
+                Text(request.escrow
+                    ? "Their own logins come back too: they're in escrow."
+                    : "Their own logins outside folders won't come back: escrow is off.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Send \(user.name) a one-time line, privately, for example in a direct "
+                    + "message. On a new Mac they choose Recover an Account, then No Recovery "
+                    + "Kit?, and paste it. It works once, for a week.")
+                    .fixedSize(horizontal: false, vertical: true)
+                if let line {
+                    Text(line)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                    Button("Copy Line") { model.copy(line) }
+                } else if request != nil {
+                    Text("A line was sent earlier. Make a new one if they don't have it; the old "
+                        + "one stops working.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if line != nil || request != nil {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Waiting for \(user.name) to use it…")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                if busy {
+                    ProgressView().controlSize(.small)
+                }
+                if approved == nil && request != nil {
+                    Button("Cancel Recovery", role: .destructive) { run { try await cancel() } }
+                }
+                Spacer()
+                if approved != nil {
+                    Button("Done") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                } else if claimed {
+                    Button("Close") { dismiss() }
+                    Button("Approve") { run { try await approve() } }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(fingerprint.trimmed.isEmpty || busy)
+                } else {
+                    Button("Close") { dismiss() }
+                    Button(line == nil && request == nil ? "Create Line" : "New Line") {
+                        run { try await start() }
+                    }
+                    .keyboardShortcut(line == nil ? .defaultAction : nil)
+                    .disabled(busy)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 500)
+        .task { await watch() }
+    }
+
+    /// Where the recovery stands, asked again every few seconds until their new Mac is ready.
+    private func watch() async {
+        while !Task.isCancelled && approved == nil {
+            do {
+                request = try await model.recoveryRequest(for: user)
+            } catch let failure {
+                error = describe(failure)
+            }
+            loaded = true
+            if claimed { return }
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
+    private func start() async throws {
+        line = try await model.startRecovery(for: user)
+        request = try await model.recoveryRequest(for: user)
+    }
+
+    private func approve() async throws {
+        approved = try await model.approveRecovery(for: user, fingerprint: fingerprint)
+    }
+
+    private func cancel() async throws {
+        try await model.cancelRecovery(for: user.userId)
+        dismiss()
+    }
+
+    private func run(_ action: @escaping () async throws -> Void) {
+        busy = true
+        error = nil
+        Task {
+            do {
+                try await action()
+            } catch let failure {
+                error = describe(failure)
+            }
+            busy = false
         }
     }
 }

@@ -189,6 +189,118 @@ pub struct ApprovalRequest {
     pub approval: Bytes,
 }
 
+/// `POST /v1/users/{user_id}/recovery` (owner): a one-time token for someone who lost
+/// every device and their recovery kit, to send them like an invite.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryStarted {
+    pub token: String,
+}
+
+/// `GET /v1/users/{user_id}/recovery` (owner): a recovery waiting for approval.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryInProgress {
+    /// The new keys, once the person has used the token on their new device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<AccountPublicKeys>,
+    /// Their personal key in escrow, wrapped for the owner, if they turned escrow on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escrow: Option<WrappedKey>,
+}
+
+/// `POST /v1/recovery/claim`: the new device sends its new keys and its device key. It
+/// signs in only once the owner approves them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClaimRecoveryRequest {
+    pub token: String,
+    pub keys: AccountPublicKeys,
+    pub device_id: DeviceId,
+    pub device_key: DevicePublicKey,
+    #[serde(default)]
+    pub device_name: String,
+}
+
+/// Whose account a recovery token is for.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryClaimed {
+    pub user_id: UserId,
+    pub name: String,
+}
+
+/// `POST /v1/recovery/state`: whether the owner has approved yet. A cancelled or expired
+/// recovery answers 404.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryTokenRequest {
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryState {
+    pub approved: bool,
+}
+
+/// `POST /v1/users/{user_id}/recovery/approval` (owner): the owner's signature over the
+/// person's entry with the new keys at the next revision, and their escrowed personal key
+/// wrapped again for the new keys, if there was one.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApproveRecoveryRequest {
+    pub revision: u32,
+    pub approval: Bytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_key: Option<WrappedKey>,
+}
+
+/// `PUT /v1/escrow`: this account's personal key, wrapped for the owner.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EscrowRequest {
+    pub wrapped_key: WrappedKey,
+}
+
+/// `PUT /v1/folders/{folder_id}/members/{user_id}/key`: a folder member gives someone
+/// who recovered a copy of the folder's current key for their new keys.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestoreFolderKeyRequest {
+    pub generation: u32,
+    pub wrapped_key: WrappedKey,
+}
+
+/// `PUT /v1/groups/{group_id}/members/{user_id}/secret`: a group member gives someone who
+/// recovered a copy of the group's current secret for their new keys.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestoreGroupSecretRequest {
+    pub generation: u32,
+    pub wrapped_secret: WrappedKey,
+}
+
+/// Copies someone who recovered is waiting for, that this user can give them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restore {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<FolderMember>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupMember>,
+    /// Logins shared with them directly, to save again with a copy for their new keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<ItemId>,
+}
+
+impl Restore {
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty() && self.groups.is_empty() && self.items.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderMember {
+    pub folder_id: FolderId,
+    pub user_id: UserId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMember {
+    pub group_id: GroupId,
+    pub user_id: UserId,
+}
+
 /// `GET /v1/directory`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Directory {
@@ -512,6 +624,17 @@ pub struct SyncPage {
     /// with them wait for it, and aren't in `rekey_needed` until then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_rekey_needed: Vec<GroupId>,
+    /// Copies this user can give people who recovered with the owner's help (0.13.0 and
+    /// later).
+    #[serde(default, skip_serializing_if = "Restore::is_empty")]
+    pub restore: Restore,
+    /// After this user recovered with the owner's help: their earlier personal key,
+    /// wrapped for their current keys, if it was in escrow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_key: Option<WrappedKey>,
+    /// This user has escrow on, but no personal key is in escrow (after a recovery).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub escrow_needed: bool,
 }
 
 /// A user's role in each folder they're in and on each login shared with them directly,

@@ -55,6 +55,15 @@ account back on a new Mac with a Recovery Kit.
   into (new ones are yours alone until shared), what's already here and left out, and
   imports only once you confirm. One-time codes come along; extra fields go into notes.
   Nothing decrypted is written to disk.
+- **Recovering with the owner's help:** someone who lost every device and their Recovery
+  Kit gets back in with new keys. The owner chooses Help Recover… on their page and sends
+  the line it shows; on a new Mac they choose Recover an Account › No Recovery Kit?, paste
+  it, and read the new fingerprint to the owner, who approves it. Their old devices stop
+  working, and what's shared with them comes back as everyone's Keystead syncs. Under
+  People › You, "Let the owner recover my own logins" (escrow) brings their own logins
+  back too, at the cost of the owner being able to open them. A device they still have
+  warns them and can cancel a recovery they didn't ask for. Needs a 0.13.0 server, and
+  every app updated first.
 - **Exporting:** File › Export Logins… saves every login you can open to a KeePass file
   (.kdbx), encrypted with a passphrase you choose, after Touch ID. Folders become groups
   and one-time codes come along; KeePassXC and KeePass open it, and Import reads it back.
