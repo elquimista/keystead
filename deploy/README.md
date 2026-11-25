@@ -247,6 +247,12 @@ gets a new look, is about half the size, syncs on its own every few minutes, and
 keyboard shortcuts for the selected login. From this release on, each release's page has
 the Mac app to download.
 
+**Updating to 0.13.2.** The server is the same as 0.13.1; updating it is optional. The Mac
+app now says when a newer release is out, with a link to its page: once a day it asks
+`api.github.com` for this repository's latest release, sending only its version. People can
+turn that off in Settings › Updates. Copies from 0.13.1 and earlier don't check, so tell
+your team about this one.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
