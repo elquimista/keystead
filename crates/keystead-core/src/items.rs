@@ -337,10 +337,10 @@ impl EncryptedItem {
                         return Ok(key);
                     }
                 }
-                if let Some(person) = self.keys.people.iter().find(|person| person.user_id == me) {
-                    if let Ok(key) = account.unwrap_item_key(&person.wrapped_key, self.id) {
-                        return Ok(key);
-                    }
+                if let Some(person) = self.keys.people.iter().find(|person| person.user_id == me)
+                    && let Ok(key) = account.unwrap_item_key(&person.wrapped_key, self.id)
+                {
+                    return Ok(key);
                 }
                 self.keys
                     .groups

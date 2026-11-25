@@ -96,6 +96,20 @@ keystead edit "AWS root"             # new password; or --rename, --username, --
 keystead rm Bank                     # delete for everyone who can open it (asks first)
 ```
 
+To move from Passbolt, export from it in the KDBX format (with a passphrase), then import
+the file; a KeePass or KeePassXC file works the same way. Passbolt folders become folders
+(nested ones named like "Engineering / Databases"), one-time codes come along, and extra
+fields go into the notes. It shows what it would do and asks first; logins already here
+are left out, so importing twice adds nothing:
+
+```sh
+keystead import passbolt-export.kdbx                          # asks for the export's passphrase
+keystead import passbolt-export.kdbx --unfiled-folder Imported   # logins in no folder go here
+```
+
+New folders are yours alone until shared. Passbolt's sharing doesn't come with the export:
+share the folders with your groups afterwards.
+
 A deleted login can be brought back for 30 days (needs a 0.9.0 server):
 
 ```sh

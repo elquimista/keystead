@@ -1305,3 +1305,134 @@ fn deleting_a_group_takes_away_what_only_it_gave() {
             .all(|row| row.shared_with_groups.is_empty())
     );
 }
+
+#[test]
+fn an_export_from_passbolt_or_keepass_imports_into_folders() {
+    use keepass::{Database, DatabaseKey};
+    use keystead_client::read_kdbx;
+
+    // A Passbolt-style export: a login at the top, Production with a code as KeePassXC
+    // stores it, and Production / Databases with one as KeePass stores it.
+    let mut database = Database::new();
+    {
+        let mut root = database.root_mut();
+        {
+            let mut wiki = root.add_entry();
+            wiki.set_unprotected("Title", "Wiki");
+            wiki.set_unprotected("UserName", "alice");
+            wiki.set_protected("Password", "wiki-pw");
+            wiki.set_unprotected("URL", "https://wiki.example.com");
+            wiki.tags = vec!["docs".into()];
+        }
+        root.add_entry(); // empty: left out
+        let mut production = root.add_group();
+        production.name = "Production".into();
+        {
+            let mut aws = production.add_entry();
+            aws.set_unprotected("Title", "AWS root");
+            aws.set_unprotected("UserName", "root");
+            aws.set_protected("Password", "aws-pw");
+            aws.set_unprotected("Notes", "Break glass only");
+            aws.set_protected(
+                "otp",
+                "otpauth://totp/AWS:root?secret=JBSWY3DPEHPK3PXP&issuer=AWS",
+            );
+            aws.set_unprotected("Account ID", "1234");
+        }
+        let mut databases = production.add_group();
+        databases.name = "Databases".into();
+        let mut postgres = databases.add_entry();
+        postgres.set_unprotected("Title", "Postgres");
+        postgres.set_protected("Password", "pg-pw");
+        postgres.set_protected("TimeOtp-Secret-Base32", "JBSWY3DPEHPK3PXP");
+        postgres.set_unprotected("TimeOtp-Period", "30");
+        postgres.set_unprotected("TimeOtp-Length", "8");
+        postgres.set_unprotected("TimeOtp-Algorithm", "HMAC-SHA-256");
+    }
+    let mut file = Vec::new();
+    database
+        .save(&mut file, DatabaseKey::new().with_password("export-pass"))
+        .unwrap();
+
+    let error = read_kdbx(&file, "wrong").err().unwrap();
+    assert!(format!("{error:#}").contains("passphrase"), "{error:#}");
+    let logins = read_kdbx(&file, "export-pass").unwrap();
+    assert_eq!(logins.len(), 3);
+    let aws = logins
+        .iter()
+        .find(|login| login.overview.name == "AWS root")
+        .unwrap();
+    assert_eq!(aws.folder.as_deref(), Some("Production"));
+    assert_eq!(aws.details.notes, "Break glass only\nAccount ID: 1234");
+    assert!(aws.details.otp.starts_with("otpauth://totp/AWS:root"));
+    let postgres = logins
+        .iter()
+        .find(|login| login.overview.name == "Postgres")
+        .unwrap();
+    assert_eq!(postgres.folder.as_deref(), Some("Production / Databases"));
+    assert!(postgres.details.otp.contains("digits=8") && postgres.details.otp.contains("SHA256"));
+    assert!(
+        postgres.details.notes.is_empty(),
+        "the code's fields aren't notes"
+    );
+
+    // Alice already has Production and her Wiki login: Production is reused, the Wiki
+    // login left out, and Production / Databases is new.
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    alice.create_folder("Production").unwrap();
+    let (overview, details) = login("Wiki", "old");
+    let mut overview = overview;
+    overview.username = "alice".into();
+    alice.add(None, overview, details).unwrap();
+    let plan = alice.plan_import(&logins, None).unwrap();
+    let folders: Vec<(&str, bool, usize)> = plan
+        .folders
+        .iter()
+        .map(|folder| (folder.name.as_str(), folder.new, folder.logins))
+        .collect();
+    assert_eq!(
+        folders,
+        [
+            ("Production", false, 1),
+            ("Production / Databases", true, 1)
+        ]
+    );
+    assert_eq!((plan.own, plan.duplicates, plan.one_time_codes), (0, 1, 2));
+
+    let summary = alice.import(&logins, None).unwrap();
+    assert_eq!(
+        (summary.added, summary.folders_created, summary.duplicates),
+        (2, 1, 1)
+    );
+    let rows = alice.list().unwrap();
+    let postgres = rows.iter().find(|row| row.name == "Postgres").unwrap();
+    assert_eq!(postgres.folder.as_deref(), Some("Production / Databases"));
+    assert!(postgres.has_one_time_code);
+    assert_eq!(
+        alice
+            .one_time_code(postgres.id)
+            .unwrap()
+            .unwrap()
+            .code
+            .len(),
+        8
+    );
+    // Importing again adds nothing.
+    assert_eq!(alice.import(&logins, None).unwrap().added, 0);
+
+    // Bob only views Production: its login is left out for him; the rest goes elsewhere.
+    alice
+        .share_folder("Production", bob.whoami().user_id, Role::View)
+        .unwrap();
+    bob.sync().unwrap();
+    let plan = bob.plan_import(&logins, Some("Imported")).unwrap();
+    assert_eq!(plan.view_only, [("Production".to_owned(), 1)]);
+    assert!(
+        plan.folders
+            .iter()
+            .any(|folder| folder.name == "Imported" && folder.new)
+    );
+}

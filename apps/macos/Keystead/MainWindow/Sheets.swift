@@ -30,6 +30,8 @@ struct SheetContent: View {
             RemoveUserSheet(model: model, user: user)
         case .addDevice:
             AddDeviceSheet(model: model)
+        case .importLogins:
+            ImportSheet(model: model)
         case .invite:
             InviteSheet(model: model)
         case .approve(let user):
@@ -604,6 +606,148 @@ private struct AddDeviceSheet: View {
             return
         } catch {
             loadError = describe(error)
+        }
+    }
+}
+
+/// Imports logins from a Passbolt export, or a KeePass or KeePassXC file: choose the file,
+/// open it with its passphrase, look at what would happen, then import.
+private struct ImportSheet: View {
+    let model: AppModel
+    @State private var file: URL?
+    @State private var passphrase = ""
+    @State private var export: LoginExport?
+    @State private var preview: ImportPreview?
+    /// Where logins in no folder go: nowhere (they stay yours), or this folder.
+    @State private var intoFolder = false
+    @State private var unfiledFolder = "Imported"
+    @State private var result: ImportResult?
+
+    private var unfiled: String? { intoFolder && !unfiledFolder.trimmed.isEmpty ? unfiledFolder.trimmed : nil }
+
+    var body: some View {
+        SheetScaffold(
+            title: "Import Logins",
+            actionTitle: result != nil ? "Done" : preview != nil ? "Import \(toImport) Logins" : "Open",
+            canAct: result != nil || (preview != nil && toImport > 0)
+                || (preview == nil && file != nil && !passphrase.isEmpty),
+            showsCancel: result == nil
+        ) {
+            if result != nil { return true }
+            if let export {
+                result = try await model.runImport(export, unfiled: unfiled)
+                passphrase = ""
+                return false
+            }
+            guard let file else { return false }
+            let data = try Data(contentsOf: file)
+            let export = try await model.readExport(data, passphrase: passphrase)
+            preview = try await model.planImport(export, unfiled: unfiled)
+            self.export = export
+            return false
+        } content: {
+            if let result {
+                Text("Imported \(result.added) \(result.added == 1 ? "login" : "logins")"
+                    + (result.foldersCreated > 0 ? " into \(result.foldersCreated) new folders." : "."))
+                Text("New folders are yours alone until you share them, for example with a group.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let preview {
+                Text("\(file?.lastPathComponent ?? "The file") has these logins:")
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(preview.folders, id: \.name) { folder in
+                        HStack {
+                            Label(folder.name, systemImage: "folder")
+                            if folder.new {
+                                Text("new")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text("\(folder.logins)")
+                                .monospacedDigit()
+                        }
+                    }
+                    if preview.own > 0 {
+                        HStack {
+                            Label("In no folder", systemImage: "person")
+                            Spacer()
+                            Text("\(preview.own)")
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .padding(10)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                if preview.own > 0 || intoFolder {
+                    Toggle("Put logins in no folder into a folder named", isOn: $intoFolder)
+                    if intoFolder {
+                        TextField("Folder", text: $unfiledFolder)
+                    }
+                }
+                ForEach(notes(preview), id: \.self) { note in
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text("In Passbolt, choose Export and the KDBX format (KeePass or KeePassXC both "
+                    + "work), then choose the file here. A KeePass or KeePassXC file works too. "
+                    + "Nothing is saved until you've seen what would be imported.")
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Text(file?.lastPathComponent ?? "No file chosen")
+                        .foregroundStyle(file == nil ? .secondary : .primary)
+                    Spacer()
+                    Button("Choose File…") { chooseFile() }
+                }
+                SecureField("Passphrase", text: $passphrase, prompt: Text("The passphrase it was exported with"))
+            }
+        }
+        .frame(width: 500)
+        .onChange(of: intoFolder) { Task { await replan() } }
+        .onChange(of: unfiledFolder) { Task { await replan() } }
+        #if DEBUG
+        .task {
+            if model.isDemo {
+                file = URL(fileURLWithPath: "/passbolt-export.kdbx")
+                preview = AppModel.demoImportPreview
+            }
+        }
+        #endif
+    }
+
+    private var toImport: UInt32 {
+        guard let preview else { return 0 }
+        return preview.folders.reduce(preview.own) { $0 + $1.logins }
+    }
+
+    private func notes(_ preview: ImportPreview) -> [String] {
+        var notes: [String] = []
+        if preview.duplicates > 0 {
+            notes.append("\(preview.duplicates) already here (same folder, name and username) are left out.")
+        }
+        for folder in preview.viewOnly {
+            notes.append("\(folder.logins) in \u{201C}\(folder.name)\u{201D} are left out: you can only view it.")
+        }
+        if preview.oneTimeCodes > 0 {
+            notes.append("\(preview.oneTimeCodes) come with one-time codes.")
+        }
+        return notes
+    }
+
+    private func replan() async {
+        guard let export, result == nil else { return }
+        preview = try? await model.planImport(export, unfiled: unfiled)
+    }
+
+    private func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "kdbx") ?? .data]
+        panel.message = "Choose a Passbolt export, or a KeePass or KeePassXC file (.kdbx)."
+        if panel.runModal() == .OK {
+            file = panel.url
         }
     }
 }

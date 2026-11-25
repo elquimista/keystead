@@ -10,7 +10,10 @@ pub use keystead_client::{
     DeletedRow, DeviceRow, EditOutcome, GroupRow, GroupShareRow, HistoryRow, InviteInfo, ItemRow,
     MemberRow, SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
 };
-use keystead_client::{DeviceSetupLine, JoiningDevice, NewAccount, Vault};
+use keystead_client::{
+    DeviceSetupLine, ImportPlan, ImportSummary, ImportedLogin, JoiningDevice, NewAccount, Vault,
+    read_kdbx,
+};
 pub use keystead_core::api::Role;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
 use keystead_core::items::{Details, Overview};
@@ -443,6 +446,31 @@ pub fn update(
         details.otp = otp;
     }
     vault.update(item_id, &overview, &details)
+}
+
+/// Reads the logins in an export file (.kdbx) with its passphrase. Nothing is saved.
+pub fn read_export(file: &Path, passphrase: &str) -> Result<Vec<ImportedLogin>> {
+    let bytes = std::fs::read(file)
+        .map_err(|error| anyhow::anyhow!("couldn't read {}: {error}", file.display()))?;
+    read_kdbx(&bytes, passphrase)
+}
+
+/// What importing would do.
+pub fn plan_import(
+    home: &Path,
+    logins: &[ImportedLogin],
+    unfiled: Option<&str>,
+) -> Result<ImportPlan> {
+    open(home)?.plan_import(logins, unfiled)
+}
+
+/// Imports the logins, creating the folders they need.
+pub fn import(
+    home: &Path,
+    logins: &[ImportedLogin],
+    unfiled: Option<&str>,
+) -> Result<ImportSummary> {
+    open(home)?.import(logins, unfiled)
 }
 
 /// Logins deleted in the last 30 days that this account can bring back, newest first.

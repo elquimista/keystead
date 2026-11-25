@@ -37,6 +37,11 @@ account back on a new Mac with a Recovery Kit.
   10): who saved each, when, and what it changed. Each one's password can be shown or
   copied, and Bring Back… saves it as a new version. Editors and managers only; needs a
   0.7.0 server.
+- **Importing:** File › Import from Passbolt or KeePass… reads a Passbolt export (KDBX,
+  with its passphrase), or a KeePass or KeePassXC file, shows which folders the logins go
+  into (new ones are yours alone until shared), what's already here and left out, and
+  imports only once you confirm. One-time codes come along; extra fields go into notes.
+  Nothing decrypted is written to disk.
 - **Recently Deleted:** a deleted login stays in Recently Deleted (in the sidebar) for 30
   days, for everyone who could edit it, with who deleted it and when. Bring Back returns it
   to everyone who had it; Delete Now… deletes it for good. Needs a 0.9.0 server.

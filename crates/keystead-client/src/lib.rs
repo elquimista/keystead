@@ -10,10 +10,14 @@ pub mod http;
 pub mod profile;
 mod vault;
 
+pub mod import;
+
+pub use import::{ImportedLogin, read_kdbx};
 pub use vault::{
     DeletedRow, DeviceRow, DeviceSetupLine, EditOutcome, GroupMemberRow, GroupRow, GroupShareRow,
-    HistoryRow, InviteInfo, ItemRow, JoiningDevice, MemberRow, NewAccount, SyncSummary,
-    ToChangeRow, UserRow, Vault, Whoami, generate_password, join, recover, setup,
+    HistoryRow, ImportFolder, ImportPlan, ImportSummary, InviteInfo, ItemRow, JoiningDevice,
+    MemberRow, NewAccount, SyncSummary, ToChangeRow, UserRow, Vault, Whoami, generate_password,
+    join, recover, setup,
 };
 
 use keystead_core::encoding::Bytes;

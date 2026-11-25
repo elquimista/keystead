@@ -209,6 +209,18 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Import logins from a Passbolt export, or a KeePass or KeePassXC file (.kdbx). Shows
+    /// what it would do first
+    Import {
+        file: std::path::PathBuf,
+        /// Put logins that aren't in a folder into this folder, instead of keeping them as
+        /// your own
+        #[arg(long, value_name = "FOLDER")]
+        unfiled_folder: Option<String>,
+        /// Import without asking
+        #[arg(long)]
+        yes: bool,
+    },
     /// List logins deleted in the last 30 days that you can bring back
     Deleted,
     /// Bring back a login deleted in the last 30 days
@@ -974,6 +986,69 @@ fn run(cli: Cli) -> Result<()> {
                     println!("Not deleted: {author} saved version {version} first.");
                     println!("Your copy now has their version; check it, then run rm again.");
                 }
+            }
+        }
+        Command::Import {
+            file,
+            unfiled_folder,
+            yes,
+        } => {
+            let passphrase = if std::io::stdin().is_terminal() {
+                rpassword::prompt_password(format!(
+                    "The passphrase {} was exported with (hidden): ",
+                    file.display()
+                ))?
+            } else {
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                line.trim_end_matches(['\r', '\n']).to_owned()
+            };
+            let logins = commands::read_export(&file, &passphrase)?;
+            let plan = commands::plan_import(&home, &logins, unfiled_folder.as_deref())?;
+            println!("{} has {} login(s):", file.display(), logins.len());
+            for folder in &plan.folders {
+                let new = if folder.new {
+                    " (new folder, yours alone)"
+                } else {
+                    ""
+                };
+                println!("  {}: {}{new}", folder.name, folder.logins);
+            }
+            if plan.own > 0 {
+                println!("  Your own, in no folder: {}", plan.own);
+            }
+            if plan.duplicates > 0 {
+                println!("  Already here, left out: {}", plan.duplicates);
+            }
+            for (folder, count) in &plan.view_only {
+                println!("  {folder}: {count} left out, as you can only view it");
+            }
+            if plan.one_time_codes > 0 {
+                println!("  With one-time codes: {}", plan.one_time_codes);
+            }
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    println!("Nothing imported yet; add --yes to import.");
+                    return Ok(());
+                }
+                print!("Import them? [y/N] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("Not imported.");
+                    return Ok(());
+                }
+            }
+            let summary = commands::import(&home, &logins, unfiled_folder.as_deref())?;
+            println!(
+                "Imported {} login(s), into {} new folder(s).",
+                summary.added, summary.folders_created
+            );
+            if summary.folders_created > 0 {
+                println!(
+                    "New folders are yours alone until shared: keystead folder share NAME --group GROUP"
+                );
             }
         }
         Command::Deleted => {

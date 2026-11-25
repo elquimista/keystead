@@ -58,6 +58,8 @@ final class AppModel {
         case recoveryKit(afterSetup: Bool)
         case signOut
         case newGroup
+        /// Importing logins from a Passbolt export, or a KeePass or KeePassXC file.
+        case importLogins
         case addToGroup(GroupSummary)
         case renameGroup(GroupSummary)
 
@@ -80,6 +82,7 @@ final class AppModel {
             case .recoveryKit: "recovery-kit"
             case .signOut: "sign-out"
             case .newGroup: "new-group"
+            case .importLogins: "import-logins"
             case .addToGroup(let group): "add-to-group-\(group.id)"
             case .renameGroup(let group): "rename-group-\(group.id)"
             }
@@ -98,6 +101,22 @@ final class AppModel {
     /// Passwords to change: who lost access to which logins you can change, most recent
     /// first.
     private(set) var toChange: [ToChange] = []
+    /// Reads an export file (.kdbx) with its passphrase, off the main thread.
+    func readExport(_ file: Data, passphrase: String) async throws -> LoginExport {
+        try await Task.detached { try LoginExport.read(file: file, passphrase: passphrase) }.value
+    }
+
+    /// What importing would do; logins in no folder go into `unfiled`, or stay yours.
+    func planImport(_ export: LoginExport, unfiled: String?) async throws -> ImportPreview {
+        try await perform { try $0.planImport(export: export, unfiledFolder: unfiled) }
+    }
+
+    func runImport(_ export: LoginExport, unfiled: String?) async throws -> ImportResult {
+        let result = try await perform { try $0.import(export: export, unfiledFolder: unfiled) }
+        await refresh()
+        return result
+    }
+
     /// Logins deleted in the last 30 days that you can bring back, newest first.
     private(set) var recentlyDeleted: [DeletedLogin] = []
     /// The server keeps deleted logins for 30 days (0.9.0 and later).
@@ -1092,6 +1111,17 @@ extension AppModel {
                     role: .view, isMine: false)])
         }
     }
+
+    /// What importing a Passbolt export would do, for the demo.
+    static let demoImportPreview = ImportPreview(
+        folders: [
+            ImportFolderSummary(name: "Production", new: false, logins: 31),
+            ImportFolderSummary(name: "Production / Databases", new: true, logins: 12),
+            ImportFolderSummary(name: "Marketing", new: true, logins: 8),
+        ],
+        own: 5, duplicates: 2,
+        viewOnly: [ImportFolderSummary(name: "Staging", new: false, logins: 4)],
+        oneTimeCodes: 9)
 
     /// AWS root's history.
     static let demoHistory = [

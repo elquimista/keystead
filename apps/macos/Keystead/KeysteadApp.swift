@@ -107,6 +107,9 @@ private struct AppCommands: Commands {
             Button("New Folder…") { model.sheet = .newFolder }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(model.phase != .unlocked)
+            Divider()
+            Button("Import from Passbolt or KeePass…") { model.sheet = .importLogins }
+                .disabled(model.phase != .unlocked)
         }
         CommandGroup(before: .sidebar) {
             Button("All Logins") { model.section = .allLogins }

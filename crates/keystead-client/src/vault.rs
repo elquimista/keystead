@@ -1,7 +1,7 @@
 //! An unlocked vault: the profile plus the account keys, able to sign in and act.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -34,6 +34,7 @@ use rand::rngs::OsRng;
 
 use crate::DeviceSigner;
 use crate::http::{Client, Failure};
+use crate::import::ImportedLogin;
 use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile};
 
 /// What an older server answers for something it doesn't have yet: 404 on the whole route.
@@ -296,6 +297,47 @@ pub struct DeletedRow {
     /// When it was deleted, and until when it can be brought back, in seconds since 1970.
     pub deleted_at: i64,
     pub kept_until: i64,
+}
+
+/// What an import would do.
+#[derive(Debug, Default)]
+pub struct ImportPlan {
+    /// The folders logins go into, by name, with whether they're new.
+    pub folders: Vec<ImportFolder>,
+    /// Logins that stay your own: those without a folder, unless they go into one.
+    pub own: usize,
+    /// Logins already here (same folder, name and username), left out.
+    pub duplicates: usize,
+    /// Folders you can only view, so their logins are left out, with how many.
+    pub view_only: Vec<(String, usize)>,
+    /// Logins that bring a one-time code.
+    pub one_time_codes: usize,
+}
+
+#[derive(Debug)]
+pub struct ImportFolder {
+    pub name: String,
+    /// It doesn't exist yet and will be created, for you only.
+    pub new: bool,
+    pub logins: usize,
+}
+
+/// What an import did.
+#[derive(Debug, Default)]
+pub struct ImportSummary {
+    pub added: usize,
+    pub folders_created: usize,
+    pub duplicates: usize,
+    /// Logins for folders you can only view.
+    pub left_out: usize,
+}
+
+/// Where one imported login goes.
+enum Destination {
+    Own,
+    Folder(FolderId),
+    NewFolder(String),
+    LeftOut,
 }
 
 /// One version of a login in its history.
@@ -1991,13 +2033,28 @@ impl Vault {
         self.check_server_takes_items()?;
         let details = self.with_one_time_code(details)?;
         self.sync()?;
+        let folder_id = folder
+            .map(|folder| self.profile.find_folder(&self.keys, &self.groups, folder))
+            .transpose()?;
+        let id = self.put_new(folder_id, &overview, &details)?;
+        self.save()?;
+        Ok(id)
+    }
+
+    /// Saves a new login in a folder, or as this account's own; the caller saves the
+    /// profile.
+    fn put_new(
+        &mut self,
+        folder_id: Option<FolderId>,
+        overview: &Overview,
+        details: &Details,
+    ) -> Result<ItemId> {
         let me = self.profile.user_id;
         let id = ItemId::random();
         let key = ItemKey::generate();
         let mut keys = ItemKeys::default();
-        let at = match folder {
-            Some(folder) => {
-                let folder_id = self.profile.find_folder(&self.keys, &self.groups, folder)?;
+        let at = match folder_id {
+            Some(folder_id) => {
                 let folder_key = self
                     .profile
                     .folder_key(&self.keys, &self.groups, folder_id)?;
@@ -2023,7 +2080,7 @@ impl Vault {
         };
         let request = PutItemRequest {
             base_version: None,
-            item: EncryptedItem::seal(at, &key, keys, &self.keys, &overview, &details)?,
+            item: EncryptedItem::seal(at, &key, keys, &self.keys, overview, details)?,
             roles: Vec::new(),
             group_roles: Vec::new(),
             password_changed: false,
@@ -2031,8 +2088,161 @@ impl Vault {
         let path = format!("/v1/items/{id}");
         let saved: EncryptedItem = self.call(|client| client.put(&path, &request))??;
         self.profile.items.insert(saved.id, saved);
-        self.save()?;
         Ok(id)
+    }
+
+    /// What importing these logins would do, after a sync: which folders they go into
+    /// (existing ones you can edit, or new ones), how many stay your own, and what's left
+    /// out. Logins without a folder go into `unfiled` if given, or stay your own.
+    pub fn plan_import(
+        &mut self,
+        logins: &[ImportedLogin],
+        unfiled: Option<&str>,
+    ) -> Result<ImportPlan> {
+        self.sync()?;
+        Ok(self.plan(logins, unfiled)?.0)
+    }
+
+    /// Imports these logins as [`plan_import`](Self::plan_import) says: creates the new
+    /// folders and adds every login that isn't left out. Folders are created only for you;
+    /// share them afterwards.
+    pub fn import(
+        &mut self,
+        logins: &[ImportedLogin],
+        unfiled: Option<&str>,
+    ) -> Result<ImportSummary> {
+        self.check_server_takes_items()?;
+        if logins.iter().any(|login| !login.details.otp.is_empty()) {
+            let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+            if health.item_format < 4 {
+                bail!(NEEDS_0_6);
+            }
+        }
+        self.sync()?;
+        let (plan, destinations) = self.plan(logins, unfiled)?;
+        let mut summary = ImportSummary {
+            duplicates: plan.duplicates,
+            left_out: plan.view_only.iter().map(|(_, count)| count).sum(),
+            ..ImportSummary::default()
+        };
+        let mut folder_ids: HashMap<String, FolderId> = HashMap::new();
+        for (login, destination) in logins.iter().zip(destinations) {
+            let folder_id = match destination {
+                Destination::LeftOut => continue,
+                Destination::Own => None,
+                Destination::Folder(folder_id) => Some(folder_id),
+                Destination::NewFolder(name) => Some(match folder_ids.get(&name) {
+                    Some(&folder_id) => folder_id,
+                    None => {
+                        let folder_id = self.create_folder(&name)?;
+                        summary.folders_created += 1;
+                        folder_ids.insert(name, folder_id);
+                        folder_id
+                    }
+                }),
+            };
+            let mut overview = login.overview.clone();
+            if overview.name.trim().is_empty() {
+                overview.name = "Untitled".to_owned();
+            }
+            self.put_new(folder_id, &overview, &login.details)?;
+            summary.added += 1;
+        }
+        self.save()?;
+        Ok(summary)
+    }
+
+    /// Where each login goes, and the plan that adds up to.
+    fn plan(
+        &self,
+        logins: &[ImportedLogin],
+        unfiled: Option<&str>,
+    ) -> Result<(ImportPlan, Vec<Destination>)> {
+        let me = self.profile.user_id;
+        // Existing folders by name: one you can edit if there's such a one, else any.
+        let mut folders: HashMap<String, (FolderId, Role)> = HashMap::new();
+        for &folder_id in self.profile.folders.keys() {
+            let name = self
+                .profile
+                .folder_name(&self.keys, &self.groups, folder_id)?;
+            let role = self.profile.folder_role(folder_id);
+            let better = folders.get(&name).is_none_or(|&(_, known)| role > known);
+            if better {
+                folders.insert(name, (folder_id, role));
+            }
+        }
+        // What's already here, to leave out: by folder (or your own), name and username.
+        let mut existing: HashSet<(Option<FolderId>, String, String)> = HashSet::new();
+        for item in self.openable_items() {
+            let mine = item.folder_id.is_none() && item.owner == Some(me);
+            if item.folder_id.is_none() && !mine {
+                continue;
+            }
+            let overview = item.open_overview(&self.item_key(item)?)?;
+            existing.insert((item.folder_id, overview.name, overview.username));
+        }
+
+        let mut plan = ImportPlan::default();
+        let mut counts: Vec<(String, bool, usize)> = Vec::new();
+        let mut view_only: Vec<(String, usize)> = Vec::new();
+        let mut destinations = Vec::with_capacity(logins.len());
+        for login in logins {
+            let folder = login.folder.as_deref().or(unfiled);
+            let destination = match folder {
+                None => Destination::Own,
+                Some(name) => match folders.get(name) {
+                    Some(&(_, Role::View)) => Destination::LeftOut,
+                    Some(&(folder_id, _)) => Destination::Folder(folder_id),
+                    None => Destination::NewFolder(name.to_owned()),
+                },
+            };
+            let place = match destination {
+                Destination::Folder(folder_id) => Some(Some(folder_id)),
+                Destination::Own => Some(None),
+                _ => None,
+            };
+            let duplicate = place.is_some_and(|folder_id| {
+                existing.contains(&(
+                    folder_id,
+                    login.overview.name.clone(),
+                    login.overview.username.clone(),
+                ))
+            });
+            let destination = if duplicate {
+                plan.duplicates += 1;
+                Destination::LeftOut
+            } else {
+                destination
+            };
+            match (&destination, folder) {
+                (Destination::LeftOut, Some(name)) if !duplicate => {
+                    match view_only.iter_mut().find(|(known, _)| known == name) {
+                        Some((_, count)) => *count += 1,
+                        None => view_only.push((name.to_owned(), 1)),
+                    }
+                }
+                (Destination::Own, _) => plan.own += 1,
+                (Destination::Folder(_) | Destination::NewFolder(_), Some(name)) => {
+                    let new = matches!(destination, Destination::NewFolder(_));
+                    match counts.iter_mut().find(|(known, _, _)| known == name) {
+                        Some((_, _, count)) => *count += 1,
+                        None => counts.push((name.to_owned(), new, 1)),
+                    }
+                }
+                _ => {}
+            }
+            if !matches!(destination, Destination::LeftOut) && !login.details.otp.is_empty() {
+                plan.one_time_codes += 1;
+            }
+            destinations.push(destination);
+        }
+        counts.sort();
+        plan.folders = counts
+            .into_iter()
+            .map(|(name, new, logins)| ImportFolder { name, new, logins })
+            .collect();
+        plan.view_only = view_only;
+        Ok((plan, destinations))
     }
 
     /// Saves new contents for a login (name, username, website, tags, password and notes)

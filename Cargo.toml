@@ -5,7 +5,7 @@ members = ["crates/*", "prototypes/change-feed", "prototypes/unlock-search"]
 [workspace.package]
 version = "0.10.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
@@ -20,6 +20,7 @@ clap = { version = "4.5", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hkdf = "0.12"
 hpke = "0.12"
+keepass = "0.17"
 p256 = { version = "0.13", features = ["ecdsa"] }
 rand = "0.8"
 rpassword = "7"

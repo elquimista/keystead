@@ -319,6 +319,66 @@ pub struct HistoryEntry {
     pub changes: Vec<String>,
 }
 
+/// A folder an import puts logins into, or leaves out.
+#[derive(uniffi::Record)]
+pub struct ImportFolderSummary {
+    pub name: String,
+    /// It doesn't exist yet and will be created, for you only.
+    pub new: bool,
+    pub logins: u32,
+}
+
+/// What an import would do.
+#[derive(uniffi::Record)]
+pub struct ImportPreview {
+    pub folders: Vec<ImportFolderSummary>,
+    /// Logins that stay your own, in no folder.
+    pub own: u32,
+    /// Logins already here, left out.
+    pub duplicates: u32,
+    /// Folders you can only view, whose logins are left out.
+    pub view_only: Vec<ImportFolderSummary>,
+    pub one_time_codes: u32,
+}
+
+/// What an import did.
+#[derive(uniffi::Record)]
+pub struct ImportResult {
+    pub added: u32,
+    pub folders_created: u32,
+    pub duplicates: u32,
+    pub left_out: u32,
+}
+
+/// Logins read from an export file (a Passbolt export, or a KeePass or KeePassXC file),
+/// held in memory until imported; nothing is saved by reading.
+#[derive(uniffi::Object)]
+pub struct LoginExport {
+    logins: Vec<keystead_client::ImportedLogin>,
+}
+
+#[uniffi::export]
+impl LoginExport {
+    /// Reads a .kdbx file with the passphrase it was exported with.
+    #[uniffi::constructor]
+    pub fn read(file: Vec<u8>, passphrase: String) -> Result<Arc<Self>, CoreError> {
+        let logins = keystead_client::read_kdbx(&file, &passphrase).map_err(|error| {
+            CoreError::InvalidInput {
+                message: format!("{error:#}"),
+            }
+        })?;
+        Ok(Arc::new(Self { logins }))
+    }
+
+    pub fn count(&self) -> u32 {
+        count(self.logins.len())
+    }
+}
+
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 /// A login's current one-time code.
 #[derive(uniffi::Record)]
 pub struct OneTimeCode {
@@ -705,6 +765,58 @@ impl Vault {
             .vault()?
             .restore(item_id_from(&item_id)?, version)?
             .into())
+    }
+
+    /// What importing an export would do. Logins in no folder go into `unfiled_folder`, or
+    /// stay your own.
+    pub fn plan_import(
+        &self,
+        export: Arc<LoginExport>,
+        unfiled_folder: Option<String>,
+    ) -> Result<ImportPreview, CoreError> {
+        let plan = self
+            .vault()?
+            .plan_import(&export.logins, unfiled_folder.as_deref())?;
+        Ok(ImportPreview {
+            folders: plan
+                .folders
+                .into_iter()
+                .map(|folder| ImportFolderSummary {
+                    name: folder.name,
+                    new: folder.new,
+                    logins: count(folder.logins),
+                })
+                .collect(),
+            own: count(plan.own),
+            duplicates: count(plan.duplicates),
+            view_only: plan
+                .view_only
+                .into_iter()
+                .map(|(name, logins)| ImportFolderSummary {
+                    name,
+                    new: false,
+                    logins: count(logins),
+                })
+                .collect(),
+            one_time_codes: count(plan.one_time_codes),
+        })
+    }
+
+    /// Imports an export, creating the folders it needs (for you only).
+    pub fn import(
+        &self,
+        export: Arc<LoginExport>,
+        unfiled_folder: Option<String>,
+    ) -> Result<ImportResult, CoreError> {
+        let summary = self
+            .vault()?
+            .import(&export.logins, unfiled_folder.as_deref())?;
+        Ok(ImportResult {
+            added: count(summary.added),
+            folders_created: count(summary.folders_created),
+            duplicates: count(summary.duplicates),
+            left_out: count(summary.left_out),
+        })
     }
 
     /// Logins deleted in the last 30 days that you can bring back, newest first, fetched
