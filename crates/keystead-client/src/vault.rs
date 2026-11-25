@@ -78,6 +78,41 @@ const PAGE_SIZE: i64 = 500;
 /// Sign in again this long before the server's session would expire.
 const SESSION_MARGIN: Duration = Duration::from_secs(60);
 
+/// When to renew a session, and when it can't be used any more.
+#[derive(Clone, Copy, Debug)]
+struct SessionTimes {
+    renew_after: Instant,
+    valid_until: Instant,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SessionStep {
+    Use,
+    Renew,
+    SignIn,
+}
+
+impl SessionTimes {
+    /// For a session the server gave for `seconds`, asked for at `asked`.
+    fn new(asked: Instant, seconds: u64) -> Self {
+        let lifetime = Duration::from_secs(seconds);
+        Self {
+            renew_after: asked + lifetime / 2,
+            valid_until: asked + lifetime.saturating_sub(SESSION_MARGIN),
+        }
+    }
+
+    fn step(&self, now: Instant) -> SessionStep {
+        if now >= self.valid_until {
+            SessionStep::SignIn
+        } else if now >= self.renew_after {
+            SessionStep::Renew
+        } else {
+            SessionStep::Use
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Whoami {
     pub name: String,
@@ -729,7 +764,9 @@ pub struct Vault {
     keys: AccountKeys,
     signer: Arc<dyn DeviceSigner>,
     client: Option<Client>,
-    session_valid_until: Option<Instant>,
+    session: Option<SessionTimes>,
+    /// Whether the server renews sessions; servers from before that answer 404.
+    server_renews: bool,
     /// The server stores this build's item format; checked before the first save.
     server_takes_items: bool,
     /// The keys of the groups this account is in, from the profile.
@@ -758,7 +795,8 @@ impl Vault {
             keys,
             signer,
             client: None,
-            session_valid_until: None,
+            session: None,
+            server_renews: true,
             server_takes_items: false,
             history: HashMap::new(),
             adding_device: None,
@@ -782,7 +820,8 @@ impl Vault {
             keys,
             signer,
             client: None,
-            session_valid_until: None,
+            session: None,
+            server_renews: true,
             server_takes_items: false,
             history: HashMap::new(),
             adding_device: None,
@@ -1035,6 +1074,7 @@ impl Vault {
             _ => {}
         }
         self.client = None;
+        self.session = None;
         Ok(not_told)
     }
 
@@ -3184,17 +3224,21 @@ impl Vault {
     }
 
     /// Runs a request, signing in first when there's no valid session and once more if
-    /// the server has forgotten it (for example after a restart). The outer error is a
-    /// sign-in failure; the inner one is the request's own.
+    /// the server has forgotten it (for example after a restart). A session half over is
+    /// renewed first, so the device key, which may need Touch ID, is used as little as
+    /// possible. The outer error is a sign-in failure; the inner one is the request's own.
     fn call<T>(
         &mut self,
         request: impl Fn(&Client) -> Result<T, Failure>,
     ) -> Result<Result<T, Failure>> {
-        let session_expired = self
-            .session_valid_until
-            .is_none_or(|until| Instant::now() >= until);
-        if self.client.is_none() || session_expired {
-            self.sign_in()?;
+        let step = match (&self.client, self.session) {
+            (Some(_), Some(session)) => session.step(Instant::now()),
+            _ => SessionStep::SignIn,
+        };
+        match step {
+            SessionStep::Use => {}
+            SessionStep::Renew => self.renew(),
+            SessionStep::SignIn => self.sign_in()?,
         }
         let result = request(self.client.as_ref().expect("signed in above"));
         if let Err(Failure::Status { code: 401, .. }) = result {
@@ -3206,12 +3250,28 @@ impl Vault {
 
     fn sign_in(&mut self) -> Result<()> {
         let mut client = Client::new(&self.profile.server);
+        let asked = Instant::now();
         let session = client.sign_in(self.profile.device_id, self.signer.as_ref())?;
-        let lifetime =
-            Duration::from_secs(session.expires_in_seconds).saturating_sub(SESSION_MARGIN);
-        self.session_valid_until = Some(Instant::now() + lifetime);
+        self.session = Some(SessionTimes::new(asked, session.expires_in_seconds));
         self.client = Some(client);
         Ok(())
+    }
+
+    /// Swaps a session half over for a fresh one, without the device key. If that fails,
+    /// the session still works until it ends, and the next request tries again; a server
+    /// too old to renew (404) isn't asked again, and its sessions are signed in afresh.
+    fn renew(&mut self) {
+        let Some(client) = self.client.as_mut().filter(|_| self.server_renews) else {
+            return;
+        };
+        let asked = Instant::now();
+        match client.renew() {
+            Ok(session) => {
+                self.session = Some(SessionTimes::new(asked, session.expires_in_seconds));
+            }
+            Err(Failure::Status { code: 404, .. }) => self.server_renews = false,
+            Err(_) => {}
+        }
     }
 
     fn save(&self) -> Result<()> {
@@ -3289,6 +3349,21 @@ fn normalize(fingerprint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_is_renewed_halfway_and_signed_in_again_near_its_end() {
+        let asked = Instant::now();
+        let session = SessionTimes::new(asked, 15 * 60);
+        let at = |seconds| session.step(asked + Duration::from_secs(seconds));
+        assert_eq!(at(0), SessionStep::Use);
+        assert_eq!(at(449), SessionStep::Use);
+        assert_eq!(at(450), SessionStep::Renew);
+        assert_eq!(at(839), SessionStep::Renew);
+        assert_eq!(at(840), SessionStep::SignIn);
+        // Shorter than the margin: signed in afresh each time, never used stale.
+        let short = SessionTimes::new(asked, 30);
+        assert_eq!(short.step(asked), SessionStep::SignIn);
+    }
 
     #[test]
     fn invites_survive_the_trip_through_a_message() {

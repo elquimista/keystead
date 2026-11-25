@@ -2123,3 +2123,54 @@ async fn groups_share_folders_and_logins_and_lose_access_when_someone_leaves() {
     assert_eq!(info.members, [alice.user_id, carol.user_id]);
     assert!(!info.needs_rekey);
 }
+
+#[tokio::test]
+async fn a_session_renews_without_the_device_key() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+
+    // A fresh session for the same person and device, asked for with the current one.
+    let (status, body) = alice
+        .call(&server, Method::POST, "/v1/sign-in/renew", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let renewed: Session = decode(body);
+    assert_ne!(renewed.token, alice.token);
+    assert_eq!(renewed.user_id, alice.user_id);
+    assert_eq!(renewed.expires_in_seconds, 15 * 60);
+    let (status, body) = server
+        .call(Method::GET, "/v1/devices", Some(&renewed.token), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(decode::<DeviceList>(body).devices.len(), 1);
+    // The old session still ends when it would have.
+    let (status, _) = devices(&server, &alice).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Only a session renews.
+    let (status, _) = server
+        .call(Method::POST, "/v1/sign-in/renew", None, None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = server
+        .call(
+            Method::POST,
+            "/v1/sign-in/renew",
+            Some("not-a-session"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Signing out ends every session of the device, renewed or not.
+    let (status, _) = server
+        .call(Method::POST, "/v1/sign-out", Some(&renewed.token), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    for token in [&alice.token, &renewed.token] {
+        let (status, _) = server
+            .call(Method::POST, "/v1/sign-in/renew", Some(token), None)
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+}

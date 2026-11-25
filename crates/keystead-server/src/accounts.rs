@@ -188,7 +188,30 @@ pub(crate) async fn sign_in(
         request.signature.as_slice(),
     )
     .map_err(|_| ApiError::Unauthorized)?;
+    Ok(Json(
+        start_session(&state, user_id, request.device_id).await?,
+    ))
+}
 
+/// `POST /v1/sign-in/renew`: a fresh session for the device making the request, without
+/// its key. A Mac's key needs Touch ID or the Mac's password for every use, so renewing
+/// this way lets it ask only when it unlocks. The current session still ends when it
+/// would have; signing out or removing the device ends both.
+pub(crate) async fn renew(
+    State(state): State<AppState>,
+    auth: Auth,
+    _body: axum::body::Bytes,
+) -> Result<Json<Session>, ApiError> {
+    Ok(Json(
+        start_session(&state, auth.user_id, auth.device_id).await?,
+    ))
+}
+
+async fn start_session(
+    state: &AppState,
+    user_id: UserId,
+    device_id: DeviceId,
+) -> Result<Session, ApiError> {
     let mut token = [0u8; 32];
     OsRng.fill_bytes(&mut token);
     {
@@ -199,14 +222,14 @@ pub(crate) async fn sign_in(
             hash(&token),
             SessionInfo {
                 user_id,
-                device_id: request.device_id,
+                device_id,
                 expires: now + SESSION_LIFETIME,
             },
         );
     }
     // A device removed meanwhile (removing someone, or approving their recovery) has its
     // sessions cleared after its row is gone; a session made after that clearing ends here.
-    if device_key(&state, request.device_id).await?.is_none() {
+    if device_key(state, device_id).await?.is_none() {
         state
             .sessions
             .lock()
@@ -214,11 +237,11 @@ pub(crate) async fn sign_in(
             .remove(&hash(&token));
         return Err(ApiError::Unauthorized);
     }
-    Ok(Json(Session {
+    Ok(Session {
         token: URL_SAFE_NO_PAD.encode(token),
         user_id,
         expires_in_seconds: SESSION_LIFETIME.as_secs(),
-    }))
+    })
 }
 
 /// `POST /v1/invites` (owner only).

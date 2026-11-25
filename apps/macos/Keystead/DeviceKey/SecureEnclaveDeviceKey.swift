@@ -89,7 +89,9 @@ final class SecureEnclaveSigner: DeviceSigner, @unchecked Sendable {
 
 enum DeviceAuthentication {
     /// Asks for Touch ID, or the Mac password as a fallback, and returns the
-    /// authenticated context. One approval covers every use of both keys.
+    /// authenticated context. Its approval covers using both keys right after, but not for
+    /// as long as Keystead stays unlocked: macOS asks again for a use minutes later, which
+    /// is why sessions are renewed without the key.
     @MainActor
     static func authenticate(reason: String) async throws -> LAContext {
         let context = LAContext()
@@ -103,6 +105,10 @@ enum DeviceAuthentication {
                 }
             }
         }
+        // macOS may ask again before a later use of a key: signing in afresh when the
+        // server has forgotten the session, as after a restart, or when it's too old to
+        // renew one. Say why instead of "needs to authenticate to continue".
+        context.localizedReason = "sign in to your team's server again"
         return context
     }
 }

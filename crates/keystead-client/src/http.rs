@@ -71,6 +71,14 @@ impl Client {
         Ok(session)
     }
 
+    /// Swaps the session for a fresh one, without the device key. Servers from before
+    /// renewing existed answer 404.
+    pub fn renew(&mut self) -> Result<Session, Failure> {
+        let session: Session = self.post_empty("/v1/sign-in/renew")?;
+        self.token = Some(session.token.clone());
+        Ok(session)
+    }
+
     pub fn get<T: DeserializeOwned>(
         &self,
         path: &str,

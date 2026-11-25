@@ -126,7 +126,14 @@ A device registers a public key with one of these schemes:
 
 To sign in, the device asks for a random challenge and signs
 `transcript("keystead/sign-in/v1", device id, challenge)`. The server answers with a
-short-lived bearer token.
+short-lived bearer token (15 minutes).
+
+Before a session ends, the device can swap it for a fresh one without its key
+(`POST /v1/sign-in/renew`). A Mac's key needs Touch ID or the Mac's password for every
+use, so renewing lets it ask only when it unlocks. Clients renew once half the session
+has passed, and sign in again only when it has ended or the server has forgotten it
+(after a restart). The old session still ends when it would have. Older servers answer
+404, and the device signs in each time instead.
 
 An account can have several devices. Each has an optional name, like "Ana's MacBook Pro",
 and the time it was added. A signed-in device can list the account's devices and remove the
@@ -512,6 +519,7 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/setup` | `SetupRequest` | `Enrolled` | Whoever runs the server, with the code it printed |
 | `POST /v1/sign-in/challenge` | `ChallengeRequest` | `Challenge` | Any device |
 | `POST /v1/sign-in` | `SignInRequest` | `Session` | Any device |
+| `POST /v1/sign-in/renew` | | `Session` | A signed-in device |
 | `POST /v1/invites` | `InviteRequest` | `Invite` | Owner |
 | `POST /v1/invites/accept` | `AcceptInviteRequest` | `Enrolled` | Invitee, with the token |
 | `POST /v1/recover/challenge` | `RecoveryChallengeRequest` | `RecoveryChallenge` | A device with the account secret |

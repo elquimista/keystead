@@ -308,6 +308,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/setup", post(accounts::setup))
         .route("/v1/sign-in/challenge", post(accounts::challenge))
         .route("/v1/sign-in", post(accounts::sign_in))
+        .route("/v1/sign-in/renew", post(accounts::renew))
         .route("/v1/invites", post(accounts::create_invite))
         .route("/v1/invites/accept", post(accounts::accept_invite))
         .route("/v1/recover/challenge", post(accounts::recovery_challenge))

@@ -2497,3 +2497,53 @@ fn password_health_lists_weak_reused_and_old_passwords_you_can_change() {
         )]
     );
 }
+
+/// Counts what a device key signs: a Mac's asks for Touch ID each time.
+struct CountingSigner {
+    key: SoftwareDeviceKey,
+    signed: AtomicU32,
+}
+
+impl DeviceSigner for CountingSigner {
+    fn public_key(&self) -> DevicePublicKey {
+        self.key.public()
+    }
+
+    fn sign(&self, message: &[u8]) -> anyhow::Result<Bytes> {
+        self.signed.fetch_add(1, Ordering::Relaxed);
+        Ok(self.key.sign(message))
+    }
+}
+
+#[test]
+fn a_session_renews_without_the_device_key() {
+    let fixture = Fixture::start();
+    let signer = Arc::new(CountingSigner {
+        key: SoftwareDeviceKey::generate(),
+        signed: AtomicU32::new(0),
+    });
+    let alice = setup(
+        &fixture.profile("alice"),
+        NewAccount {
+            server: &fixture.url,
+            secret: &AccountSecret::generate(),
+            device_id: DeviceId::random(),
+            device_name: "Test device",
+            signer: signer.clone(),
+        },
+        &fixture.setup_code,
+        "Alice",
+    )
+    .unwrap();
+    let mut client = Client::new(&fixture.url);
+    let first = client
+        .sign_in(alice.profile().device_id, signer.as_ref())
+        .unwrap();
+    let signed = signer.signed.load(Ordering::Relaxed);
+
+    let renewed = client.renew().unwrap();
+    assert_ne!(renewed.token, first.token);
+    let devices: keystead_core::api::DeviceList = client.get("/v1/devices", &[]).unwrap();
+    assert_eq!(devices.devices.len(), 1);
+    assert_eq!(signer.signed.load(Ordering::Relaxed), signed);
+}
