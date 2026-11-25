@@ -170,10 +170,13 @@ open ~/Library/Containers/io.github.elquimista.Keystead.dev/Data/tmp/snapshots
 ```
 
 With the team of three, that includes each sheet, the welcome and lock screens (`w…`),
-each Settings tab (`s-settings-…`) and the menu bar panel (`p…`, drawn in a window of its
-own). Add `-NSRequiresAquaSystemAppearance YES` for light mode. Without `-demo`, on a Mac
-where Keystead Dev isn't set up yet, `-welcome join|setup|add|recover|recover-help` opens
-the welcome screen on that page.
+each Settings tab (`s-settings-…`) and the menu bar panel (`p…`, opened from its menu bar
+icon). The report also records, frame by frame, how the Settings window, the panel and
+the sheets that load something change height, to check they glide rather than jump.
+`-windowsOnly` runs just that part and Settings, and `-slowDemo` makes the demo's loads
+as slow as a distant server's. Add `-NSRequiresAquaSystemAppearance YES` for light mode.
+Without `-demo`, on a Mac where Keystead Dev isn't set up yet,
+`-welcome join|setup|add|recover|recover-help` opens the welcome screen on that page.
 
 To see how the window copes with a big team, `-demo big` has 5,000 logins, and `-measure`
 prints how long the list's search and quick search take per keystroke and how much memory

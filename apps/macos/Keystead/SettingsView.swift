@@ -78,12 +78,15 @@ struct SettingsView: View {
                 .tag(Tab.account)
         }
         .sheet(item: $sheet) { sheet in
-            switch sheet {
-            case .recoveryKit:
-                RecoveryKitSheet(model: model, afterSetup: false)
-            case .signOut:
-                SignOutSheet(model: model) { self.sheet = .recoveryKit }
+            Group {
+                switch sheet {
+                case .recoveryKit:
+                    RecoveryKitSheet(model: model, afterSetup: false)
+                case .signOut:
+                    SignOutSheet(model: model) { self.sheet = .recoveryKit }
+                }
             }
+            .windowFollowsHeight()
         }
         .onChange(of: shortcut) {
             shortcutTaken = QuickSearch.shared?.applyShortcut() == false
@@ -98,13 +101,13 @@ struct SettingsView: View {
 }
 
 extension View {
-    /// A Settings tab: a grouped form as tall as what's in it, so the window fits each tab
-    /// as System Settings' panes do.
+    /// A Settings tab: a grouped form as tall as what's in it, with the window gliding to
+    /// fit each tab as AppKit's preference windows do.
     fileprivate func settingsTab() -> some View {
         formStyle(.grouped)
             .scrollDisabled(true)
             .frame(width: 500)
-            .fixedSize(horizontal: false, vertical: true)
+            .windowFollowsHeight()
     }
 }
 

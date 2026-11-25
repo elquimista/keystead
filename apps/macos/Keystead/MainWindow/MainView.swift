@@ -28,6 +28,8 @@ struct MainView: View {
         .frame(minWidth: 760, minHeight: 480)
         .sheet(item: $model.sheet) { sheet in
             SheetContent(sheet: sheet, model: model)
+                // Each sheet glides to its new height as it loads or moves to its next step.
+                .windowFollowsHeight()
         }
     }
 }

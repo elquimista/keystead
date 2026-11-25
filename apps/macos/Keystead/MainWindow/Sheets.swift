@@ -124,12 +124,7 @@ private struct LineRow: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            Text(line)
-                .font(.system(.callout, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
+            CommandText(text: line)
             Button {
                 copy()
                 copied = true
@@ -144,6 +139,67 @@ private struct LineRow: View {
             guard copied else { return }
             try? await Task.sleep(for: .seconds(2))
             if !Task.isCancelled { copied = false }
+        }
+    }
+}
+
+/// A command line to send someone, monospaced and selectable, that wraps only at its
+/// spaces: SwiftUI's text would also break inside a token, after a hyphen or a slash.
+/// What's selected and copied is the line exactly as it is.
+private struct CommandText: NSViewRepresentable {
+    let text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSTextView {
+        // TextKit 1, for the layout manager's say in where lines break.
+        let view = NSTextView(usingTextLayoutManager: false)
+        view.isEditable = false
+        view.isSelectable = true
+        view.drawsBackground = false
+        view.isVerticallyResizable = false
+        view.isHorizontallyResizable = false
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.textContainer?.widthTracksTextView = false
+        view.layoutManager?.delegate = context.coordinator
+        view.setAccessibilityLabel(text)
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ view: NSTextView, context: Context) {
+        if view.string != text { update(view) }
+    }
+
+    private func update(_ view: NSTextView) {
+        let size = NSFont.preferredFont(forTextStyle: .callout).pointSize
+        view.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: size, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+        ]))
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView view: NSTextView, context: Context) -> CGSize? {
+        guard let container = view.textContainer, let layout = view.layoutManager else { return nil }
+        let width = proposal.width ?? 400
+        container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        layout.ensureLayout(for: container)
+        return CGSize(width: width, height: ceil(layout.usedRect(for: container).height))
+    }
+
+    final class Coordinator: NSObject, NSLayoutManagerDelegate {
+        /// Lines break only after a space. A token longer than a whole line still breaks
+        /// by character, as the layout manager falls back to.
+        func layoutManager(
+            _ layoutManager: NSLayoutManager, shouldBreakLineByWordBeforeCharacterAt index: Int
+        ) -> Bool {
+            guard index > 0, let string = layoutManager.textStorage?.string as NSString?,
+                index <= string.length
+            else { return true }
+            return string.character(at: index - 1) == 0x20
         }
     }
 }
@@ -212,6 +268,7 @@ private struct WaitingRow: View {
 /// What every sheet shares: a title, the content, an error line and the buttons. `action`
 /// runs when the main button is pressed and returns whether the sheet should close.
 private struct SheetScaffold<Content: View>: View {
+    var width: CGFloat = 460
     let title: String
     let actionTitle: String
     var canAct = true
@@ -251,7 +308,7 @@ private struct SheetScaffold<Content: View>: View {
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: width)
     }
 
     private func run() async {
@@ -571,7 +628,8 @@ private struct HistorySheet: View {
 
     var body: some View {
         SheetScaffold(
-            title: "History of \u{201C}\(item.name)\u{201D}", actionTitle: "Done", showsCancel: false
+            width: 560, title: "History of \u{201C}\(item.name)\u{201D}", actionTitle: "Done",
+            showsCancel: false
         ) {
             true
         } content: {
@@ -610,7 +668,6 @@ private struct HistorySheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(width: 560)
         .task { await load() }
         .confirmationDialog(
             "Bring back version \(restoring?.version ?? 0)?",
@@ -743,7 +800,7 @@ private struct AddDeviceSheet: View {
 
     var body: some View {
         SheetScaffold(
-            title: "Add a Device", actionTitle: "Send",
+            width: 520, title: "Add a Device", actionTitle: "Send",
             canAct: newDevice != nil && !code.trimmed.isEmpty
         ) {
             let name = try await model.sendAccount(toNewDevice: code)
@@ -787,7 +844,6 @@ private struct AddDeviceSheet: View {
                     .frame(maxWidth: .infinity, minHeight: 120)
             }
         }
-        .frame(width: 520)
         .task { await run() }
         .onDisappear {
             if !sent { Task { await model.cancelAddingDevice() } }
@@ -827,7 +883,7 @@ private struct ImportSheet: View {
 
     var body: some View {
         SheetScaffold(
-            title: "Import Logins",
+            width: 500, title: "Import Logins",
             actionTitle: result != nil ? "Done" : preview != nil ? "Import \(toImport) Logins" : "Open",
             canAct: result != nil || (preview != nil && toImport > 0)
                 || (preview == nil && file != nil && !passphrase.isEmpty),
@@ -905,7 +961,6 @@ private struct ImportSheet: View {
                 .sheetForm()
             }
         }
-        .frame(width: 500)
         .onChange(of: intoFolder) { Task { await replan() } }
         .onChange(of: unfiledFolder) { Task { await replan() } }
         #if DEBUG
@@ -1176,7 +1231,7 @@ private struct ExportLoginsSheet: View {
 
     var body: some View {
         SheetScaffold(
-            title: "Export Logins", actionTitle: result == nil ? "Export…" : "Done",
+            width: 500, title: "Export Logins", actionTitle: result == nil ? "Export…" : "Done",
             canAct: result != nil || (long && matches),
             showsCancel: result == nil
         ) {
@@ -1224,7 +1279,6 @@ private struct ExportLoginsSheet: View {
                 }
             }
         }
-        .frame(width: 500)
     }
 
     private func chooseFile() -> URL? {
@@ -1274,7 +1328,6 @@ private struct MoveLoginSheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(width: 460)
     }
 
     private var consequence: String {

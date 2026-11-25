@@ -157,6 +157,10 @@ enum DebugSnapshots {
             ]
         }
         steps.append(("8-back-to-all-logins", { model.section = .allLogins }))
+        // With `-windowsOnly`, just Settings and the menu bar panel, for quick checks.
+        if CommandLine.arguments.contains("-windowsOnly") {
+            steps = []
+        }
 
         try? await Task.sleep(for: .seconds(2))
         for (name, setUp) in steps {
@@ -179,6 +183,7 @@ enum DebugSnapshots {
         if model.users.count > 1 {
             report += await captureSettings(to: directory)
             report += await capturePanel(model, to: directory)
+            report += await probeSheets(model, to: directory)
         }
         if model.users.count > 1, let kit = try? await model.recoveryKit() {
             // The printed page, as the print panel would get it.
@@ -221,29 +226,154 @@ enum DebugSnapshots {
             report += "settings-\(tab.rawValue): window \(Int(window.frame.width))x\(Int(window.frame.height))\n"
             save(window, to: directory.appending(path: "s-settings-\(tab.rawValue).png"))
         }
+        if let window = settingsWindow() {
+            report += "settings window: \(type(of: window)), controller "
+                + "\(window.contentViewController.map { String(describing: type(of: $0)) } ?? "none"), "
+                + "resizable \(window.styleMask.contains(.resizable)), "
+                + "content min \(window.contentMinSize), max \(window.contentMaxSize)\n"
+            // Tall to short and back, clicked as a person would.
+            report += await probeResize(window, clicking: "General")
+            report += await probeResize(window, clicking: "Account")
+        }
         settingsWindow()?.close()
         UserDefaults.standard.set(earlier, forKey: SettingsView.tabKey)
         return report
     }
 
-    /// The menu bar panel, in a window of its own: unlocked, then locked.
+    /// Opens sheets that load something after appearing, and records each one's height
+    /// every few milliseconds for 1.5 seconds from when it's attached: heights between the
+    /// first and last mean it grew smoothly; a single step means it jumped. Add
+    /// `-slowDemo` to see them load as from a slow server.
+    @MainActor
+    private static func probeSheets(_ model: AppModel, to directory: URL) async -> String {
+        model.section = .allLogins
+        let sheets: [(String, AppModel.Sheet?)] = [
+            ("share", .shareLogin(model.items[0])),
+            ("folder access", .manageFolder("Production")),
+            ("history", .history(model.items[0])),
+            ("add device", .addDevice),
+            ("import", .importLogins),
+            ("help recover", model.users.first { !$0.isOwner && $0.approved }.map { .helpRecover($0) }),
+        ]
+        var report = ""
+        for (name, sheet) in sheets {
+            guard let sheet, let window = mainWindow() else { continue }
+            model.sheet = sheet
+            let start = ContinuousClock.now
+            var attached: NSWindow?
+            while attached == nil && ContinuousClock.now - start < .seconds(2) {
+                attached = window.attachedSheet
+                try? await Task.sleep(for: .milliseconds(2))
+            }
+            guard let attached else {
+                report += "sheet \(name): never attached\n"
+                continue
+            }
+            var heights: [Int] = []
+            var tops: Set<Int> = []
+            var topsInOrder: [Int] = []
+            let shown = ContinuousClock.now
+            while ContinuousClock.now - shown < .milliseconds(1500) {
+                let height = Int(attached.frame.height)
+                if heights.last != height { heights.append(height) }
+                tops.insert(Int(attached.frame.maxY))
+                if topsInOrder.last != Int(attached.frame.maxY) { topsInOrder.append(Int(attached.frame.maxY)) }
+                try? await Task.sleep(for: .milliseconds(4))
+            }
+            report += "sheet \(name): heights \(heights.map(String.init).joined(separator: " → ")), "
+                + "top edge \(tops.count == 1 ? "fixed" : "moved \(topsInOrder.map(String.init).joined(separator: " → "))"), "
+                + "resizable \(attached.styleMask.contains(.resizable))\n"
+            save(attached, to: directory.appending(path: "q-\(name.replacingOccurrences(of: " ", with: "-")).png"))
+            model.sheet = nil
+            try? await Task.sleep(for: .seconds(0.6))
+        }
+        return report
+    }
+
+    /// Clicks a Settings tab's toolbar item and records the window's height every few
+    /// milliseconds for 0.6 seconds: heights between the first and last mean it animated.
+    @MainActor
+    private static func probeResize(_ window: NSWindow, clicking label: String) async -> String {
+        guard let item = window.toolbar?.items.first(where: { $0.label == label }),
+            let action = item.action
+        else { return "settings resize to \(label): no toolbar item\n" }
+        let start = ContinuousClock.now
+        NSApp.sendAction(action, to: item.target, from: item)
+        let clickTook = ContinuousClock.now - start
+        var heights: [Int] = []
+        var tops: Set<Int> = []
+        while ContinuousClock.now - start < .milliseconds(600) {
+            let height = Int(window.frame.height)
+            if heights.last != height { heights.append(height) }
+            tops.insert(Int(window.frame.maxY))
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        let after = "top edge \(tops.count == 1 ? "fixed" : "moved \(tops.sorted())"), "
+            + "resizable \(window.styleMask.contains(.resizable))"
+        let milliseconds = clickTook.components.seconds * 1000
+            + clickTook.components.attoseconds / 1_000_000_000_000_000
+        return "settings resize to \(label): click took \(milliseconds) ms, "
+            + "heights \(heights.map(String.init).joined(separator: " → ")), \(after)\n"
+    }
+
+    /// The menu bar panel, opened by clicking the status item: unlocked, then locked, and
+    /// how its height follows a search that leaves one login of four.
     @MainActor
     private static func capturePanel(_ model: AppModel, to directory: URL) async -> String {
-        let host = NSHostingController(rootView: PanelView(model: model).background(.background))
-        host.sizingOptions = [.preferredContentSize]
-        let window = NSWindow(contentViewController: host)
-        window.styleMask = [.borderless]
-        window.center()
-        window.orderFrontRegardless()
-        var report = ""
+        func find<View: NSView>(_ type: View.Type, in view: NSView?) -> View? {
+            guard let view else { return nil }
+            if let match = view as? View { return match }
+            for subview in view.subviews {
+                if let match = find(type, in: subview) { return match }
+            }
+            return nil
+        }
+        let before = Set(NSApp.windows.filter(\.isVisible).map(ObjectIdentifier.init))
+        guard let button = NSApp.windows.lazy.compactMap({ find(NSStatusBarButton.self, in: $0.contentView) }).first
+        else { return "panel: no status item\n" }
+        button.performClick(nil)
+        var opened: NSWindow?
+        let clicked = ContinuousClock.now
+        while opened == nil && ContinuousClock.now - clicked < .seconds(3) {
+            try? await Task.sleep(for: .milliseconds(50))
+            opened = NSApp.windows.first {
+                $0.isVisible && !before.contains(ObjectIdentifier($0)) && !($0 is QuickSearchPanel)
+            }
+        }
+        try? await Task.sleep(for: .seconds(0.5))
+        guard let panel = opened else {
+            let windows = NSApp.windows.map {
+                "\(type(of: $0)) visible \($0.isVisible) \(Int($0.frame.width))x\(Int($0.frame.height))"
+            }
+            return "panel: didn't open; windows: \(windows.joined(separator: "; "))\n"
+        }
+        var report = "panel: \(type(of: panel))\n"
         for (name, phase) in [("p1-panel", AppModel.Phase.unlocked), ("p2-panel-locked", .locked)] {
             model.showDemoPhase(phase)
             try? await Task.sleep(for: .seconds(1))
-            report += "\(name): window \(Int(window.frame.width))x\(Int(window.frame.height))\n"
-            save(window, to: directory.appending(path: "\(name).png"))
+            report += "\(name): window \(Int(panel.frame.width))x\(Int(panel.frame.height))\n"
+            save(panel, to: directory.appending(path: "\(name).png"))
         }
         model.showDemoPhase(.unlocked)
-        window.close()
+        try? await Task.sleep(for: .seconds(1))
+        report += "p3-panel-unlocked-again: window \(Int(panel.frame.width))x\(Int(panel.frame.height)), "
+            + "visible \(panel.isVisible)\n"
+        save(panel, to: directory.appending(path: "p3-panel-unlocked-again.png"))
+        for search in ["aws", ""] {
+            let start = ContinuousClock.now
+            model.search = search
+            var heights: [Int] = []
+            var tops: Set<Int> = []
+            while ContinuousClock.now - start < .milliseconds(600) {
+                let height = Int(panel.frame.height)
+                if heights.last != height { heights.append(height) }
+                tops.insert(Int(panel.frame.maxY))
+                try? await Task.sleep(for: .milliseconds(4))
+            }
+            report += "panel search \"\(search)\": heights \(heights.map(String.init).joined(separator: " → ")), "
+                + "top edge \(tops.count == 1 ? "fixed" : "moved")\n"
+        }
+        panel.orderOut(nil)
         return report
     }
 

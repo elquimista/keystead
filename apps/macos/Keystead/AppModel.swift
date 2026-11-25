@@ -666,7 +666,10 @@ final class AppModel {
     /// Someone's recovery waiting for approval, fetched fresh (owner only).
     func recoveryRequest(for user: User) async throws -> PendingRecovery? {
         #if DEBUG
-        if isDemo { return PendingRecovery(claimed: true, escrow: true) }
+        if isDemo {
+            await demoLatency()
+            return PendingRecovery(claimed: true, escrow: true)
+        }
         #endif
         let id = user.userId
         return try await perform { try $0.recoveryRequest(userId: id) }
@@ -1059,7 +1062,10 @@ final class AppModel {
     /// A login's history, newest first, fetched fresh (editors and managers).
     func history(of item: ItemSummary) async throws -> [HistoryEntry] {
         #if DEBUG
-        if isDemo { return Self.demoHistory }
+        if isDemo {
+            await demoLatency()
+            return Self.demoHistory
+        }
         #endif
         let id = item.id
         return try await perform { try $0.history(itemId: id) }
@@ -1223,7 +1229,10 @@ final class AppModel {
     /// Everyone in a folder and the groups it's shared with, with their roles.
     func sharing(of folder: String) async throws -> Sharing {
         #if DEBUG
-        if isDemo { return Self.demoSharing(folder) }
+        if isDemo {
+            await demoLatency()
+            return Self.demoSharing(folder)
+        }
         #endif
         return try await perform { try $0.folderSharing(folder: folder) }
     }
@@ -1259,7 +1268,10 @@ final class AppModel {
     /// it's shared with.
     func sharing(of item: ItemSummary) async throws -> Sharing {
         #if DEBUG
-        if isDemo { return Self.demoSharing(item) }
+        if isDemo {
+            await demoLatency()
+            return Self.demoSharing(item)
+        }
         #endif
         let id = item.id
         return try await perform { try $0.loginSharing(itemId: id) }
@@ -1412,6 +1424,7 @@ final class AppModel {
     func startAddingDevice() async throws -> String {
         #if DEBUG
         if isDemo {
+            await demoLatency()
             return "keystead add-device https://keys.example.com Qh5bMqdKvaJzJWde-ibpjJIar5ey9rAXIAhPOK1F4NA "
                 + "--owner ab12-cd34-ef56-7890-abcd"
         }
@@ -1422,7 +1435,10 @@ final class AppModel {
     /// The new device's name, once it has joined with the setup line.
     func newDevice() async throws -> String? {
         #if DEBUG
-        if isDemo { return "Olivia's MacBook Air" }
+        if isDemo {
+            await demoLatency()
+            return "Olivia's MacBook Air"
+        }
         #endif
         return try await perform { try $0.newDevice() }
     }
@@ -1548,6 +1564,14 @@ extension AppModel {
         User(
             userId: id, name: name, approved: approved, isOwner: owner, removed: removed,
             escrow: escrow, recovering: false, keysReplaced: false)
+    }
+
+    /// With `-slowDemo`, demo loads take as long as a slow server's, to see sheets as
+    /// they load and then grow.
+    func demoLatency() async {
+        if CommandLine.arguments.contains("-slowDemo") {
+            try? await Task.sleep(for: .milliseconds(700))
+        }
     }
 
     static func demo(alone: Bool, big: Bool = false) -> AppModel {

@@ -46,6 +46,8 @@ struct PanelView: View {
                 .padding(.vertical, 6)
         }
         .frame(width: 360)
+        // The panel glides to its new height as a search narrows the list.
+        .windowFollowsHeight()
     }
 
     private var header: some View {
