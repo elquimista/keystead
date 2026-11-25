@@ -256,10 +256,12 @@ pub struct ApproveRecoveryRequest {
     pub personal_key: Option<WrappedKey>,
 }
 
-/// `PUT /v1/escrow`: this account's personal key, wrapped for the owner.
+/// `PUT /v1/escrow`: this account's personal key, wrapped for the owner, and its
+/// agreement, signed with its keys (see `directory::escrow_consent`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EscrowRequest {
     pub wrapped_key: WrappedKey,
+    pub consent: Bytes,
 }
 
 /// `PUT /v1/folders/{folder_id}/members/{user_id}/key`: a folder member gives someone
@@ -662,7 +664,8 @@ pub struct SyncPage {
     /// wrapped for their current keys, if it was in escrow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovered_key: Option<WrappedKey>,
-    /// This user has escrow on, but no personal key is in escrow (after a recovery).
+    /// This user has escrow on, but no personal key for their current keys is in escrow
+    /// (after a recovery).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub escrow_needed: bool,
     /// This user has escrow on, and these folders only they can open have no copy of

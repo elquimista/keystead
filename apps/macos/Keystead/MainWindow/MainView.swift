@@ -65,6 +65,9 @@ struct WelcomeView: View {
                 } else if let claim = model.recoveryClaim {
                     waitingForOwner(claim: claim)
                         .frame(width: 480)
+                } else if model.recoveryNeedsFinishing {
+                    finishRecovering
+                        .frame(width: 480)
                 } else {
                     Picker("", selection: $choice) {
                         Text("Join a team").tag(Choice.join)
@@ -320,6 +323,29 @@ struct WelcomeView: View {
         })
     }
 
+    /// The owner approved this Mac's new keys, but finishing didn't work out the first time.
+    private var finishRecovering: some View {
+        VStack(spacing: 14) {
+            Text("The owner approved your new keys. Finish with Touch ID to sign in on this Mac.")
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("If you start over, the owner has to send you a new line.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Start Over") { model.forgetApprovedRecovery() }
+                Button("Finish Recovering") {
+                    Task { await model.finishRecoveringWithHelp() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .controlSize(.large)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+    }
+
     /// The new fingerprint to read to the owner, while this Mac waits for their approval.
     private func waitingForOwner(claim: RecoveryClaimInfo) -> some View {
         VStack(spacing: 14) {
@@ -337,7 +363,8 @@ struct WelcomeView: View {
             HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Waiting for the owner…")
+                Text(model.recoveryUnreachable
+                    ? "Can't reach the server; still trying…" : "Waiting for the owner…")
                     .foregroundStyle(.secondary)
             }
             Button("Cancel") { model.cancelRecoveringWithHelp() }

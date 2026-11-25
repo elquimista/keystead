@@ -1263,6 +1263,21 @@ private struct Notices: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            // On every page, not just yours under People: the owner could approve within
+            // minutes.
+            if model.identity?.recovering == true {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("The owner started a recovery of your account. If you didn't ask for "
+                        + "one, cancel it: someone may be trying to get new keys for it.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Cancel Recovery", role: .destructive) {
+                        Task { await model.cancelOwnRecovery() }
+                    }
+                }
+                .notice()
+            }
             if let message = model.message {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")

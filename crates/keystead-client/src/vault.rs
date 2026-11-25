@@ -42,8 +42,8 @@ mod recovery;
 
 use recovery::RecoveryDuties;
 pub use recovery::{
-    ApprovedRecovery, RecoveryClaim, RecoveryLine, RecoveryRequest, claim_recovery,
-    finish_recovery, recovery_approved,
+    ApprovedRecovery, RecoveryClaim, RecoveryLine, RecoveryProgress, RecoveryRequest,
+    claim_recovery, finish_recovery, recovery_approved, recovery_progress,
 };
 
 /// What an older server answers for something it doesn't have yet: 404 on the whole route.
@@ -808,7 +808,7 @@ impl Vault {
             server: self.profile.server.clone(),
             is_owner: self.profile.user_id == OWNER,
             owner_fingerprint: self.profile.owner.fingerprint(),
-            escrow: me.is_some_and(|entry| entry.escrow),
+            escrow: self.escrow_on(),
             recovering: me.is_some_and(|entry| entry.recovering),
         }
     }
@@ -924,11 +924,11 @@ impl Vault {
             .map(|entry| UserRow {
                 user_id: entry.user_id,
                 name: entry.name.clone(),
-                approved: entry.verify(&self.profile.owner).is_ok(),
+                approved: self.profile.trusted_entry(entry.user_id) == Some(entry),
                 is_owner: entry.user_id == OWNER,
                 removed: entry.removed,
                 fingerprint: entry.keys.fingerprint(),
-                escrow: entry.escrow,
+                escrow: entry.consented_to_escrow(),
                 recovering: entry.recovering,
                 keys_replaced: entry.revision > 0,
             })
@@ -948,23 +948,32 @@ impl Vault {
         })
     }
 
-    /// Approves a user (owner only), but only if the fingerprint they read out matches.
+    /// Approves a user (owner only), but only if the fingerprint they read out matches. Only
+    /// someone this app never saw approved: keys replaced in a recovery are approved with it.
     pub fn approve(&mut self, user: UserId, fingerprint: &str) -> Result<String> {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
-        let mut entry = directory
+        self.profile.set_directory(directory.entries.clone());
+        if self.profile.key_revisions.contains_key(&user) {
+            bail!(
+                "they're approved already. If the server shows them as waiting, don't approve \
+                 them again: someone may have tampered with it."
+            );
+        }
+        let shown = directory
             .entries
             .into_iter()
             .find(|entry| entry.user_id == user)
             .with_context(|| format!("no user {user}"))?;
-        let expected = normalize(fingerprint);
-        if entry.keys.fingerprint() != expected {
+        if shown.keys.fingerprint() != normalize(fingerprint) {
             bail!(
-                "{}'s fingerprint on the server is {}, not {expected}. Don't approve; the keys \
-                 may have been swapped.",
-                entry.name,
-                entry.keys.fingerprint()
+                "that isn't the fingerprint of {}'s keys on the server. Check it with them \
+                 again; if it still doesn't match, don't approve: the keys may have been \
+                 swapped.",
+                shown.name
             );
         }
+        // Always their first keys, at revision 0, whatever the server says.
+        let mut entry = DirectoryEntry::new(user, &shown.name, shown.keys);
         entry.approve(&self.keys);
         let request = ApprovalRequest {
             approval: entry.approval.clone().expect("just approved"),

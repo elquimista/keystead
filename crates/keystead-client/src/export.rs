@@ -82,7 +82,7 @@ impl KdbxWriter {
         entry.set_unprotected("UserName", overview.username.as_str());
         entry.set_protected("Password", details.password.as_str());
         entry.set_unprotected("URL", overview.url.as_str());
-        entry.set_unprotected("Notes", details.notes.as_str());
+        entry.set_protected("Notes", details.notes.as_str());
         if !details.otp.is_empty() {
             entry.set_protected("otp", details.otp.as_str());
         }

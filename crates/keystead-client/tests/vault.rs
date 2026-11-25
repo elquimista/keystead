@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use keystead_client::http::Client;
 use keystead_client::{DeviceSigner, EditOutcome, NewAccount, Vault, join, recover, setup};
-use keystead_core::api::{PutItemRequest, Role};
+use keystead_core::api::{ApprovalRequest, EscrowRequest, PutItemRequest, Role};
+use keystead_core::directory::{DirectoryEntry, escrow_consent};
 use keystead_core::encoding::Bytes;
 use keystead_core::groups::GroupKeyring;
 use keystead_core::ids::{DeviceId, ItemId, UserId};
@@ -366,6 +367,7 @@ struct Team {
     alice_secret: AccountSecret,
     alice_signer: Arc<dyn DeviceSigner>,
     bob_secret: AccountSecret,
+    bob_signer: Arc<dyn DeviceSigner>,
 }
 
 fn team(fixture: &Fixture) -> Team {
@@ -387,6 +389,7 @@ fn team(fixture: &Fixture) -> Team {
     let mut member = |name: &str| {
         let invite = alice.invite(name).unwrap();
         let secret = AccountSecret::generate();
+        let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
         let vault = join(
             &fixture.profile(name),
             NewAccount {
@@ -394,16 +397,16 @@ fn team(fixture: &Fixture) -> Team {
                 secret: &secret,
                 device_id: DeviceId::random(),
                 device_name: "Test device",
-                signer: Arc::new(SoftwareDeviceKey::generate()),
+                signer: signer.clone(),
             },
             &invite.token,
             &invite.owner_fingerprint,
         )
         .unwrap();
-        (vault, secret)
+        (vault, secret, signer)
     };
-    let (bob, bob_secret) = member("Bob");
-    let (carol, _) = member("Carol");
+    let (bob, bob_secret, bob_signer) = member("Bob");
+    let (carol, _, _) = member("Carol");
     let bob_identity = bob.whoami();
     alice
         .approve(bob_identity.user_id, &bob_identity.fingerprint)
@@ -415,6 +418,7 @@ fn team(fixture: &Fixture) -> Team {
         alice_secret,
         alice_signer,
         bob_secret,
+        bob_signer,
     }
 }
 
@@ -1881,11 +1885,13 @@ fn recovering_with_the_owners_help_brings_back_what_was_shared_and_own_logins_in
         "the line works once"
     );
     let waiting = alice.recovery_request(bob_id).unwrap().unwrap();
-    assert_eq!(
-        waiting.fingerprint.as_deref(),
-        Some(claim.fingerprint.as_str())
-    );
-    assert!(waiting.escrow);
+    assert!(waiting.claimed && waiting.escrow);
+    // A wrong fingerprint is refused without showing the right one: the owner hears it
+    // from Bob.
+    let wrong = alice
+        .approve_recovery(bob_id, "0000-0000-0000-0000-0000")
+        .unwrap_err();
+    assert!(!format!("{wrong:#}").contains(&claim.fingerprint));
     assert!(
         alice
             .approve_recovery(bob_id, "0000-0000-0000-0000-0000")
@@ -2153,4 +2159,225 @@ fn escrow_brings_back_folders_only_they_could_open_after_every_recovery() {
     alice.sync().unwrap();
     last_bob.sync().unwrap();
     assert_eq!(last_bob.folders().unwrap(), ["Team"]);
+}
+
+/// A new device's keys for recovering, sent with the line, and the owner's approval of them.
+struct ApprovedDevice {
+    line: keystead_client::RecoveryLine,
+    secret: AccountSecret,
+    signer: Arc<dyn DeviceSigner>,
+    device_id: DeviceId,
+    own_logins: bool,
+}
+
+/// Starts a recovery for `user`, sends a new device's keys, and has the owner approve them.
+fn approve_new_device(fixture: &Fixture, owner: &mut Vault, user: UserId) -> ApprovedDevice {
+    let line = owner.start_recovery(user).unwrap();
+    let secret = AccountSecret::generate();
+    let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
+    let device_id = DeviceId::random();
+    let claim = keystead_client::claim_recovery(
+        &line,
+        &new_device(fixture, &secret, device_id, signer.clone()),
+    )
+    .unwrap();
+    let approved = owner.approve_recovery(user, &claim.fingerprint).unwrap();
+    ApprovedDevice {
+        line,
+        secret,
+        signer,
+        device_id,
+        own_logins: approved.own_logins,
+    }
+}
+
+/// Signs the approved device in, keeps its profile and syncs.
+fn finish(fixture: &Fixture, device: &ApprovedDevice, profile: &str) -> Vault {
+    let mut vault = keystead_client::finish_recovery(
+        &fixture.profile(profile),
+        new_device(
+            fixture,
+            &device.secret,
+            device.device_id,
+            device.signer.clone(),
+        ),
+        &device.line,
+    )
+    .unwrap();
+    vault.sync().unwrap();
+    vault
+}
+
+fn sorted_names(vault: &Vault) -> Vec<String> {
+    let mut names: Vec<String> = vault
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_recovery_the_new_device_never_finished_can_be_done_again_losing_nothing() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let (overview, details) = login("Bank", "bank-pw");
+    bob.add(None, overview, details).unwrap();
+    bob.create_folder("Personal").unwrap();
+    let (overview, details) = login("Router", "router-pw");
+    bob.add(Some("Personal"), overview, details).unwrap();
+    bob.set_escrow(true).unwrap();
+
+    // The owner approves a new device that never finishes: Touch ID cancelled, say.
+    let lost = approve_new_device(&fixture, &mut alice, bob_id);
+    assert!(lost.own_logins);
+    // So the owner helps again, and everything still comes back, escrow included.
+    let device = approve_new_device(&fixture, &mut alice, bob_id);
+    assert!(device.own_logins, "the escrowed key stayed");
+    let mut new_bob = finish(&fixture, &device, "new-bob");
+    new_bob.sync().unwrap();
+    assert_eq!(sorted_names(&new_bob), ["Bank", "Router"]);
+    assert_eq!(new_bob.folders().unwrap(), ["Personal"]);
+    assert!(new_bob.whoami().escrow);
+}
+
+#[test]
+fn removing_someone_still_waiting_after_a_recovery_lists_what_they_saw() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::View)
+        .unwrap();
+    let (overview, details) = login("Database", "db-pw");
+    alice.add(Some("Production"), overview, details).unwrap();
+    bob.sync().unwrap();
+
+    // Bob recovers, and is removed before anyone gives him Production back: he saw it.
+    let _device = approve_new_device(&fixture, &mut alice, bob_id);
+    alice.remove_user(bob_id).unwrap();
+    let rows = alice.to_change().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].name.as_str(), rows[0].user_id),
+        ("Database", bob_id)
+    );
+}
+
+#[test]
+fn a_recovered_member_gets_a_folder_back_through_the_group_restored_first() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+
+    // Shared is shared with two groups Bob is in; Carol is only in the one the server
+    // lists second.
+    let blue = alice.create_group("Blue", &[bob_id]).unwrap();
+    let green = alice.create_group("Green", &[bob_id]).unwrap();
+    let second = if blue.to_string() > green.to_string() {
+        "Blue"
+    } else {
+        "Green"
+    };
+    alice.add_to_group(second, carol_identity.user_id).unwrap();
+    alice.create_folder("Shared").unwrap();
+    for group in ["Blue", "Green"] {
+        alice
+            .share_folder_with_group("Shared", group, Role::View)
+            .unwrap();
+    }
+    let (overview, details) = login("Printer", "printer-pw");
+    alice.add(Some("Shared"), overview, details).unwrap();
+    carol.sync().unwrap();
+
+    // Bob recovers; only Carol's app gives him a group back, the second one.
+    let device = approve_new_device(&fixture, &mut alice, bob_id);
+    carol.sync().unwrap();
+    let new_bob = finish(&fixture, &device, "new-bob");
+    assert_eq!(new_bob.folders().unwrap(), ["Shared"]);
+    let printer = new_bob.find_item("Printer", None).unwrap();
+    assert_eq!(new_bob.open_item(printer).unwrap().1.password, "printer-pw");
+}
+
+#[test]
+fn escrow_and_approvals_take_the_right_signatures() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        alice_secret,
+        alice_signer,
+        bob_secret,
+        bob_signer,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let alice_keys = AccountKeys::derive(&alice_secret);
+    let bob_keys = AccountKeys::derive(&bob_secret);
+
+    // Bob is approved already: approving him again is refused.
+    assert!(alice.approve(bob_id, &bob.whoami().fingerprint).is_err());
+
+    // The server keeps a personal key in escrow only with its owner's own agreement.
+    let mut as_bob = Client::new(&fixture.url);
+    as_bob
+        .sign_in(bob.profile().device_id, bob_signer.as_ref())
+        .unwrap();
+    let forged = EscrowRequest {
+        wrapped_key: bob_keys
+            .wrap_personal_key_for(&alice_keys.public(), bob_id)
+            .unwrap(),
+        consent: escrow_consent(&alice_keys, bob_id, 0),
+    };
+    assert!(as_bob.put::<_, ()>("/v1/escrow", &forged).is_err());
+    bob.sync().unwrap();
+    assert!(!bob.whoami().escrow);
+
+    // Escrow can't change while a recovery is waiting.
+    alice.start_recovery(bob_id).unwrap();
+    bob.sync().unwrap();
+    assert!(bob.set_escrow(true).is_err());
+    bob.cancel_recovery(bob_id).unwrap();
+    bob.set_escrow(true).unwrap();
+    assert!(bob.whoami().escrow);
+
+    // Keys after a recovery come only with the recovery's approval, not a plain one.
+    let device = approve_new_device(&fixture, &mut alice, bob_id);
+    let mut as_alice = Client::new(&fixture.url);
+    as_alice
+        .sign_in(alice.profile().device_id, alice_signer.as_ref())
+        .unwrap();
+    let mut entry =
+        DirectoryEntry::new(bob_id, "Bob", AccountKeys::derive(&device.secret).public());
+    entry.revision = 7;
+    entry.approve(&alice_keys);
+    let request = ApprovalRequest {
+        approval: entry.approval.clone().unwrap(),
+    };
+    assert!(
+        as_alice
+            .post::<_, ()>(&format!("/v1/users/{bob_id}/approval"), &request)
+            .is_err()
+    );
+
+    // Nothing of Bob's own came back from escrow, so it stays off until he turns it on.
+    let new_bob = finish(&fixture, &device, "new-bob");
+    assert!(!new_bob.whoami().escrow);
 }

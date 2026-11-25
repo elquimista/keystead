@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use keystead_client::profile::write_private;
 use keystead_core::encoding::Bytes;
+use keystead_core::ids::DeviceId;
 use keystead_core::keys::{AccountSecret, SoftwareDeviceKey};
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +34,10 @@ pub fn profile_path(home: &Path) -> PathBuf {
 pub struct DeviceFile {
     device_key: Bytes,
     account_secret: Bytes,
+    /// While recovering with the owner's help, before the owner approves: this machine's
+    /// device id, so the same keys can be sent again if waiting stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovering: Option<DeviceId>,
 }
 
 impl DeviceFile {
@@ -40,7 +45,22 @@ impl DeviceFile {
         Self {
             device_key: Bytes(key.to_bytes().to_vec()),
             account_secret: Bytes(secret.as_bytes().to_vec()),
+            recovering: None,
         }
+    }
+
+    /// New keys for recovering with the owner's help, kept before they're sent, so an
+    /// approval isn't lost if waiting for it stops.
+    pub fn recovering(key: &SoftwareDeviceKey, secret: &AccountSecret, device: DeviceId) -> Self {
+        Self {
+            recovering: Some(device),
+            ..Self::new(key, secret)
+        }
+    }
+
+    /// The device id of a recovery this machine started and didn't finish.
+    pub fn recovering_device(&self) -> Option<DeviceId> {
+        self.recovering
     }
 
     pub fn exists(home: &Path) -> bool {

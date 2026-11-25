@@ -37,9 +37,15 @@ pub struct DirectoryEntry {
     /// Earlier keys, each with the owner's approval as given, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired: Vec<RetiredKeys>,
-    /// They let the owner recover their own items (escrow). Not signed: it only informs.
+    /// They let the owner recover their own items (escrow), as the server says. Not signed:
+    /// apps act on escrow only with `escrow_consent`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub escrow: bool,
+    /// Their own signature, with their current keys, agreeing to escrow: the owner may keep
+    /// their personal key, and the keys of folders only they are in sealed with it. Apps
+    /// act on escrow only with it, so a server can't turn escrow on for anyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escrow_consent: Option<Bytes>,
     /// The owner has started a recovery for them that isn't approved yet. Not signed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovering: bool,
@@ -102,6 +108,7 @@ impl DirectoryEntry {
             revision: 0,
             retired: Vec::new(),
             escrow: false,
+            escrow_consent: None,
             recovering: false,
         }
     }
@@ -119,6 +126,13 @@ impl DirectoryEntry {
 
     pub fn approval_message(&self) -> Vec<u8> {
         approval_message(self.user_id, self.revision, &self.name, &self.keys)
+    }
+
+    /// Whether the person agreed to escrow with their current keys.
+    pub fn consented_to_escrow(&self) -> bool {
+        self.escrow_consent.as_ref().is_some_and(|consent| {
+            verify_escrow_consent(&self.keys, self.user_id, self.revision, consent).is_ok()
+        })
     }
 
     /// The keys the owner approved for this person before their current ones, from
@@ -145,8 +159,32 @@ impl DirectoryEntry {
     }
 }
 
+/// Someone's agreement to escrow, signed with their keys at `revision`.
+pub fn escrow_consent(keys: &AccountKeys, user_id: UserId, revision: u32) -> Bytes {
+    keys.sign(&escrow_consent_message(user_id, revision))
+}
+
+pub fn verify_escrow_consent(
+    keys: &AccountPublicKeys,
+    user_id: UserId,
+    revision: u32,
+    consent: &Bytes,
+) -> Result<(), Error> {
+    keys.verify(
+        &escrow_consent_message(user_id, revision),
+        consent.as_slice(),
+    )
+}
+
+fn escrow_consent_message(user_id: UserId, revision: u32) -> Vec<u8> {
+    transcript(
+        "keystead/escrow-consent/v1",
+        &[&user_id.to_be_bytes(), &revision.to_be_bytes()],
+    )
+}
+
 /// What someone's keys at `revision` had signed when the owner approved new keys for them
-/// after a recovery: SHA-256 digests of the signed messages, of login versions and group
+/// after a recovery: SHA-256 digests of the signatures, of login versions and group
 /// changes, in order. Signed by the owner. Those keys verify nothing else from then on,
 /// so whoever has the lost device can't sign anything new in that person's name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +280,24 @@ mod tests {
         let mut forged = recovered.clone();
         forged.retired[0].keys = AccountKeys::derive(&AccountSecret::generate()).public();
         assert!(forged.retired_keys(&owner.public()).is_empty());
+    }
+
+    #[test]
+    fn only_the_person_can_agree_to_escrow_and_only_for_their_current_keys() {
+        let (mut bob, keys) = entry("Bob");
+        assert!(!bob.consented_to_escrow());
+        bob.escrow_consent = Some(escrow_consent(&keys, bob.user_id, 0));
+        assert!(bob.consented_to_escrow());
+
+        let server = AccountKeys::derive(&AccountSecret::generate());
+        let mut forged = bob.clone();
+        forged.escrow_consent = Some(escrow_consent(&server, bob.user_id, 0));
+        assert!(!forged.consented_to_escrow());
+        // Agreement given with earlier keys doesn't carry over to new ones.
+        let mut recovered = bob.clone();
+        recovered.keys = server.public();
+        recovered.revision = 1;
+        assert!(!recovered.consented_to_escrow());
     }
 
     #[test]

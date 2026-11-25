@@ -777,7 +777,7 @@ private struct HelpRecoverSheet: View {
     @State private var error: String?
     @State private var approved: RecoveryApproval?
 
-    private var claimed: Bool { request?.fingerprint != nil }
+    private var claimed: Bool { request?.claimed == true }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {

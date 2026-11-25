@@ -221,12 +221,13 @@ keystead sign-out                    # this machine forgets the account (asks fi
 Lost every device and the recovery kit too? The owner can help you back in with new keys
 (needs a 0.13.0 server). Once the owner approves them, what's shared with you comes back as
 everyone's apps sync. Your own logins, and the folders only you are in, come back only if
-you turned on escrow beforehand, which lets the owner open them:
+you turned on escrow beforehand, which lets the owner open them. Turning escrow off later
+stops new copies, but can't take back what the owner may already have opened:
 
 ```sh
 keystead escrow on                   # Bob, beforehand: let the owner recover his own logins and folders
 keystead recovery start 2            # Alice: prints a line to send Bob
-keystead recover-with-help http://127.0.0.1:8080 <token> --owner <owner's fingerprint>  # Bob, on a new machine: shows his new fingerprint and waits
+keystead recover-with-help http://127.0.0.1:8080 <token> --owner <owner's fingerprint>  # Bob, on a new machine: shows his new fingerprint and waits; if it stops, run it again
 keystead recovery approve 2 --fingerprint <Bob's new fingerprint>  # Alice, after he reads it out
 keystead recovery cancel             # Bob, on a device he still has, if he didn't ask for it
 ```

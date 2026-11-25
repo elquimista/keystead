@@ -546,12 +546,27 @@ fn run(cli: Cli) -> Result<()> {
             name,
         } => {
             let line = format!("{server} {token} --owner {owner}");
-            let me = commands::recover_with_help(&home, &line, &name, |claim| {
-                println!("New keys for {} (user {}).", claim.name, claim.user_id);
-                println!("Your new fingerprint: {}", claim.fingerprint);
-                println!("Read it to the owner, in person or on a call, so they can approve it.");
-                println!("Waiting for them… (Ctrl-C stops; then they start again)");
-            })?;
+            let warned = std::cell::Cell::new(false);
+            let me = commands::recover_with_help(
+                &home,
+                &line,
+                &name,
+                |claim| {
+                    println!("New keys for {} (user {}).", claim.name, claim.user_id);
+                    println!("Your new fingerprint: {}", claim.fingerprint);
+                    println!(
+                        "Read it to the owner, in person or on a call, so they can approve it."
+                    );
+                    println!(
+                        "Waiting for them… (if this stops, run the same command again to carry on)"
+                    );
+                },
+                |error| {
+                    if !warned.replace(true) {
+                        eprintln!("Can't reach the server ({error:#}); still trying.");
+                    }
+                },
+            )?;
             println!(
                 "Recovered {} (user {}) on {}. What's shared with you comes back as others' \
                  apps sync.",
@@ -570,10 +585,15 @@ fn run(cli: Cli) -> Result<()> {
             match commands::recovery_request(&home, UserId(user_id))? {
                 None => println!("No recovery is waiting for user {user_id}."),
                 Some(request) => {
-                    match request.fingerprint {
-                        Some(fingerprint) => println!("Their new fingerprint: {fingerprint}"),
-                        None => println!("They haven't used the line yet."),
-                    }
+                    println!(
+                        "{}",
+                        if request.claimed {
+                            "They've used the line on their new device. Approve with the \
+                             fingerprint it shows, as they read it to you."
+                        } else {
+                            "They haven't used the line yet."
+                        }
+                    );
                     println!(
                         "{}",
                         if request.escrow {

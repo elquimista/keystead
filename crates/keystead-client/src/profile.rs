@@ -292,7 +292,7 @@ impl Profile {
 
     /// Whether an item version's signature checks out against its author's approved keys.
     pub fn signed_by_author(&self, item: &EncryptedItem) -> bool {
-        self.signed_by(item.author, &item.signed_digest(), |keys| {
+        self.signed_by(item.author, &item.signature_digest(), |keys| {
             item.verify(keys).is_ok()
         })
     }
@@ -365,7 +365,7 @@ impl Profile {
     /// the latest.
     pub fn verify_group<'a>(&self, entries: &'a [GroupEntry]) -> Result<&'a GroupEntry> {
         Ok(verify_entries_with(entries, OWNER, |entry| {
-            self.signed_by(entry.signer, &entry.signed_digest(), |keys| {
+            self.signed_by(entry.signer, &entry.signature_digest(), |keys| {
                 entry.verify(keys).is_ok()
             })
         })?)

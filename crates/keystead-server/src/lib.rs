@@ -231,6 +231,11 @@ const MIGRATIONS: &[&str] = &[
     // 11 (0.13.0): what retired keys had signed when they were replaced, the owner's
     // signed list (`SignedBefore`, as JSON). They verify nothing else.
     "ALTER TABLE retired_keys ADD COLUMN signed_before TEXT;",
+    // 12 (0.13.0): escrow needs the person's own signed agreement, and an escrowed personal
+    // key stays until the account puts one in escrow for its current keys, so a recovery
+    // the new device never finished can be done again without losing anything.
+    "ALTER TABLE users ADD COLUMN escrow_consent BLOB;
+     ALTER TABLE users ADD COLUMN escrow_revision INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -462,11 +467,12 @@ type UserRow = (
     bool,
     u32,
     bool,
+    Option<Vec<u8>>,
     bool,
 );
 
 const USER_COLUMNS: &str = "SELECT id, name, encryption_key, signing_key, approval, \
-                            removed_at IS NOT NULL, revision, escrow_on, \
+                            removed_at IS NOT NULL, revision, escrow_on, escrow_consent, \
                             EXISTS (SELECT 1 FROM recoveries r WHERE r.user_id = users.id \
                                     AND NOT r.approved \
                                     AND r.expires_at > CAST(strftime('%s', 'now') AS INTEGER)) \
@@ -520,7 +526,18 @@ fn stored_key(bytes: Vec<u8>) -> Result<Key32, ApiError> {
 }
 
 fn entry_from_row(
-    (id, name, encryption, signing, approval, removed, revision, escrow, recovering): UserRow,
+    (
+        id,
+        name,
+        encryption,
+        signing,
+        approval,
+        removed,
+        revision,
+        escrow,
+        escrow_consent,
+        recovering,
+    ): UserRow,
     retired: Vec<RetiredRow>,
 ) -> Result<DirectoryEntry, ApiError> {
     Ok(DirectoryEntry {
@@ -548,6 +565,7 @@ fn entry_from_row(
             })
             .collect::<Result<_, ApiError>>()?,
         escrow,
+        escrow_consent: escrow_consent.map(Into::into),
         recovering,
     })
 }

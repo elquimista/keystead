@@ -14,7 +14,7 @@ use keystead_core::api::{
     FolderEscrowRequest, RecoveryClaimed, RecoveryInProgress, RecoveryStarted, RecoveryState,
     RecoveryTokenRequest, Restore, RestoreFolderKeyRequest, RestoreGroupSecretRequest,
 };
-use keystead_core::directory::{DirectoryEntry, SignedBefore};
+use keystead_core::directory::{DirectoryEntry, SignedBefore, escrow_consent};
 use keystead_core::groups::GroupEntry;
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT};
@@ -25,6 +25,9 @@ use super::{
 };
 use crate::http::{Client, Failure};
 use crate::profile::{OWNER, Profile};
+
+/// How many earlier personal keys a device keeps after recoveries.
+const MAX_RECOVERED_KEYS: usize = 8;
 
 /// Recovering with the owner's help, and escrow, came with 0.13.0.
 const NEEDS_0_13: &str = "the server is older than Keystead 0.13.0 and can't help anyone \
@@ -86,11 +89,12 @@ pub struct RecoveryClaim {
     pub fingerprint: String,
 }
 
-/// A recovery waiting for the owner's approval.
+/// A recovery waiting for the owner's approval. The new keys' fingerprint isn't here: the
+/// owner hears it from the person and types it in, and approving checks it.
 #[derive(Debug)]
 pub struct RecoveryRequest {
-    /// The new keys' fingerprint, once the person has used the line on their new device.
-    pub fingerprint: Option<String>,
+    /// The person has used the line on their new device.
+    pub claimed: bool,
     /// Their personal key is in escrow, so their own logins and the folders only they
     /// could open can come back.
     pub escrow: bool,
@@ -142,18 +146,39 @@ pub fn claim_recovery(line: &RecoveryLine, account: &NewAccount<'_>) -> Result<R
     })
 }
 
-/// Whether the owner has approved the new keys yet. A cancelled or expired recovery is an
-/// error.
-pub fn recovery_approved(line: &RecoveryLine) -> Result<bool> {
+/// Where a recovery stands, for the new device waiting on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryProgress {
+    /// The owner hasn't approved the new keys yet.
+    Waiting,
+    Approved,
+    /// The owner cancelled it, or it expired: they need to start again.
+    Ended,
+}
+
+/// Whether the owner has approved the new keys yet. An error means the server couldn't be
+/// asked; keep waiting and ask again.
+pub fn recovery_progress(line: &RecoveryLine) -> Result<RecoveryProgress> {
     let request = RecoveryTokenRequest {
         token: line.token.trim().to_owned(),
     };
     match Client::new(&line.server).post::<_, RecoveryState>("/v1/recovery/state", &request) {
-        Ok(state) => Ok(state.approved),
-        Err(Failure::Status { code: 404, .. }) => {
+        Ok(state) if state.approved => Ok(RecoveryProgress::Approved),
+        Ok(_) => Ok(RecoveryProgress::Waiting),
+        Err(Failure::Status { code: 404, .. }) => Ok(RecoveryProgress::Ended),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether the owner has approved the new keys yet. A cancelled or expired recovery is an
+/// error.
+pub fn recovery_approved(line: &RecoveryLine) -> Result<bool> {
+    match recovery_progress(line)? {
+        RecoveryProgress::Approved => Ok(true),
+        RecoveryProgress::Waiting => Ok(false),
+        RecoveryProgress::Ended => {
             bail!("the owner cancelled this recovery, or it expired; ask them to start again")
         }
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -211,7 +236,7 @@ impl Vault {
         let path = format!("/v1/users/{user}/recovery");
         match self.call(|client| client.get::<RecoveryInProgress>(&path, &[]))? {
             Ok(request) => Ok(Some(RecoveryRequest {
-                fingerprint: request.keys.map(|keys| keys.fingerprint()),
+                claimed: request.keys.is_some(),
                 escrow: request.escrow.is_some(),
             })),
             Err(Failure::Status { code: 404, .. }) => Ok(None),
@@ -241,12 +266,11 @@ impl Vault {
         let keys = request
             .keys
             .context("they haven't used the recovery line on their new device yet")?;
-        let expected = normalize(fingerprint);
-        if keys.fingerprint() != expected {
+        if keys.fingerprint() != normalize(fingerprint) {
             bail!(
-                "their new fingerprint on the server is {}, not {expected}. Don't approve: \
-                 someone else may have used the line. Cancel it and start again.",
-                keys.fingerprint()
+                "that isn't the fingerprint of the keys their new device sent. Check it with \
+                 them again; if it still doesn't match, don't approve: someone else may have \
+                 used the line. Cancel it and start again."
             );
         }
         let current = self
@@ -255,7 +279,10 @@ impl Vault {
             .cloned()
             .context("they aren't approved; approve them first")?;
         let mut approved = DirectoryEntry::new(user, &current.name, keys.clone());
-        approved.revision = current.revision + 1;
+        approved.revision = current
+            .revision
+            .checked_add(1)
+            .context("their keys can't be replaced again")?;
         approved.approve(&self.keys);
         let personal_key = request.escrow.as_ref().and_then(|escrowed| {
             let key = self.keys.unwrap_personal_key(escrowed, user).ok()?;
@@ -268,14 +295,14 @@ impl Vault {
             .items
             .values()
             .filter(|item| item.author == user && item.verify(&current.keys).is_ok())
-            .map(EncryptedItem::signed_digest);
+            .map(EncryptedItem::signature_digest);
         let groups = self
             .profile
             .team_groups
             .iter()
             .flat_map(|group| &group.entries)
             .filter(|entry| entry.signer == user && entry.verify(&current.keys).is_ok())
-            .map(GroupEntry::signed_digest);
+            .map(GroupEntry::signature_digest);
         let mut signed_before = SignedBefore::new(
             user,
             current.revision,
@@ -290,6 +317,10 @@ impl Vault {
         };
         let path = format!("/v1/users/{user}/recovery/approval");
         let () = self.call(|client| client.post(&path, &body))??;
+        // Never trust their old keys again, whatever the server shows from now on.
+        let pinned = self.profile.key_revisions.entry(user).or_insert(0);
+        *pinned = (*pinned).max(approved.revision);
+        self.save()?;
         self.users()?;
         Ok(ApprovedRecovery {
             name: current.name,
@@ -338,10 +369,15 @@ impl Vault {
                  back"
             );
         }
+        let revision = self
+            .profile
+            .trusted_entry(self.profile.user_id)
+            .map_or(0, |entry| entry.revision);
         let request = EscrowRequest {
             wrapped_key: self
                 .keys
                 .wrap_personal_key_for(&self.profile.owner, self.profile.user_id)?,
+            consent: escrow_consent(&self.keys, self.profile.user_id, revision),
         };
         match self.call(|client| client.put::<_, ()>("/v1/escrow", &request))? {
             Ok(()) => {}
@@ -394,7 +430,9 @@ impl Vault {
                     .push(format!("couldn't give someone a login back ({error:#})")),
             }
         }
+        // A server could send any key wrapped for this account; a few are plenty.
         if let Some(wrapped) = duties.recovered_key
+            && self.profile.recovered_personal_keys.len() < MAX_RECOVERED_KEYS
             && !self.profile.recovered_personal_keys.contains(&wrapped)
             && self
                 .keys
@@ -415,7 +453,12 @@ impl Vault {
                 )),
             }
         }
-        for item_id in self.own_items_under_earlier_keys() {
+        let own = self.own_items_under_earlier_keys();
+        // Own logins or folders came back from escrow, so this account had agreed to it with
+        // its earlier keys; it agrees again with its new ones. Otherwise escrow stays off
+        // until the person turns it on: the server alone can't turn it on.
+        let escrow_came_back = came_back || !own.is_empty();
+        for item_id in own {
             if let Err(error) = self.resave(item_id) {
                 summary.rekey_problems.push(format!(
                     "couldn't seal one of your logins again ({error:#})"
@@ -423,6 +466,7 @@ impl Vault {
             }
         }
         if duties.escrow_needed
+            && (self.escrow_on() || escrow_came_back)
             && let Err(error) = self.escrow_personal_key()
         {
             summary.rekey_problems.push(format!(
@@ -443,11 +487,12 @@ impl Vault {
         rekeyed: &[FolderId],
         summary: &mut SyncSummary,
     ) {
-        if self.whoami().escrow {
-            for folder_id in rekeyed {
-                if !folders.contains(folder_id) {
-                    folders.push(*folder_id);
-                }
+        if !self.escrow_on() {
+            return;
+        }
+        for folder_id in rekeyed {
+            if !folders.contains(folder_id) {
+                folders.push(*folder_id);
             }
         }
         for folder_id in folders {
@@ -482,6 +527,14 @@ impl Vault {
             }) => Ok(()),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Whether this account agreed to escrow with its current keys: its own signature, which
+    /// a server can't make. What a sync asks for escrow is done only then.
+    pub(super) fn escrow_on(&self) -> bool {
+        self.profile
+            .trusted_entry(self.profile.user_id)
+            .is_some_and(DirectoryEntry::consented_to_escrow)
     }
 
     /// Gives this account back a folder only it could open, from the copy of its key it put

@@ -19,9 +19,9 @@ pub use vault::{
     ApprovedRecovery, DeletedRow, DeviceRow, DeviceSetupLine, EditOutcome, FOLDER_SEPARATOR,
     FolderDeletion, GroupMemberRow, GroupRow, GroupShareRow, HistoryRow, ImportFolder, ImportPlan,
     ImportSummary, InviteInfo, ItemRow, JoiningDevice, KdbxExport, MemberRow, NewAccount,
-    NewFolder, RecoveryClaim, RecoveryLine, RecoveryRequest, RenamedFolder, SyncSummary,
-    ToChangeRow, UserRow, Vault, Whoami, claim_recovery, finish_recovery, generate_password, join,
-    recover, recovery_approved, setup,
+    NewFolder, RecoveryClaim, RecoveryLine, RecoveryProgress, RecoveryRequest, RenamedFolder,
+    SyncSummary, ToChangeRow, UserRow, Vault, Whoami, claim_recovery, finish_recovery,
+    generate_password, join, recover, recovery_approved, recovery_progress, setup,
 };
 
 use keystead_core::encoding::Bytes;

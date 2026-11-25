@@ -97,8 +97,9 @@ pub struct Identity {
 /// A recovery the owner started, waiting for approval.
 #[derive(uniffi::Record)]
 pub struct PendingRecovery {
-    /// The new keys' fingerprint, once the person has used the line on their new device.
-    pub fingerprint: Option<String>,
+    /// The person has used the line on their new device. Its fingerprint isn't here: the
+    /// owner hears it from them, and approving checks it.
+    pub claimed: bool,
     /// Their own logins and folders come back too: their personal key is in escrow.
     pub escrow: bool,
 }
@@ -715,7 +716,7 @@ impl Vault {
             .vault()?
             .recovery_request(UserId(user_id))?
             .map(|request| PendingRecovery {
-                fingerprint: request.fingerprint,
+                claimed: request.claimed,
                 escrow: request.escrow,
             }))
     }
@@ -1575,6 +1576,28 @@ pub fn claim_recovery(
 #[uniffi::export]
 pub fn recovery_approved(line: String) -> Result<bool, CoreError> {
     Ok(keystead_client::recovery_approved(&recovery_line(&line)?)?)
+}
+
+/// Where a recovery stands, for the new device waiting on it.
+#[derive(uniffi::Enum)]
+pub enum RecoveryProgress {
+    Waiting,
+    Approved,
+    /// The owner cancelled it, or it expired.
+    Ended,
+}
+
+/// Asks whether the owner has approved yet. An error means the server couldn't be asked:
+/// keep waiting and ask again.
+#[uniffi::export]
+pub fn recovery_progress(line: String) -> Result<RecoveryProgress, CoreError> {
+    Ok(
+        match keystead_client::recovery_progress(&recovery_line(&line)?)? {
+            keystead_client::RecoveryProgress::Waiting => RecoveryProgress::Waiting,
+            keystead_client::RecoveryProgress::Approved => RecoveryProgress::Approved,
+            keystead_client::RecoveryProgress::Ended => RecoveryProgress::Ended,
+        },
+    )
 }
 
 fn recovery_line(text: &str) -> Result<keystead_client::RecoveryLine, CoreError> {

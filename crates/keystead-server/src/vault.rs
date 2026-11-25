@@ -416,6 +416,7 @@ pub(crate) async fn put_folder_escrow(
     Json(request): Json<FolderEscrowRequest>,
 ) -> Result<StatusCode, ApiError> {
     let mut tx = state.writer.begin().await?;
+    crate::accounts::refuse_while_recovering(&mut tx, auth.user_id).await?;
     let escrow_on: bool = sqlx::query_scalar("SELECT escrow_on FROM users WHERE id = ?")
         .bind(auth.user_id.0)
         .fetch_one(&mut *tx)
@@ -1470,7 +1471,8 @@ pub(crate) async fn sync(
     let group_rekey_needed = crate::groups::rekey_needed(&mut tx, auth.user_id).await?;
     let restore = restore_needed(&mut tx, auth.user_id).await?;
     let (recovered_key, escrow_needed): (Option<String>, bool) = sqlx::query_as(
-        "SELECT recovered_key, escrow_on AND escrow IS NULL FROM users WHERE id = ?",
+        "SELECT recovered_key, escrow_on AND (escrow IS NULL OR escrow_revision < revision)
+         FROM users WHERE id = ?",
     )
     .bind(user)
     .fetch_one(&mut *tx)
@@ -1730,7 +1732,7 @@ pub(crate) async fn require_another_manager(
 ) -> Result<(), ApiError> {
     let others: i64 = sqlx::query_scalar(
         "SELECT (SELECT COUNT(*) FROM members
-                 WHERE folder_id = ?1 AND role = 'manage' AND user_id != ?2)
+                 WHERE folder_id = ?1 AND role = 'manage' AND user_id != ?2 AND NOT pending)
               + (SELECT COUNT(*) FROM folder_groups
                  WHERE folder_id = ?1 AND role = 'manage' AND group_id != ?3)",
     )
@@ -1813,19 +1815,21 @@ async fn current_key(
     user: UserId,
     folder_id: FolderId,
 ) -> Result<Option<MemberFolderKey>, ApiError> {
-    let direct: Option<String> =
-        sqlx::query_scalar("SELECT wrapped_key FROM members WHERE user_id = ? AND folder_id = ?")
-            .bind(user.0)
-            .bind(folder_id.to_string())
-            .fetch_optional(&mut *conn)
-            .await?;
+    // Only copies made for their current keys: not ones waiting after a recovery.
+    let direct: Option<String> = sqlx::query_scalar(
+        "SELECT wrapped_key FROM members WHERE user_id = ? AND folder_id = ? AND NOT pending",
+    )
+    .bind(user.0)
+    .bind(folder_id.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
     let (wrapped_key, via_group) = match direct {
         Some(wrapped_key) => (wrapped_key, None),
         None => {
             let row: Option<(String, String, u32)> = sqlx::query_as(
                 "SELECT fg.wrapped_key, fg.group_id, fg.group_generation
                  FROM folder_groups fg JOIN group_members gm ON gm.group_id = fg.group_id
-                 WHERE gm.user_id = ? AND fg.folder_id = ?
+                 WHERE gm.user_id = ? AND fg.folder_id = ? AND NOT gm.pending
                  ORDER BY fg.group_id LIMIT 1",
             )
             .bind(user.0)
@@ -1884,19 +1888,21 @@ async fn user_roles(conn: &mut SqliteConnection, user: UserId) -> Result<Roles, 
         Ok(best)
     };
     let folders: Vec<(String, String)> = sqlx::query_as(
-        "SELECT folder_id, role FROM members WHERE user_id = ?1
+        "SELECT folder_id, role FROM members WHERE user_id = ?1 AND NOT pending
          UNION ALL
          SELECT fg.folder_id, fg.role FROM folder_groups fg
-         JOIN group_members gm ON gm.group_id = fg.group_id WHERE gm.user_id = ?1",
+         JOIN group_members gm ON gm.group_id = fg.group_id
+         WHERE gm.user_id = ?1 AND NOT gm.pending",
     )
     .bind(user.0)
     .fetch_all(&mut *conn)
     .await?;
     let items: Vec<(String, String)> = sqlx::query_as(
-        "SELECT item_id, role FROM item_access WHERE user_id = ?1
+        "SELECT item_id, role FROM item_access WHERE user_id = ?1 AND NOT pending
          UNION ALL
          SELECT ig.item_id, ig.role FROM item_groups ig
-         JOIN group_members gm ON gm.group_id = ig.group_id WHERE gm.user_id = ?1",
+         JOIN group_members gm ON gm.group_id = ig.group_id
+         WHERE gm.user_id = ?1 AND NOT gm.pending",
     )
     .bind(user.0)
     .fetch_all(&mut *conn)
@@ -1954,12 +1960,55 @@ pub(crate) async fn leave(
     user: UserId,
     folder_id: FolderId,
 ) -> Result<(), ApiError> {
-    sqlx::query("DELETE FROM members WHERE user_id = ? AND folder_id = ?")
-        .bind(user.0)
-        .bind(folder_id.to_string())
-        .execute(&mut *conn)
-        .await?;
+    let pending: Option<bool> = sqlx::query_scalar(
+        "DELETE FROM members WHERE user_id = ? AND folder_id = ? RETURNING pending",
+    )
+    .bind(user.0)
+    .bind(folder_id.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
+    if pending == Some(true) {
+        expose_folder(conn, user, &folder_id.to_string()).await?;
+    }
     reconcile(conn, user).await
+}
+
+/// Puts what a folder holds on passwords to change for `user`, who lost it while waiting
+/// for a copy after a recovery: they could see it all before. Those who can still open it
+/// are left out when the list is read.
+pub(crate) async fn expose_folder(
+    conn: &mut SqliteConnection,
+    user: UserId,
+    folder_id: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(&format!(
+        "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
+         WHERE folder_id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
+         {EXPOSE_AGAIN}"
+    ))
+    .bind(user.0)
+    .bind(folder_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Like [`expose_folder`], for one item.
+pub(crate) async fn expose_item(
+    conn: &mut SqliteConnection,
+    user: UserId,
+    item_id: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(&format!(
+        "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
+         WHERE id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
+         {EXPOSE_AGAIN}"
+    ))
+    .bind(user.0)
+    .bind(item_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Takes away `user`'s own direct access to an item; unless a group still gives it, their
@@ -1969,11 +2018,16 @@ pub(crate) async fn leave_item(
     user: UserId,
     item_id: &str,
 ) -> Result<(), ApiError> {
-    sqlx::query("DELETE FROM item_access WHERE user_id = ? AND item_id = ?")
-        .bind(user.0)
-        .bind(item_id)
-        .execute(&mut *conn)
-        .await?;
+    let pending: Option<bool> = sqlx::query_scalar(
+        "DELETE FROM item_access WHERE user_id = ? AND item_id = ? RETURNING pending",
+    )
+    .bind(user.0)
+    .bind(item_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if pending == Some(true) {
+        expose_item(conn, user, item_id).await?;
+    }
     reconcile(conn, user).await
 }
 

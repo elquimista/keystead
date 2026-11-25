@@ -5,11 +5,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use keystead_client::{
     ApprovedRecovery, DeviceSetupLine, FolderDeletion, ImportPlan, ImportSummary, ImportedLogin,
-    JoiningDevice, KdbxExport, NewAccount, NewFolder, RecoveryClaim, RecoveryLine, RecoveryRequest,
-    RenamedFolder, Vault, claim_recovery, finish_recovery, read_kdbx, recovery_approved,
+    JoiningDevice, KdbxExport, NewAccount, NewFolder, RecoveryClaim, RecoveryLine,
+    RecoveryProgress, RecoveryRequest, RenamedFolder, Vault, claim_recovery, finish_recovery,
+    read_kdbx, recovery_progress,
 };
 pub use keystead_client::{
     DeletedRow, DeviceRow, EditOutcome, GroupRow, GroupShareRow, HistoryRow, InviteInfo, ItemRow,
@@ -78,30 +79,59 @@ pub fn recover(
 
 /// Recovers an account onto this machine with the owner's help: makes new keys, sends them
 /// with the owner's line, shows their fingerprint to read to the owner, and waits until the
-/// owner approves them; then fetches what's there. Nothing is kept unless approved.
+/// owner approves them; then fetches what's there. The keys are kept from the start, so if
+/// waiting stops (Ctrl-C, a dropped connection), running it again sends the same keys and
+/// picks up where it left off, even after the owner approved.
 pub fn recover_with_help(
     home: &Path,
     line: &str,
     device_name: &str,
     show: impl Fn(&RecoveryClaim),
+    still_trying: impl Fn(&anyhow::Error),
 ) -> Result<Whoami> {
-    refuse_existing(home)?;
     let line = RecoveryLine::parse(line)?;
-    let secret = AccountSecret::generate();
-    let key = Arc::new(SoftwareDeviceKey::generate());
+    let earlier = if profile_path(home).exists() {
+        None
+    } else {
+        DeviceFile::load(home)
+            .ok()
+            .and_then(|file| Some((file.recovering_device()?, file)))
+    };
+    let (device_id, secret, key) = match earlier {
+        Some((device_id, file)) => (device_id, file.secret()?, Arc::new(file.key()?)),
+        None => {
+            refuse_existing(home)?;
+            let secret = AccountSecret::generate();
+            let key = SoftwareDeviceKey::generate();
+            let device_id = DeviceId::random();
+            DeviceFile::recovering(&key, &secret, device_id).save(home)?;
+            (device_id, secret, Arc::new(key))
+        }
+    };
     let account = NewAccount {
         server: &line.server,
         secret: &secret,
-        device_id: DeviceId::random(),
+        device_id,
         device_name,
         signer: key.clone(),
     };
     let claim = claim_recovery(&line, &account)?;
     show(&claim);
-    while !recovery_approved(&line)? {
+    loop {
+        match recovery_progress(&line) {
+            Ok(RecoveryProgress::Approved) => break,
+            Ok(RecoveryProgress::Waiting) => {}
+            Ok(RecoveryProgress::Ended) => {
+                DeviceFile::delete(home)?;
+                bail!("the owner cancelled this recovery, or it expired; ask them to start again")
+            }
+            Err(error) => still_trying(&error),
+        }
         std::thread::sleep(RECOVERY_POLL);
     }
-    let mut vault = finish_recovery(&profile_path(home), account, &line)?;
+    let mut vault = finish_recovery(&profile_path(home), account, &line).context(
+        "the owner approved, but this machine couldn't finish; run the same command again",
+    )?;
     DeviceFile::new(&key, &secret).save(home)?;
     if let Err(error) = vault.sync() {
         eprintln!("warning: recovered, but couldn't sync yet ({error:#}); run `keystead sync`");
@@ -553,9 +583,14 @@ pub fn export(home: &Path, file: &Path, passphrase: &str) -> Result<KdbxExport> 
         }
         Err(error) => bail!("couldn't create {}: {error}", file.display()),
     };
-    std::io::Write::write_all(&mut out, &export.file)
-        .and_then(|()| out.sync_all())
-        .map_err(|error| anyhow::anyhow!("couldn't write {}: {error}", file.display()))?;
+    if let Err(error) =
+        std::io::Write::write_all(&mut out, &export.file).and_then(|()| out.sync_all())
+    {
+        // Encrypted, but half a file is no use to anyone; it goes.
+        drop(out);
+        let _ = std::fs::remove_file(file);
+        bail!("couldn't write {}: {error}", file.display());
+    }
     Ok(export)
 }
 

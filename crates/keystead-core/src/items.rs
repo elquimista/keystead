@@ -343,10 +343,11 @@ impl EncryptedItem {
         }
     }
 
-    /// SHA-256 of what the author signed, naming this exact version: what goes on the
-    /// owner's list of what someone's keys had signed before a recovery.
-    pub fn signed_digest(&self) -> Bytes {
-        Bytes(Sha256::digest(self.signed_message()).to_vec())
+    /// SHA-256 of the signature: what goes on the owner's list of what someone's keys had
+    /// signed before a recovery. Only someone holding the key could have made the
+    /// signature, so the list can't name a version signed later.
+    pub fn signature_digest(&self) -> Bytes {
+        Bytes(Sha256::digest(self.signature.as_slice()).to_vec())
     }
 
     /// Checks the author's signature. Callers must also check that the author was allowed

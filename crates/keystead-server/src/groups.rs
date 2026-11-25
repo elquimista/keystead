@@ -106,7 +106,9 @@ pub(crate) async fn add_group_member(
     let mut tx = state.writer.begin().await?;
     let latest = latest_entry(&mut tx, group_id).await?;
     let members = group_member_ids(&mut tx, group_id).await?;
-    if !members.contains(&auth.user_id) || !can_manage(&mut tx, auth.user_id, &latest).await? {
+    if !holds_group(&mut tx, auth.user_id, group_id).await?
+        || !can_manage(&mut tx, auth.user_id, &latest).await?
+    {
         return Err(ApiError::Forbidden(
             "only the group's managers in it can add people".into(),
         ));
@@ -147,7 +149,8 @@ pub(crate) async fn remove_group_member(
     }
     let allowed = user == auth.user_id
         || is_owner(&mut tx, auth.user_id).await?
-        || (latest.is_manager(auth.user_id) && members.contains(&auth.user_id));
+        || (latest.is_manager(auth.user_id)
+            && holds_group(&mut tx, auth.user_id, group_id).await?);
     if !allowed {
         return Err(ApiError::Forbidden(
             "only the owner and the group's managers can remove people".into(),
@@ -182,7 +185,8 @@ pub(crate) async fn update_group(
     let mut tx = state.writer.begin().await?;
     let latest = latest_entry(&mut tx, group_id).await?;
     let members = group_member_ids(&mut tx, group_id).await?;
-    let manager = latest.is_manager(auth.user_id) && members.contains(&auth.user_id);
+    let manager =
+        latest.is_manager(auth.user_id) && holds_group(&mut tx, auth.user_id, group_id).await?;
     if !manager && !is_owner(&mut tx, auth.user_id).await? {
         return Err(ApiError::Forbidden(
             "only the owner and the group's managers can change it".into(),
@@ -218,7 +222,8 @@ pub(crate) async fn delete_group(
     let mut tx = state.writer.begin().await?;
     let latest = latest_entry(&mut tx, group_id).await?;
     let members = group_member_ids(&mut tx, group_id).await?;
-    let manager = latest.is_manager(auth.user_id) && members.contains(&auth.user_id);
+    let manager =
+        latest.is_manager(auth.user_id) && holds_group(&mut tx, auth.user_id, group_id).await?;
     if !manager && !is_owner(&mut tx, auth.user_id).await? {
         return Err(ApiError::Forbidden(
             "only the owner and the group's managers can delete it".into(),
@@ -286,7 +291,9 @@ pub(crate) async fn rekey_group(
         .await?
         .into_iter()
         .collect();
-    if !members.contains(&auth.user_id) || !can_manage(&mut tx, auth.user_id, &latest).await? {
+    if !holds_group(&mut tx, auth.user_id, group_id).await?
+        || !can_manage(&mut tx, auth.user_id, &latest).await?
+    {
         return Err(ApiError::Forbidden(
             "only the group's managers in it can change its key".into(),
         ));
@@ -486,11 +493,31 @@ pub(crate) async fn leave_group(
     user: UserId,
     group_id: GroupId,
 ) -> Result<(), ApiError> {
-    sqlx::query("DELETE FROM group_members WHERE user_id = ? AND group_id = ?")
-        .bind(user.0)
+    let pending: Option<bool> = sqlx::query_scalar(
+        "DELETE FROM group_members WHERE user_id = ? AND group_id = ? RETURNING pending",
+    )
+    .bind(user.0)
+    .bind(group_id.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
+    // Waiting for a copy after a recovery, they could still see what the group gave them.
+    if pending == Some(true) {
+        let shared: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT folder_id, 1 FROM folder_groups WHERE group_id = ?1
+             UNION ALL
+             SELECT item_id, 0 FROM item_groups WHERE group_id = ?1",
+        )
         .bind(group_id.to_string())
-        .execute(&mut *conn)
+        .fetch_all(&mut *conn)
         .await?;
+        for (id, folder) in shared {
+            if folder {
+                crate::vault::expose_folder(conn, user, &id).await?;
+            } else {
+                crate::vault::expose_item(conn, user, &id).await?;
+            }
+        }
+    }
     log(conn, user, group_id, false).await?;
     sqlx::query(
         "UPDATE team_groups SET needs_rekey = 1
@@ -524,6 +551,23 @@ async fn log(
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// Whether `user` is in the group and holds its secret: not waiting for a copy after a
+/// recovery.
+async fn holds_group(
+    conn: &mut SqliteConnection,
+    user: UserId,
+    group_id: GroupId,
+) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM group_members
+                        WHERE user_id = ? AND group_id = ? AND NOT pending)",
+    )
+    .bind(user.0)
+    .bind(group_id.to_string())
+    .fetch_one(conn)
+    .await?)
 }
 
 /// The owner manages every group; managers only one they're in.

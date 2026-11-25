@@ -209,10 +209,28 @@ Nothing goes on passwords to change: it's the same person.
 too: their own items outside folders, and folders nobody else can open. Their app wraps
 the account's personal key for the owner (`PUT /v1/escrow`, `DELETE /v1/escrow` to stop),
 with HPKE, info `keystead/personal-key/v1` and associated data
-`transcript("keystead/personal-key/v1", user id)`. When approving, the owner's app opens
-it and wraps it the same way for the new keys; the person's sync gets it as
-`recovered_key`, opens their own items with it and saves them again under the new
-personal key, and escrows the new one (`escrow_needed`).
+`transcript("keystead/personal-key/v1", user id)`, and sends the person's agreement,
+signed with their account key, as `consent`:
+
+```
+transcript("keystead/escrow-consent/v1", user id, revision)
+```
+
+The server keeps it in their directory entry (`escrow_consent`), and apps do what a sync
+asks for escrow (`escrow_needed`, `escrow_folders`) only when it verifies against the
+account's current keys, so a server can't turn escrow on for anyone. The server refuses
+escrow changes while a recovery of the account is waiting for approval, so a lost device
+can't take escrow away or swap it just before.
+
+When approving, the owner's app opens the escrowed key and wraps it the same way for the
+new keys; the person's sync gets it as `recovered_key`, opens their own items with it
+and saves them again under the new personal key. The escrowed key stays until the
+account escrows a key for its new revision, so a recovery the new device never finished
+can be done again without losing anything. If own items or folders came back from
+escrow, the new device agrees to escrow again with its new keys and escrows its new
+personal key (`escrow_needed`); otherwise escrow stays off until the person turns it on.
+Turning escrow off doesn't take back a key the owner may already have opened: the
+personal key comes from the account secret and stays the same.
 
 For each folder they're in themselves that nobody else can open, directly or through a
 group, their app also puts a copy of the folder's current key in escrow, sealed with
@@ -369,6 +387,9 @@ transcript("keystead/directory-entry/v1", user id, name, encryption key, signing
 The owner approves their own entry at setup. A client joining the team pins the owner's
 keys (by fingerprint, from the invite) and shares only with entries whose signature
 verifies against them, and that aren't marked `"removed": true` (see Removing access).
+A plain approval is always of revision 0 (`POST /v1/users/{id}/approval`, which the server
+refuses for later revisions), and the owner's app never approves someone again it has
+seen approved: keys after a recovery are approved with the recovery.
 
 After a recovery with the owner's help, an entry has new keys at a higher `revision`
 (0.13.0 and later; absent means 0), signed as
@@ -378,13 +399,14 @@ transcript("keystead/directory-entry/v2", user id, revision, name, encryption ke
 ```
 
 Clients remember the highest revision the owner approved for each person and never share
-with an earlier one, so a server can't swap old keys back in. The earlier keys stay
+with an earlier one, so a server can't swap old keys back in. The owner's app remembers
+the revision it approves as it approves it. The earlier keys stay
 listed under `retired`, each with its revision, name and the owner's approval as given,
 so what they signed still verifies, but only what they had signed by the recovery.
 Someone holding the lost device's secret can't sign anything new with them.
 
 When approving, the owner's app signs a list of it (`SignedBefore`): the SHA-256 digest of
-each signed message, of item versions and group entries, sorted, without repeats, as
+each signature, of item versions and group entries, sorted, without repeats, as
 
 ```
 transcript("keystead/signed-before-recovery/v1", user id, revision, digest, digest, …)
@@ -396,10 +418,13 @@ version, current or in history, deleted or not, and every group entry), and from
 owner's own copy, in case the server left some out. The list goes with the approval and
 is served at `GET /v1/users/{id}/retired/{revision}`. Clients fetch each list once,
 check the owner's signature, and keep it. A retired key then verifies a version or an
-entry only if its digest is on that list; clients treat anything else as unsigned. What
-was signed before the approval still verifies, as with any lost device until then.
+entry only if its signature's digest is on that list; clients treat anything else as
+unsigned. Digests of signatures, not of messages, so a server can't list a message
+prepared in advance for whoever holds the old keys to sign later: only the key's holder
+can make a signature. What was signed before the approval still verifies, as with any
+lost device until then.
 
-Unsigned flags show who has `escrow` on and who is `recovering`. Clients before 0.13.0
+Unsigned flags show who has `escrow` on, as the server says, and who is `recovering`. Clients before 0.13.0
 can't check a revision above 0, and stop trusting that person until they're updated.
 
 ## Groups

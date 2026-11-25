@@ -16,7 +16,7 @@ use keystead_core::api::{
     RecoveryInProgress, RecoveryStarted, RecoveryState, RecoveryTokenRequest, Session,
     SetupRequest, SignInRequest,
 };
-use keystead_core::directory::{DirectoryEntry, SignedBefore};
+use keystead_core::directory::{DirectoryEntry, SignedBefore, verify_escrow_consent};
 use keystead_core::encoding::Bytes;
 use keystead_core::groups::GroupEntry;
 use keystead_core::ids::{DeviceId, UserId};
@@ -190,17 +190,29 @@ pub(crate) async fn sign_in(
 
     let mut token = [0u8; 32];
     OsRng.fill_bytes(&mut token);
-    let mut sessions = state.sessions.lock().expect("session lock poisoned");
-    let now = Instant::now();
-    sessions.retain(|_, session| session.expires > now);
-    sessions.insert(
-        hash(&token),
-        SessionInfo {
-            user_id,
-            device_id: request.device_id,
-            expires: now + SESSION_LIFETIME,
-        },
-    );
+    {
+        let mut sessions = state.sessions.lock().expect("session lock poisoned");
+        let now = Instant::now();
+        sessions.retain(|_, session| session.expires > now);
+        sessions.insert(
+            hash(&token),
+            SessionInfo {
+                user_id,
+                device_id: request.device_id,
+                expires: now + SESSION_LIFETIME,
+            },
+        );
+    }
+    // A device removed meanwhile (removing someone, or approving their recovery) has its
+    // sessions cleared after its row is gone; a session made after that clearing ends here.
+    if device_key(&state, request.device_id).await?.is_none() {
+        state
+            .sessions
+            .lock()
+            .expect("session lock poisoned")
+            .remove(&hash(&token));
+        return Err(ApiError::Unauthorized);
+    }
     Ok(Json(Session {
         token: URL_SAFE_NO_PAD.encode(token),
         user_id,
@@ -285,6 +297,12 @@ pub(crate) async fn approve(
     let mut entry = user_entry(&mut tx, UserId(user_id))
         .await?
         .ok_or(ApiError::NotFound)?;
+    // Keys after a recovery are approved with the recovery, at their revision.
+    if entry.revision != 0 {
+        return Err(ApiError::Conflict(
+            "their keys were replaced in a recovery, and were approved with it".into(),
+        ));
+    }
     entry.approval = Some(request.approval.clone());
     entry
         .verify(&owner.keys)
@@ -531,12 +549,15 @@ pub(crate) async fn remove_user(
             .await?;
     for folder_id in folders {
         leave(&mut tx, user, parse_folder(&folder_id)?).await?;
-        // A folder left without a manager gets one: whoever has been in it longest.
+        // A folder left without a manager who can open it gets one: whoever has been in it
+        // longest and can open it.
         sqlx::query(
             "UPDATE members SET role = 'manage'
-             WHERE folder_id = ?1
-               AND NOT EXISTS (SELECT 1 FROM members WHERE folder_id = ?1 AND role = 'manage')
-               AND joined_seq = (SELECT MIN(joined_seq) FROM members WHERE folder_id = ?1)",
+             WHERE folder_id = ?1 AND NOT pending
+               AND NOT EXISTS (SELECT 1 FROM members
+                               WHERE folder_id = ?1 AND role = 'manage' AND NOT pending)
+               AND joined_seq = (SELECT MIN(joined_seq) FROM members
+                                 WHERE folder_id = ?1 AND NOT pending)",
         )
         .bind(&folder_id)
         .execute(&mut *tx)
@@ -672,10 +693,10 @@ async fn signed_digests(conn: &mut SqliteConnection, user: UserId) -> Result<Vec
     .await?;
     let mut digests = Vec::with_capacity(items.len() + groups.len());
     for body in items {
-        digests.push(serde_json::from_str::<EncryptedItem>(&body)?.signed_digest());
+        digests.push(serde_json::from_str::<EncryptedItem>(&body)?.signature_digest());
     }
     for body in groups {
-        digests.push(serde_json::from_str::<GroupEntry>(&body)?.signed_digest());
+        digests.push(serde_json::from_str::<GroupEntry>(&body)?.signature_digest());
     }
     Ok(digests)
 }
@@ -898,9 +919,11 @@ pub(crate) async fn approve_recovery(
     .bind(serde_json::to_string(signed)?)
     .execute(&mut *tx)
     .await?;
+    // The escrowed personal key stays until the new device puts its own in escrow, so if
+    // it never gets that far, another recovery still brings everything back.
     sqlx::query(
         "UPDATE users SET encryption_key = ?, signing_key = ?, approval = ?, revision = ?,
-             escrow = NULL, recovered_key = ?
+             escrow_consent = NULL, recovered_key = ?
          WHERE id = ?",
     )
     .bind(&approved.keys.encryption.0[..])
@@ -954,7 +977,8 @@ pub(crate) async fn approve_recovery(
 }
 
 /// `PUT /v1/escrow`: this account's personal key, wrapped for the owner, so the owner can
-/// bring its own logins back after a recovery. Not for the owner's own account.
+/// bring its own logins back after a recovery, with the account's signed agreement. Not
+/// for the owner's own account, and not while a recovery for it is waiting.
 pub(crate) async fn put_escrow(
     State(state): State<AppState>,
     auth: Auth,
@@ -967,13 +991,46 @@ pub(crate) async fn put_escrow(
                 .into(),
         ));
     }
-    sqlx::query("UPDATE users SET escrow = ?, escrow_on = 1 WHERE id = ?")
-        .bind(serde_json::to_string(&request.wrapped_key)?)
-        .bind(auth.user_id.0)
-        .execute(&mut *tx)
-        .await?;
+    refuse_while_recovering(&mut tx, auth.user_id).await?;
+    let me = user_entry(&mut tx, auth.user_id)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    verify_escrow_consent(&me.keys, me.user_id, me.revision, &request.consent)
+        .map_err(|_| ApiError::BadRequest("the agreement to escrow doesn't verify".into()))?;
+    sqlx::query(
+        "UPDATE users SET escrow = ?, escrow_on = 1, escrow_consent = ?, escrow_revision = ?
+         WHERE id = ?",
+    )
+    .bind(serde_json::to_string(&request.wrapped_key)?)
+    .bind(request.consent.as_slice())
+    .bind(me.revision)
+    .bind(auth.user_id.0)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Escrow can't change while a recovery is waiting for approval: whoever has a lost device
+/// could otherwise take away, or swap, what the owner is about to bring back.
+pub(crate) async fn refuse_while_recovering(
+    conn: &mut SqliteConnection,
+    user: UserId,
+) -> Result<(), ApiError> {
+    let recovering: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM recoveries
+                        WHERE user_id = ? AND NOT approved AND expires_at > {NOW})"
+    ))
+    .bind(user.0)
+    .fetch_one(conn)
+    .await?;
+    if recovering {
+        return Err(ApiError::Conflict(
+            "escrow can't change while a recovery of this account is waiting; cancel it first"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// `DELETE /v1/escrow`: turns escrow off and forgets the escrowed key, and the folder
@@ -983,10 +1040,13 @@ pub(crate) async fn delete_escrow(
     auth: Auth,
 ) -> Result<StatusCode, ApiError> {
     let mut tx = state.writer.begin().await?;
-    sqlx::query("UPDATE users SET escrow = NULL, escrow_on = 0 WHERE id = ?")
-        .bind(auth.user_id.0)
-        .execute(&mut *tx)
-        .await?;
+    refuse_while_recovering(&mut tx, auth.user_id).await?;
+    sqlx::query(
+        "UPDATE users SET escrow = NULL, escrow_on = 0, escrow_consent = NULL WHERE id = ?",
+    )
+    .bind(auth.user_id.0)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM folder_escrow WHERE user_id = ?")
         .bind(auth.user_id.0)
         .execute(&mut *tx)

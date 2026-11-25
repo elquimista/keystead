@@ -127,8 +127,14 @@ final class AppModel {
         _ = try await DeviceAuthentication.authenticate(reason: "export your logins")
         await refresh()
         let exported = try await perform { try $0.exportLogins(passphrase: passphrase) }
-        try exported.data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        // Only you can read it from the start. The Save panel already asked to replace a file
+        // with that name.
+        try? FileManager.default.removeItem(at: url)
+        guard FileManager.default.createFile(
+            atPath: url.path, contents: exported.data, attributes: [.posixPermissions: 0o600])
+        else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+        }
         return (exported.logins, exported.leftOut)
     }
 
@@ -350,7 +356,22 @@ final class AppModel {
     /// While this Mac waits for the owner to approve its new keys: whose account, and the
     /// fingerprint to read to the owner.
     private(set) var recoveryClaim: RecoveryClaimInfo?
+    /// The server couldn't be reached the last time this Mac asked; it keeps asking.
+    private(set) var recoveryUnreachable = false
     private var recoveryTask: Task<Void, Never>?
+
+    /// After the owner approved this Mac's new keys: what finishing needs, kept if it doesn't
+    /// work out the first time (Touch ID cancelled, say), so the owner needn't start over.
+    private struct ApprovedKeys {
+        let line: String
+        let device: DeviceStore.Device
+        let secret: Data
+        let deviceName: String
+    }
+    private var approvedKeys: ApprovedKeys?
+
+    /// The owner approved this Mac's new keys, and finishing needs another try.
+    var recoveryNeedsFinishing: Bool { approvedKeys != nil }
 
     /// Recovers an account with the line the owner sent, when every device and the Recovery
     /// Kit are gone: makes new keys, shows their fingerprint to read to the owner, and waits
@@ -364,6 +385,13 @@ final class AppModel {
         recoveryTask?.cancel()
         recoveryTask = nil
         recoveryClaim = nil
+        recoveryUnreachable = false
+    }
+
+    /// Gives up on keys the owner approved but this Mac didn't finish with; the owner has to
+    /// start again.
+    func forgetApprovedRecovery() {
+        approvedKeys = nil
     }
 
     private func recoverWithHelp(line: String) async {
@@ -394,32 +422,82 @@ final class AppModel {
                     line: line, accountSecret: secretBytes, deviceId: deviceId,
                     deviceName: deviceName, signer: publicSigner)
             }.value
-            while try await !Task.detached(operation: { try recoveryApproved(line: line) }).value {
+            try await waitForApproval(line: line)
+            recoveryClaim = nil
+            approvedKeys = ApprovedKeys(
+                line: line, device: device, secret: secretBytes, deviceName: deviceName)
+        } catch is CancellationError {
+            recoveryClaim = nil
+            recoveryUnreachable = false
+            return
+        } catch {
+            recoveryClaim = nil
+            recoveryUnreachable = false
+            phase = .welcome
+            message = describe(error)
+            return
+        }
+        await finishRecoveringWithHelp()
+    }
+
+    /// Asks every few seconds whether the owner approved. A server it can't reach doesn't
+    /// end the wait; a cancelled or expired recovery does.
+    private func waitForApproval(line: String) async throws {
+        while true {
+            try Task.checkCancellation()
+            let progress: RecoveryProgress
+            do {
+                progress = try await Task.detached { try recoveryProgress(line: line) }.value
+                recoveryUnreachable = false
+            } catch {
+                recoveryUnreachable = true
+                try await Task.sleep(for: .seconds(3))
+                continue
+            }
+            switch progress {
+            case .approved:
+                // Cancel pressed while asking: stop here, before any Touch ID prompt.
+                try Task.checkCancellation()
+                recoveryUnreachable = false
+                return
+            case .ended:
+                throw RecoveryEnded()
+            case .waiting:
                 try await Task.sleep(for: .seconds(3))
             }
-            recoveryClaim = nil
-            try store.save(device)
+        }
+    }
+
+    /// The owner approved this Mac's new keys: keeps them, asks for Touch ID and signs in.
+    /// If that doesn't work out, the approval stays here to try again.
+    func finishRecoveringWithHelp() async {
+        guard let approved = approvedKeys else { return }
+        message = nil
+        do {
+            try store.save(approved.device)
             phase = .working("Recovering your account…")
             let context = try await DeviceAuthentication.authenticate(
                 reason: "set up Keystead on this Mac")
             let signer = SecureEnclaveSigner(
-                key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context))
+                key: try SecureEnclaveSigningKey.restore(
+                    from: approved.device.signingKey, context: context))
             let profilePath = store.profileURL.path
+            let (line, secret, deviceId, deviceName) =
+                (approved.line, approved.secret, approved.device.deviceId, approved.deviceName)
             let vault = try await Task.detached {
                 try Vault.finishRecovery(
-                    profilePath: profilePath, line: line, accountSecret: secretBytes,
+                    profilePath: profilePath, line: line, accountSecret: secret,
                     deviceId: deviceId, deviceName: deviceName, signer: signer)
             }.value
+            approvedKeys = nil
             try await finishUnlocking(vault)
             // New keys mean a new kit; the old one no longer works.
             sheet = .recoveryKit(afterSetup: false)
-        } catch is CancellationError {
-            recoveryClaim = nil
         } catch {
-            recoveryClaim = nil
             if store.isEnrolled && vault == nil { store.removeDevice() }
             phase = .welcome
-            message = describe(error)
+            message = "The owner approved your new keys, but this Mac couldn't finish ("
+                + describe(error) + "). Choose Finish Recovering to try again."
         }
     }
 
@@ -437,13 +515,15 @@ final class AppModel {
     /// Someone's recovery waiting for approval, fetched fresh (owner only).
     func recoveryRequest(for user: User) async throws -> PendingRecovery? {
         #if DEBUG
-        if isDemo { return PendingRecovery(fingerprint: "7e3a-91c4-0b2d-58f6-a1e9", escrow: true) }
+        if isDemo { return PendingRecovery(claimed: true, escrow: true) }
         #endif
         let id = user.userId
         return try await perform { try $0.recoveryRequest(userId: id) }
     }
 
     func approveRecovery(for user: User, fingerprint: String) async throws -> RecoveryApproval {
+        // It gives someone this person's account: only the owner, at this Mac, may.
+        _ = try await DeviceAuthentication.authenticate(reason: "approve new keys for \(user.name)")
         let id = user.userId
         let approval = try await perform { try $0.approveRecovery(userId: id, fingerprint: fingerprint) }
         await refresh()
@@ -456,8 +536,22 @@ final class AppModel {
         await refresh()
     }
 
+    /// Cancels a recovery of your own account, from this Mac; a problem shows as a message.
+    func cancelOwnRecovery() async {
+        guard let id = identity?.userId else { return }
+        do {
+            try await cancelRecovery(for: id)
+        } catch {
+            message = describe(error)
+        }
+    }
+
     /// Lets the owner recover your own logins and folders if you lose everything, or stops it.
     func setEscrow(_ on: Bool) async throws {
+        if on {
+            _ = try await DeviceAuthentication.authenticate(
+                reason: "let the owner recover your own logins and folders")
+        }
         try await perform { try $0.setEscrow(on: on) }
         identity = try await perform { try $0.identity() }
         users = try await perform { try $0.users() }
@@ -1480,6 +1574,13 @@ struct AppError: LocalizedError {
 }
 
 /// A short, readable reason for an error.
+/// The owner cancelled a recovery this Mac was waiting on, or it expired.
+private struct RecoveryEnded: LocalizedError {
+    var errorDescription: String? {
+        "The owner cancelled this recovery, or it expired. Ask them to start again."
+    }
+}
+
 func describe(_ error: Error) -> String {
     if let error = error as? CoreError {
         switch error {
