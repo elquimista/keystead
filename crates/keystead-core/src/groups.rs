@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::Error;
@@ -96,6 +97,12 @@ impl GroupEntry {
         signer.verify(&self.signed_message(), self.signature.as_slice())
     }
 
+    /// SHA-256 of what the signer signed, naming this exact revision: what goes on the
+    /// owner's list of what someone's keys had signed before a recovery.
+    pub fn signed_digest(&self) -> Bytes {
+        Bytes(Sha256::digest(self.signed_message()).to_vec())
+    }
+
     fn signed_message(&self) -> Vec<u8> {
         let mut parts: Vec<Vec<u8>> = vec![
             self.group_id.as_bytes().to_vec(),
@@ -119,15 +126,18 @@ pub fn verify_entries(
     owner: UserId,
     keys_of: impl Fn(UserId) -> Option<AccountPublicKeys>,
 ) -> Result<&GroupEntry, Error> {
-    verify_entries_with(entries, owner, |user| keys_of(user).into_iter().collect())
+    verify_entries_with(entries, owner, |entry| {
+        keys_of(entry.signer).is_some_and(|keys| entry.verify(&keys).is_ok())
+    })
 }
 
-/// Like [`verify_entries`], where each signer may have had several approved keys over
-/// time: someone who recovered signed earlier revisions with keys since retired.
+/// Like [`verify_entries`], where `signed` says whether an entry's signer signed it: with
+/// their current keys, or with keys since retired that the owner's list says signed it
+/// before a recovery.
 pub fn verify_entries_with(
     entries: &[GroupEntry],
     owner: UserId,
-    keys_of: impl Fn(UserId) -> Vec<AccountPublicKeys>,
+    signed: impl Fn(&GroupEntry) -> bool,
 ) -> Result<&GroupEntry, Error> {
     let bad = |reason: &str| Err(Error::InvalidGroup(reason.into()));
     let Some(first) = entries.first() else {
@@ -162,12 +172,8 @@ pub fn verify_entries_with(
                 }
             }
         }
-        let signers = keys_of(entry.signer);
-        let Some(first_key) = signers.first() else {
-            return bad("a change to the group was signed by someone unknown");
-        };
-        if !signers.iter().any(|keys| entry.verify(keys).is_ok()) {
-            entry.verify(first_key)?;
+        if !signed(entry) {
+            return bad("a change to the group isn't signed by an approved person");
         }
         previous = Some(entry);
     }

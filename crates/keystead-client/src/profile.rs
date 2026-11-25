@@ -9,7 +9,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{Exposure, GroupInfo, KeyLink, Role, Roles, ViaGroup};
-use keystead_core::directory::DirectoryEntry;
+use keystead_core::directory::{DirectoryEntry, SignedBefore};
+use keystead_core::encoding::Bytes;
 use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries_with};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, FolderInfo, Sealed};
@@ -101,6 +102,10 @@ pub struct Profile {
     /// wrapped for its current keys, to open its own items sealed with them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovered_personal_keys: Vec<WrappedKey>,
+    /// For each set of someone's retired keys, the owner's list of what they had signed by
+    /// the recovery, checked against the owner when fetched. Retired keys verify only that.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed_before: Vec<SignedBefore>,
 }
 
 impl Profile {
@@ -127,6 +132,7 @@ impl Profile {
             exposures: Vec::new(),
             key_revisions: BTreeMap::new(),
             recovered_personal_keys: Vec::new(),
+            signed_before: Vec::new(),
         }
     }
 
@@ -286,17 +292,66 @@ impl Profile {
 
     /// Whether an item version's signature checks out against its author's approved keys.
     pub fn signed_by_author(&self, item: &EncryptedItem) -> bool {
-        self.signing_keys(item.author)
-            .iter()
-            .any(|keys| item.verify(keys).is_ok())
+        self.signed_by(item.author, &item.signed_digest(), |keys| {
+            item.verify(keys).is_ok()
+        })
     }
 
-    /// Every set of keys the owner approved for a user, current first, to check what they
-    /// signed: what someone signed before recovering still verifies.
-    pub fn signing_keys(&self, user: UserId) -> Vec<AccountPublicKeys> {
-        self.trusted_entry(user)
-            .map(|entry| entry.signing_keys(&self.owner))
-            .unwrap_or_default()
+    /// Whether `user` signed what `digest` names, `verify` checking the signature against a
+    /// set of keys: their current keys, or keys since retired after a recovery, but those
+    /// only for what's on the owner's list of what they had signed by then.
+    fn signed_by(
+        &self,
+        user: UserId,
+        digest: &Bytes,
+        verify: impl Fn(&AccountPublicKeys) -> bool,
+    ) -> bool {
+        let Some(entry) = self.trusted_entry(user) else {
+            return false;
+        };
+        verify(&entry.keys)
+            || entry.retired_keys(&self.owner).into_iter().any(|retired| {
+                self.signed_before(user, retired.revision)
+                    .is_some_and(|list| list.contains(digest))
+                    && verify(&retired.keys)
+            })
+    }
+
+    /// The owner's list of what `user`'s keys at `revision` had signed, if fetched.
+    pub fn signed_before(&self, user: UserId, revision: u32) -> Option<&SignedBefore> {
+        self.signed_before
+            .iter()
+            .find(|list| list.user_id == user && list.revision == revision)
+    }
+
+    /// Keeps the owner's list of what someone's retired keys had signed, if the owner
+    /// signed it.
+    pub fn add_signed_before(&mut self, list: SignedBefore) -> Result<()> {
+        list.verify(&self.owner)
+            .context("the list of what someone's earlier keys signed isn't the owner's")?;
+        if self.signed_before(list.user_id, list.revision).is_none() {
+            self.signed_before.push(list);
+        }
+        Ok(())
+    }
+
+    /// Retired keys of approved people whose list of what they had signed isn't here yet.
+    pub fn missing_signed_before(&self) -> Vec<(UserId, u32)> {
+        let mut missing = Vec::new();
+        for entry in &self.directory {
+            if self.trusted_entry(entry.user_id) != Some(entry) {
+                continue;
+            }
+            for retired in entry.retired_keys(&self.owner) {
+                if self
+                    .signed_before(entry.user_id, retired.revision)
+                    .is_none()
+                {
+                    missing.push((entry.user_id, retired.revision));
+                }
+            }
+        }
+        missing
     }
 
     pub fn user_name(&self, user: UserId) -> String {
@@ -309,8 +364,10 @@ impl Profile {
     /// Checks a group's entries against the owner and the approved directory, and returns
     /// the latest.
     pub fn verify_group<'a>(&self, entries: &'a [GroupEntry]) -> Result<&'a GroupEntry> {
-        Ok(verify_entries_with(entries, OWNER, |user| {
-            self.signing_keys(user)
+        Ok(verify_entries_with(entries, OWNER, |entry| {
+            self.signed_by(entry.signer, &entry.signed_digest(), |keys| {
+                entry.verify(keys).is_ok()
+            })
         })?)
     }
 

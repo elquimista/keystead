@@ -1805,6 +1805,8 @@ fn recovering_with_the_owners_help_brings_back_what_was_shared_and_own_logins_in
         mut alice,
         mut bob,
         mut carol,
+        alice_secret,
+        bob_secret,
         ..
     } = team(&fixture);
     let bob_id = bob.whoami().user_id;
@@ -1814,8 +1816,9 @@ fn recovering_with_the_owners_help_brings_back_what_was_shared_and_own_logins_in
         .unwrap();
     let carol_id = carol_identity.user_id;
 
-    // Bob has Production himself, Staging through the Ops group, Wiki from Carol directly,
-    // and Bank of his own; he last saved Database's password. Escrow is on.
+    // Bob has Production himself, Staging through the Ops group, which he manages and
+    // renamed, Wiki from Carol directly, and Bank of his own; he saved Database's password
+    // twice. Escrow is on.
     alice.create_folder("Production").unwrap();
     alice
         .share_folder("Production", bob_id, Role::Edit)
@@ -1838,7 +1841,10 @@ fn recovering_with_the_owners_help_brings_back_what_was_shared_and_own_logins_in
     let (overview, details) = login("Bank", "bank-pw");
     bob.add(None, overview, details).unwrap();
     let database = bob.find_item("Database", None).unwrap();
+    bob.edit(database, "db-pw-1b").unwrap();
     bob.edit(database, "db-pw-2").unwrap();
+    alice.set_group_manager("Ops", bob_id, true).unwrap();
+    bob.rename_group("Ops", "Operations").unwrap();
     bob.set_escrow(true).unwrap();
     assert!(bob.whoami().escrow);
     assert!(
@@ -1942,6 +1948,50 @@ fn recovering_with_the_owners_help_brings_back_what_was_shared_and_own_logins_in
         .find(|row| row.user_id == bob_id)
         .unwrap();
     assert!(row.keys_replaced && row.approved && row.escrow && !row.recovering);
+
+    // What his old keys signed before still checks out, the version in history too; what
+    // they sign from now on doesn't, even if a server passes it on.
+    let old_keys = AccountKeys::derive(&bob_secret);
+    let genuine = alice.profile().items[&database].clone();
+    assert!(alice.profile().signed_by_author(&genuine));
+    let history = alice.history(database).unwrap();
+    assert_eq!(history.len(), 3, "Alice's version and both of Bob's");
+    let alice_keys = AccountKeys::derive(&alice_secret);
+    let none = GroupKeyring::default();
+    let production = alice
+        .profile()
+        .find_folder(&alice_keys, &none, "Production")
+        .unwrap();
+    let folder_key = alice
+        .profile()
+        .folder_key(&alice_keys, &none, production)
+        .unwrap();
+    let (overview, details) = login("Database", "attackers-pw");
+    for (id, version) in [(database, genuine.version + 1), (ItemId::random(), 1)] {
+        let forged = EncryptedItem::seal_format_1(
+            ItemVersion {
+                id,
+                folder_id: Some(production),
+                owner: None,
+                version,
+                author: bob_id,
+            },
+            &folder_key,
+            &old_keys,
+            &overview,
+            &details,
+        )
+        .unwrap();
+        assert!(!alice.profile().signed_by_author(&forged));
+    }
+    let operations = alice.profile().find_group("Operations").unwrap();
+    let (group, latest) = alice.profile().team_group(operations).unwrap();
+    let mut entries = group.entries.clone();
+    let mut forged = latest.next();
+    forged.name = "Pwned".into();
+    forged.sign(bob_id, &old_keys);
+    entries.push(forged);
+    assert!(alice.profile().verify_group(&entries).is_err());
 
     // He can save again, and everyone checks his new signature.
     let database = new_bob.find_item("Database", None).unwrap();

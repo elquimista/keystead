@@ -228,6 +228,9 @@ const MIGRATIONS: &[&str] = &[
              ON DELETE CASCADE
      ) WITHOUT ROWID;
      CREATE INDEX folder_escrow_folder ON folder_escrow (folder_id);",
+    // 11 (0.13.0): what retired keys had signed when they were replaced, the owner's
+    // signed list (`SignedBefore`, as JSON). They verify nothing else.
+    "ALTER TABLE retired_keys ADD COLUMN signed_before TEXT;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -314,6 +317,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/users/{user_id}/recovery/approval",
             post(accounts::approve_recovery),
+        )
+        .route(
+            "/v1/users/{user_id}/retired/{revision}",
+            get(accounts::signed_before),
         )
         .route("/v1/recovery/claim", post(accounts::claim_recovery))
         .route("/v1/recovery/state", post(accounts::recovery_state))

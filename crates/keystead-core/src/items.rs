@@ -19,6 +19,7 @@ use chacha20poly1305::aead::{Aead, AeadCore, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::Error;
@@ -340,6 +341,12 @@ impl EncryptedItem {
             details: Sealed::default(),
             signature: Bytes::default(),
         }
+    }
+
+    /// SHA-256 of what the author signed, naming this exact version: what goes on the
+    /// owner's list of what someone's keys had signed before a recovery.
+    pub fn signed_digest(&self) -> Bytes {
+        Bytes(Sha256::digest(self.signed_message()).to_vec())
     }
 
     /// Checks the author's signature. Callers must also check that the author was allowed

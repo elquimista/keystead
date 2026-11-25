@@ -871,6 +871,7 @@ impl Vault {
     ) -> Result<(Vec<FolderId>, Vec<GroupId>, RecoveryDuties)> {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
         self.profile.set_directory(directory.entries);
+        self.fetch_signed_before()?;
         // Servers before 0.4.0 have no groups.
         match self.call(|client| client.get::<Groups>("/v1/groups", &[]))? {
             Ok(groups) => self.profile.team_groups = groups.groups,

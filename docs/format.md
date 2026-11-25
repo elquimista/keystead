@@ -190,8 +190,8 @@ device and their recovery kit. Their old keys are gone, so they get new ones:
    again. It then asks `POST /v1/recovery/state` until the owner approves.
 3. The owner fetches the new keys (`GET …/recovery`) and compares their fingerprint with
    the person, in person or on a call. Only if it matches does the owner sign the person's
-   entry with the new keys at the next revision (see Directory) and send it
-   (`POST …/recovery/approval`).
+   entry with the new keys at the next revision, and the list of what the old keys had
+   signed (see Directory), and send both (`POST …/recovery/approval`).
 4. The server keeps the old keys as retired, removes the old devices and registers the new
    one. The new device signs in, checks the owner against the line's fingerprint, and
    checks that the owner approved its keys.
@@ -380,11 +380,27 @@ transcript("keystead/directory-entry/v2", user id, revision, name, encryption ke
 Clients remember the highest revision the owner approved for each person and never share
 with an earlier one, so a server can't swap old keys back in. The earlier keys stay
 listed under `retired`, each with its revision, name and the owner's approval as given,
-so what they signed (item versions, group entries) still verifies. Someone holding a lost
-device's secret could, with the server's help, sign as those retired keys; signed
-membership changes (not in this format yet) would narrow that. Unsigned flags show who has `escrow` on and who is
-`recovering`. Clients before 0.13.0 can't check a revision above 0, and stop trusting
-that person until they're updated.
+so what they signed still verifies, but only what they had signed by the recovery.
+Someone holding the lost device's secret can't sign anything new with them.
+
+When approving, the owner's app signs a list of it (`SignedBefore`): the SHA-256 digest of
+each signed message, of item versions and group entries, sorted, without repeats, as
+
+```
+transcript("keystead/signed-before-recovery/v1", user id, revision, digest, digest, …)
+```
+
+where `revision` is the retired keys'. The digests come from the server, which lists
+everything the person signed that it holds (`GET …/recovery`'s `signed`: every item
+version, current or in history, deleted or not, and every group entry), and from the
+owner's own copy, in case the server left some out. The list goes with the approval and
+is served at `GET /v1/users/{id}/retired/{revision}`. Clients fetch each list once,
+check the owner's signature, and keep it. A retired key then verifies a version or an
+entry only if its digest is on that list; clients treat anything else as unsigned. What
+was signed before the approval still verifies, as with any lost device until then.
+
+Unsigned flags show who has `escrow` on and who is `recovering`. Clients before 0.13.0
+can't check a revision above 0, and stop trusting that person until they're updated.
 
 ## Groups
 
@@ -482,6 +498,7 @@ codes (400, 401, 403, 404, 409).
 | `GET /v1/users/{id}/recovery` | | `RecoveryInProgress` | Owner |
 | `DELETE /v1/users/{id}/recovery` | | 204 | Owner, or the person themselves |
 | `POST /v1/users/{id}/recovery/approval` | `ApproveRecoveryRequest` | 204 | Owner |
+| `GET /v1/users/{id}/retired/{revision}` | | `SignedBefore` | Anyone signed in |
 | `POST /v1/recovery/claim` | `ClaimRecoveryRequest` | `RecoveryClaimed` | The new device, with the token |
 | `POST /v1/recovery/state` | `RecoveryTokenRequest` | `RecoveryState` | The new device, with the token |
 | `PUT /v1/escrow` | `EscrowRequest` | 204 | Anyone but the owner, for themselves |

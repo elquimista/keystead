@@ -1295,7 +1295,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }

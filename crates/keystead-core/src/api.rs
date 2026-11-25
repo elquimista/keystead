@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::directory::DirectoryEntry;
+use crate::directory::{DirectoryEntry, SignedBefore};
 use crate::encoding::{Bytes, Key32};
 use crate::groups::GroupEntry;
 use crate::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
@@ -205,6 +205,11 @@ pub struct RecoveryInProgress {
     /// Their personal key in escrow, wrapped for the owner, if they turned escrow on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escrow: Option<WrappedKey>,
+    /// Digests of everything the server holds that they signed: every login version,
+    /// including history and Recently Deleted, and every group change. The owner's app
+    /// adds what it holds and signs the list when approving.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed: Vec<Bytes>,
 }
 
 /// `POST /v1/recovery/claim`: the new device sends its new keys and its device key. It
@@ -239,12 +244,14 @@ pub struct RecoveryState {
 }
 
 /// `POST /v1/users/{user_id}/recovery/approval` (owner): the owner's signature over the
-/// person's entry with the new keys at the next revision, and their escrowed personal key
-/// wrapped again for the new keys, if there was one.
+/// person's entry with the new keys at the next revision, the owner's list of what their
+/// old keys had signed, and their escrowed personal key wrapped again for the new keys, if
+/// there was one.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApproveRecoveryRequest {
     pub revision: u32,
     pub approval: Bytes,
+    pub signed_before: SignedBefore,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personal_key: Option<WrappedKey>,
 }

@@ -14,7 +14,8 @@ use keystead_core::api::{
     FolderEscrowRequest, RecoveryClaimed, RecoveryInProgress, RecoveryStarted, RecoveryState,
     RecoveryTokenRequest, Restore, RestoreFolderKeyRequest, RestoreGroupSecretRequest,
 };
-use keystead_core::directory::DirectoryEntry;
+use keystead_core::directory::{DirectoryEntry, SignedBefore};
+use keystead_core::groups::GroupEntry;
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT};
 use keystead_core::keys::{AccountKeys, ItemKey, WrappedKey};
@@ -221,7 +222,8 @@ impl Vault {
     /// Approves someone's new keys (owner only), but only if the fingerprint they read out
     /// matches. Their old devices stop working, and everything shared with them comes back
     /// as others' apps make them copies. If their personal key was in escrow, it's wrapped
-    /// for the new keys too, so their own logins come back.
+    /// for the new keys too, so their own logins come back. Signs the list of what their
+    /// old keys had signed, from the server and this app: those keys verify nothing else.
     pub fn approve_recovery(
         &mut self,
         user: UserId,
@@ -260,9 +262,30 @@ impl Vault {
             keys.wrap_personal_key(&key, user).ok()
         });
         let own_logins = personal_key.is_some();
+        // What this app holds that the old keys signed, in case the server left any out.
+        let here = self
+            .profile
+            .items
+            .values()
+            .filter(|item| item.author == user && item.verify(&current.keys).is_ok())
+            .map(EncryptedItem::signed_digest);
+        let groups = self
+            .profile
+            .team_groups
+            .iter()
+            .flat_map(|group| &group.entries)
+            .filter(|entry| entry.signer == user && entry.verify(&current.keys).is_ok())
+            .map(GroupEntry::signed_digest);
+        let mut signed_before = SignedBefore::new(
+            user,
+            current.revision,
+            request.signed.into_iter().chain(here).chain(groups),
+        );
+        signed_before.approve(&self.keys);
         let body = ApproveRecoveryRequest {
             revision: approved.revision,
             approval: approved.approval.clone().expect("just approved"),
+            signed_before,
             personal_key,
         };
         let path = format!("/v1/users/{user}/recovery/approval");
@@ -490,6 +513,24 @@ impl Vault {
         };
         let path = format!("/v1/folders/{}/members/{me}/key", escrowed.folder_id);
         let () = self.call(|client| client.put(&path, &request))??;
+        Ok(())
+    }
+
+    /// Fetches the owner's list of what each approved person's retired keys had signed,
+    /// for any not here yet. Retired keys without one verify nothing: a list that's
+    /// missing, or isn't the owner's, is left out.
+    pub(super) fn fetch_signed_before(&mut self) -> Result<()> {
+        for (user, revision) in self.profile.missing_signed_before() {
+            let path = format!("/v1/users/{user}/retired/{revision}");
+            match self.call(|client| client.get::<SignedBefore>(&path, &[]))? {
+                Ok(list) if list.user_id == user && list.revision == revision => {
+                    // A list the owner didn't sign stays out; the next sync asks again.
+                    let _ = self.profile.add_signed_before(list);
+                }
+                Ok(_) | Err(Failure::Status { code: 404, .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
 

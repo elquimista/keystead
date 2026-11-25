@@ -7,8 +7,9 @@
 //!
 //! Someone who recovers with the owner's help gets new keys at the next `revision`. Apps
 //! remember the highest revision they've seen for each person and never share with an
-//! earlier one, and the earlier keys stay listed, `retired`, so what they signed still
-//! verifies.
+//! earlier one. The earlier keys stay listed, `retired`, so what they signed still
+//! verifies, but only what they had signed by then: when approving, the owner signs a
+//! list of it ([`SignedBefore`]), so whoever has the lost device can't sign anything new.
 
 use serde::{Deserialize, Serialize};
 
@@ -120,28 +121,82 @@ impl DirectoryEntry {
         approval_message(self.user_id, self.revision, &self.name, &self.keys)
     }
 
-    /// Every set of keys the owner approved for this person, current first, to check what
-    /// they signed. Retired keys only count from revisions before the current one.
-    pub fn signing_keys(&self, owner: &AccountPublicKeys) -> Vec<AccountPublicKeys> {
-        let current = self.verify(owner).is_ok().then(|| self.keys.clone());
-        let retired = self.retired.iter().filter(|retired| {
-            retired.revision < self.revision
-                && owner
-                    .verify(
-                        &approval_message(
-                            self.user_id,
-                            retired.revision,
-                            &retired.name,
-                            &retired.keys,
-                        ),
-                        retired.approval.as_slice(),
-                    )
-                    .is_ok()
-        });
-        current
-            .into_iter()
-            .chain(retired.map(|retired| retired.keys.clone()))
+    /// The keys the owner approved for this person before their current ones, from
+    /// revisions before the current one. What they signed counts only if it's on the
+    /// owner's [`SignedBefore`] list for that revision.
+    pub fn retired_keys(&self, owner: &AccountPublicKeys) -> Vec<&RetiredKeys> {
+        self.retired
+            .iter()
+            .filter(|retired| {
+                retired.revision < self.revision
+                    && owner
+                        .verify(
+                            &approval_message(
+                                self.user_id,
+                                retired.revision,
+                                &retired.name,
+                                &retired.keys,
+                            ),
+                            retired.approval.as_slice(),
+                        )
+                        .is_ok()
+            })
             .collect()
+    }
+}
+
+/// What someone's keys at `revision` had signed when the owner approved new keys for them
+/// after a recovery: SHA-256 digests of the signed messages, of login versions and group
+/// changes, in order. Signed by the owner. Those keys verify nothing else from then on,
+/// so whoever has the lost device can't sign anything new in that person's name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedBefore {
+    pub user_id: UserId,
+    pub revision: u32,
+    pub digests: Vec<Bytes>,
+    pub approval: Bytes,
+}
+
+impl SignedBefore {
+    /// An unsigned list, in order and without repeats.
+    pub fn new(user_id: UserId, revision: u32, digests: impl IntoIterator<Item = Bytes>) -> Self {
+        let mut digests: Vec<Bytes> = digests.into_iter().collect();
+        digests.sort();
+        digests.dedup();
+        Self {
+            user_id,
+            revision,
+            digests,
+            approval: Bytes::default(),
+        }
+    }
+
+    /// Signs the list as the team owner.
+    pub fn approve(&mut self, owner: &AccountKeys) {
+        self.approval = owner.sign(&self.message());
+    }
+
+    /// Checks the owner's signature, and that the list is in order without repeats.
+    pub fn verify(&self, owner: &AccountPublicKeys) -> Result<(), Error> {
+        if !self.digests.is_sorted_by(|a, b| a < b) {
+            return Err(Error::BadSignature);
+        }
+        owner.verify(&self.message(), self.approval.as_slice())
+    }
+
+    /// Whether these keys had signed what this digest names. Only for a verified list.
+    pub fn contains(&self, digest: &Bytes) -> bool {
+        self.digests.binary_search(digest).is_ok()
+    }
+
+    fn message(&self) -> Vec<u8> {
+        let user = self.user_id.to_be_bytes();
+        let revision = self.revision.to_be_bytes();
+        let parts: Vec<&[u8]> = [user.as_slice(), revision.as_slice()]
+            .into_iter()
+            .chain(self.digests.iter().map(Bytes::as_slice))
+            .collect();
+        transcript("keystead/signed-before-recovery/v1", &parts)
     }
 }
 
@@ -172,10 +227,12 @@ mod tests {
         recovered.revision = 1;
         recovered.approve(&owner);
         assert!(recovered.verify(&owner.public()).is_ok());
-        assert_eq!(
-            recovered.signing_keys(&owner.public()),
-            [new.public(), old.public()]
-        );
+        let retired: Vec<_> = recovered
+            .retired_keys(&owner.public())
+            .into_iter()
+            .map(|retired| retired.keys.clone())
+            .collect();
+        assert_eq!(retired, [old.public()]);
 
         // The revision is signed: the same keys can't pass for another revision.
         let mut replayed = recovered.clone();
@@ -184,7 +241,33 @@ mod tests {
         // A retired set that wasn't approved doesn't count.
         let mut forged = recovered.clone();
         forged.retired[0].keys = AccountKeys::derive(&AccountSecret::generate()).public();
-        assert_eq!(forged.signing_keys(&owner.public()), [new.public()]);
+        assert!(forged.retired_keys(&owner.public()).is_empty());
+    }
+
+    #[test]
+    fn the_list_of_what_retired_keys_signed_is_the_owners() {
+        let owner = AccountKeys::derive(&AccountSecret::generate());
+        let digest = |byte: u8| Bytes(vec![byte; 32]);
+        let mut list = SignedBefore::new(UserId(2), 0, [digest(3), digest(1), digest(3)]);
+        assert_eq!(list.digests, [digest(1), digest(3)]);
+        list.approve(&owner);
+        assert!(list.verify(&owner.public()).is_ok());
+        assert!(list.contains(&digest(3)));
+        assert!(!list.contains(&digest(2)));
+
+        // Nothing can be added, and it holds only for that person and revision.
+        let mut added = list.clone();
+        added.digests.push(digest(4));
+        assert!(added.verify(&owner.public()).is_err());
+        let mut other = list.clone();
+        other.revision = 1;
+        assert!(other.verify(&owner.public()).is_err());
+        let mut someone_else = list.clone();
+        someone_else.user_id = UserId(3);
+        assert!(someone_else.verify(&owner.public()).is_err());
+        let mut by_impostor = list.clone();
+        by_impostor.approve(&AccountKeys::derive(&AccountSecret::generate()));
+        assert!(by_impostor.verify(&owner.public()).is_err());
     }
 
     #[test]

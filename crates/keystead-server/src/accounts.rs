@@ -16,9 +16,11 @@ use keystead_core::api::{
     RecoveryInProgress, RecoveryStarted, RecoveryState, RecoveryTokenRequest, Session,
     SetupRequest, SignInRequest,
 };
-use keystead_core::directory::DirectoryEntry;
+use keystead_core::directory::{DirectoryEntry, SignedBefore};
 use keystead_core::encoding::Bytes;
+use keystead_core::groups::GroupEntry;
 use keystead_core::ids::{DeviceId, UserId};
+use keystead_core::items::EncryptedItem;
 use keystead_core::keys::{AccountPublicKeys, DevicePublicKey, recovery_message, sign_in_message};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -647,7 +649,53 @@ pub(crate) async fn recovery_in_progress(
     Ok(Json(RecoveryInProgress {
         keys,
         escrow: escrow.as_deref().map(serde_json::from_str).transpose()?,
+        signed: signed_digests(&mut conn, UserId(user_id)).await?,
     }))
+}
+
+/// Digests of everything `user` signed that the server holds: every login version, current
+/// or in history, deleted or not, and every group change.
+async fn signed_digests(conn: &mut SqliteConnection, user: UserId) -> Result<Vec<Bytes>, ApiError> {
+    let items: Vec<String> = sqlx::query_scalar(
+        "SELECT body FROM items WHERE json_extract(body, '$.author') = ?1
+         UNION ALL
+         SELECT body FROM item_history WHERE json_extract(body, '$.author') = ?1",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    let groups: Vec<String> = sqlx::query_scalar(
+        "SELECT body FROM group_entries WHERE json_extract(body, '$.signer') = ?",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut digests = Vec::with_capacity(items.len() + groups.len());
+    for body in items {
+        digests.push(serde_json::from_str::<EncryptedItem>(&body)?.signed_digest());
+    }
+    for body in groups {
+        digests.push(serde_json::from_str::<GroupEntry>(&body)?.signed_digest());
+    }
+    Ok(digests)
+}
+
+/// `GET /v1/users/{user_id}/retired/{revision}`: the owner's list of what someone's keys
+/// at that revision had signed when they were replaced, for anyone signed in.
+pub(crate) async fn signed_before(
+    State(state): State<AppState>,
+    _auth: Auth,
+    Path((user_id, revision)): Path<(i64, u32)>,
+) -> Result<Json<SignedBefore>, ApiError> {
+    let list: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT signed_before FROM retired_keys WHERE user_id = ? AND revision = ?",
+    )
+    .bind(user_id)
+    .bind(revision)
+    .fetch_optional(&state.readers)
+    .await?;
+    let list = list.flatten().ok_or(ApiError::NotFound)?;
+    Ok(Json(serde_json::from_str(&list)?))
 }
 
 /// `DELETE /v1/users/{user_id}/recovery`: the owner, or the person on a device they still
@@ -825,10 +873,21 @@ pub(crate) async fn approve_recovery(
     approved
         .verify(&owner.keys)
         .map_err(|_| ApiError::BadRequest("approval does not verify".into()))?;
+    // What the old keys had signed, as the owner signed it; they verify nothing else.
+    let signed = &request.signed_before;
+    if signed.user_id != user || signed.revision != entry.revision {
+        return Err(ApiError::BadRequest(
+            "the list of what their keys signed is for other keys".into(),
+        ));
+    }
+    signed.verify(&owner.keys).map_err(|_| {
+        ApiError::BadRequest("the list of what their keys signed doesn't verify".into())
+    })?;
 
     sqlx::query(
-        "INSERT INTO retired_keys (user_id, revision, name, encryption_key, signing_key, approval)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO retired_keys
+             (user_id, revision, name, encryption_key, signing_key, approval, signed_before)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(user.0)
     .bind(entry.revision)
@@ -836,6 +895,7 @@ pub(crate) async fn approve_recovery(
     .bind(&entry.keys.encryption.0[..])
     .bind(&entry.keys.signing.0[..])
     .bind(old_approval.as_slice())
+    .bind(serde_json::to_string(signed)?)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
