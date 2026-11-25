@@ -27,6 +27,8 @@ final class AppModel {
         case folder(String)
         /// Logins whose passwords someone who lost access may still know.
         case toChange
+        /// Logins you can change whose password is weak, reused or over a year old.
+        case health
         /// Logins deleted in the last 30 days, which can still be brought back.
         case recentlyDeleted
         case people
@@ -200,6 +202,7 @@ final class AppModel {
             case .folder(let folder): guard item.folder == folder else { return false }
             case .sharedWithMe: guard item.sharedWithMe else { return false }
             case .toChange: guard toChange.contains(where: { $0.itemId == item.id }) else { return false }
+            case .health: guard health(for: item) != nil else { return false }
             case .recentlyDeleted: return false
             case .allLogins, .people, .groups: break
             }
@@ -219,6 +222,28 @@ final class AppModel {
 
     /// How many logins are on the To Change list.
     var toChangeCount: Int { Set(toChange.map(\.itemId)).count }
+
+    /// The last password health check; nil until Password Health is first shown.
+    private(set) var health: PasswordHealth?
+    private(set) var checkingHealth = false
+
+    /// Checks the passwords of the logins you can change: weak, reused or over a year old.
+    /// They're opened in memory on this Mac, and nothing about them is kept.
+    func checkHealth() async {
+        guard vault != nil, !checkingHealth else { return }
+        checkingHealth = true
+        defer { checkingHealth = false }
+        do {
+            health = try await perform { try $0.passwordHealth() }
+        } catch {
+            message = describe(error)
+        }
+    }
+
+    /// What's wrong with this login's password, from the last check.
+    func health(for item: ItemSummary) -> HealthLogin? {
+        health?.logins.first { $0.itemId == item.id }
+    }
 
     var filteredItems: [ItemSummary] { items(matching: search) }
 
@@ -501,13 +526,20 @@ final class AppModel {
         }
     }
 
-    /// Starts helping someone recover (owner only); returns the line to send them.
-    func startRecovery(for user: User) async throws -> String {
+    /// Starts helping someone recover (owner only); returns the line to send them. Signing
+    /// out their devices asks for Touch ID first.
+    func startRecovery(for user: User, signOutDevices: Bool) async throws -> String {
         #if DEBUG
         if isDemo { return "keystead recover-with-help https://keys.example.com 3Fq…x9 --owner 1a2b-3c4d-5e6f-7a8b-9c0d" }
         #endif
+        if signOutDevices {
+            _ = try await DeviceAuthentication.authenticate(
+                reason: "sign out \(user.name)'s devices")
+        }
         let id = user.userId
-        let line = try await perform { try $0.startRecovery(userId: id) }
+        let line = try await perform {
+            try $0.startRecovery(userId: id, signOutDevices: signOutDevices)
+        }
         users = try await perform { try $0.users() }
         return line
     }
@@ -1302,6 +1334,10 @@ final class AppModel {
                     + "Keystead and can't be shown. Update Keystead to see them."
             }
             localRevision += 1
+            if section == .health {
+                // A login just saved may have a better password now.
+                Task { await checkHealth() }
+            }
             let summaries = try await perform { try $0.folderSummaries() }
             folders = summaries.map(\.name).sorted()
             folderRoles = Dictionary(summaries.map { ($0.name, $0.role) }, uniquingKeysWith: { a, _ in a })
@@ -1406,6 +1442,18 @@ extension AppModel {
                     username: "ops", folder: "Production", deletedBy: "Mo",
                     deletedAt: 1_795_400_000, keptUntil: 1_795_400_000 + 30 * 86_400),
             ]
+            model.health = PasswordHealth(
+                logins: [
+                    HealthLogin(
+                        itemId: "00000000-0000-4000-8000-000000000001", name: "AWS root",
+                        username: "root", folder: "Production", weak: false,
+                        reusedWith: ["Bank"], oldSince: 1_740_000_000),
+                    HealthLogin(
+                        itemId: "00000000-0000-4000-8000-000000000003", name: "Bank",
+                        username: "olivia", folder: nil, weak: true,
+                        reusedWith: ["AWS root"], oldSince: nil),
+                ],
+                checked: 6, agesKnown: true)
             // Pat, removed from the team, could see two of Olivia's logins.
             model.toChange = [
                 ToChange(

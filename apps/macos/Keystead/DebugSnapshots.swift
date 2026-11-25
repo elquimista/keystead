@@ -125,6 +125,7 @@ enum DebugSnapshots {
                     model.section = .toChange
                     model.selectedItemID = model.items[0].id
                 }),
+                ("6e9b-password-health", { model.section = .health }),
                 ("6f-quick-search", { QuickSearch.shared?.show(query: "a") }),
                 // The down arrow, as the keyboard sends it: the second match is picked.
                 ("6f2-quick-search-down", { pressKey(keyCode: 125) }),

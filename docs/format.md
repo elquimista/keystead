@@ -184,7 +184,10 @@ device and their recovery kit. Their old keys are gone, so they get new ones:
 1. The owner starts it (`POST /v1/users/{id}/recovery`) and sends the person the line it
    gives: `keystead recover-with-help <server> <token> --owner <owner's fingerprint>`. It
    works once, for a week; starting again replaces it. Devices the person still has see
-   `recovering` on their directory entry and can cancel (`DELETE …/recovery`).
+   `recovering` on their directory entry and can cancel (`DELETE …/recovery`). With
+   `?sign_out_devices=true` the server removes their devices at once instead, so a lost one
+   that still works can't cancel it or change escrow; if they still have one after all,
+   their recovery kit registers it again (see Recovery kit).
 2. The new device makes a new account secret and device key and sends their public halves
    with the token (`POST /v1/recovery/claim`, no session). Only that device may send them
    again. It then asks `POST /v1/recovery/state` until the owner approves.
@@ -563,6 +566,7 @@ codes (400, 401, 403, 404, 409).
 | `PUT /v1/items/{id}/groups/{group}` | `RoleRequest` | 204 | Managers of the item |
 | `DELETE /v1/items/{id}/exposures/{user}` | | 204 | Editors and managers of the item |
 | `GET /v1/exposures` | | `Exposures` | Members; only items they can change |
+| `GET /v1/password-ages` | | `PasswordAges` | Members; items they can open |
 | `GET /v1/sync?cursor=N&limit=M` | | `SyncPage` | Members |
 
 `Health` is `{"status", "version", "item_format"}`. `item_format` is the newest item
@@ -702,6 +706,13 @@ the user and when (`since`, seconds since 1970). It ends when:
 `GET /v1/exposures` lists them for the items the caller can change (edit or manage), so
 the remover sees what they can fix, and the managers of folders the remover can't open see
 the rest. Servers before 0.5.0 record nothing and answer 404; clients then show no list.
+
+**Password health** (0.13.0 and later) is worked out by apps from the passwords they can
+open, in memory: weak ones (zxcvbn scores them below 3), ones other items share, and ones
+set over a year ago. Only that last part comes from the server: it records when each
+item's password was last set, when the item is created or saved with `password_changed`,
+and `GET /v1/password-ages` lists it for the items the caller can open. Items saved before
+0.13.0 count from when they were last saved; before 0.7.0, from nothing.
 
 **Sync** returns feed entries after the cursor, in change-number order, from one
 consistent snapshot:

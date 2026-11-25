@@ -37,12 +37,18 @@ uniffi = "0.32"
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = { version = "1", features = ["derive"] }
+# Dropbox's password strength estimator, for password health.
+zxcvbn = { version = "3", default-features = false }
 
 # Unoptimized Argon2 takes many seconds per KeePass file, which tests export and import.
 [profile.dev.package.rust-argon2]
 opt-level = 3
 
 [profile.dev.package.blake2b_simd]
+opt-level = 3
+
+# Unoptimized, estimating a password's strength takes long enough to slow tests down.
+[profile.dev.package.zxcvbn]
 opt-level = 3
 
 [workspace.lints.rust]

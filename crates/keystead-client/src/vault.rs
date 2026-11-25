@@ -38,8 +38,10 @@ use crate::http::{Client, Failure};
 use crate::import::ImportedLogin;
 use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile};
 
+mod health;
 mod recovery;
 
+pub use health::{HealthRow, OLD_AFTER_SECONDS, PasswordHealth};
 use recovery::RecoveryDuties;
 pub use recovery::{
     ApprovedRecovery, RecoveryClaim, RecoveryLine, RecoveryProgress, RecoveryRequest,

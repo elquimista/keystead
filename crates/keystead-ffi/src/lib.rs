@@ -516,6 +516,33 @@ pub struct ToChange {
     pub since: i64,
 }
 
+/// A login you can change whose password needs attention.
+#[derive(uniffi::Record)]
+pub struct HealthLogin {
+    pub item_id: String,
+    pub name: String,
+    pub username: String,
+    /// The login's folder, if it's in one of yours.
+    pub folder: Option<String>,
+    /// Easy to guess.
+    pub weak: bool,
+    /// The other logins you can open that have the same password, by name.
+    pub reused_with: Vec<String>,
+    /// When the password was set, if over a year ago, in seconds since 1970 (UTC).
+    pub old_since: Option<i64>,
+}
+
+/// What a password health check found.
+#[derive(uniffi::Record)]
+pub struct PasswordHealth {
+    /// Logins that need attention, those with most problems first.
+    pub logins: Vec<HealthLogin>,
+    /// How many logins with a password you can change were checked.
+    pub checked: u32,
+    /// The server says when passwords were set (0.13.0 and later), so old ones can show.
+    pub ages_known: bool,
+}
+
 #[derive(uniffi::Record)]
 pub struct SyncResult {
     pub received: u32,
@@ -706,8 +733,15 @@ impl Vault {
 
     /// Starts a recovery with the owner's help for someone who lost every device and their
     /// recovery kit (owner only). Returns the line to send them.
-    pub fn start_recovery(&self, user_id: i64) -> Result<String, CoreError> {
-        Ok(self.vault()?.start_recovery(UserId(user_id))?.command())
+    pub fn start_recovery(
+        &self,
+        user_id: i64,
+        sign_out_devices: bool,
+    ) -> Result<String, CoreError> {
+        Ok(self
+            .vault()?
+            .start_recovery(UserId(user_id), sign_out_devices)?
+            .command())
     }
 
     /// Someone's recovery waiting for approval, if any (owner only).
@@ -1198,6 +1232,32 @@ impl Vault {
                 since: row.since,
             })
             .collect())
+    }
+
+    /// Checks the passwords of the logins you can change: weak ones, ones other logins
+    /// share, and ones set over a year ago. Passwords are opened in memory only.
+    pub fn password_health(&self) -> Result<PasswordHealth, CoreError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs() as i64);
+        let health = self.vault()?.password_health(now)?;
+        Ok(PasswordHealth {
+            logins: health
+                .rows
+                .into_iter()
+                .map(|row| HealthLogin {
+                    item_id: row.item_id.to_string(),
+                    name: row.name,
+                    username: row.username,
+                    folder: row.folder,
+                    weak: row.weak,
+                    reused_with: row.reused_with,
+                    old_since: row.old_since,
+                })
+                .collect(),
+            checked: health.checked as u32,
+            ages_known: health.ages_known,
+        })
     }
 
     /// Takes a login off the list for one person, without changing its password.

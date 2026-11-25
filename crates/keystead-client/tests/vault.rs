@@ -1858,8 +1858,8 @@ fn recovering_with_the_owners_help_brings_back_what_was_shared_and_own_logins_in
     assert_eq!(bob.list().unwrap().len(), 4);
 
     // Bob loses everything. Alice starts a recovery; his old device hears of it.
-    let line = alice.start_recovery(bob_id).unwrap();
-    assert!(alice.start_recovery(alice.whoami().user_id).is_err());
+    let line = alice.start_recovery(bob_id, false).unwrap();
+    assert!(alice.start_recovery(alice.whoami().user_id, false).is_err());
     bob.sync().unwrap();
     assert!(bob.whoami().recovering);
 
@@ -2026,14 +2026,14 @@ fn without_escrow_only_what_was_shared_comes_back_and_a_recovery_can_be_cancelle
     bob.add(None, overview, details).unwrap();
 
     // A recovery Bob didn't ask for: he cancels it from his device, and the line is dead.
-    let line = alice.start_recovery(bob_id).unwrap();
+    let line = alice.start_recovery(bob_id, false).unwrap();
     bob.sync().unwrap();
     bob.cancel_recovery(bob_id).unwrap();
     assert!(recovery_approved(&line).is_err());
     assert!(alice.recovery_request(bob_id).unwrap().is_none());
 
     // A real one, without escrow: Production comes back, Bank doesn't.
-    let line = alice.start_recovery(bob_id).unwrap();
+    let line = alice.start_recovery(bob_id, false).unwrap();
     let secret = AccountSecret::generate();
     let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
     let device_id = DeviceId::random();
@@ -2091,7 +2091,7 @@ fn escrow_brings_back_folders_only_they_could_open_after_every_recovery() {
 
     // A recovery, and how many folders the new device gave new keys on its first sync.
     let recover = |alice: &mut Vault, profile: &str, escrow: bool| -> (Vault, usize) {
-        let line = alice.start_recovery(bob_id).unwrap();
+        let line = alice.start_recovery(bob_id, false).unwrap();
         let secret = AccountSecret::generate();
         let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
         let device_id = DeviceId::random();
@@ -2172,7 +2172,7 @@ struct ApprovedDevice {
 
 /// Starts a recovery for `user`, sends a new device's keys, and has the owner approve them.
 fn approve_new_device(fixture: &Fixture, owner: &mut Vault, user: UserId) -> ApprovedDevice {
-    let line = owner.start_recovery(user).unwrap();
+    let line = owner.start_recovery(user, false).unwrap();
     let secret = AccountSecret::generate();
     let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
     let device_id = DeviceId::random();
@@ -2351,7 +2351,7 @@ fn escrow_and_approvals_take_the_right_signatures() {
     assert!(!bob.whoami().escrow);
 
     // Escrow can't change while a recovery is waiting.
-    alice.start_recovery(bob_id).unwrap();
+    alice.start_recovery(bob_id, false).unwrap();
     bob.sync().unwrap();
     assert!(bob.set_escrow(true).is_err());
     bob.cancel_recovery(bob_id).unwrap();
@@ -2380,4 +2380,120 @@ fn escrow_and_approvals_take_the_right_signatures() {
     // Nothing of Bob's own came back from escrow, so it stays off until he turns it on.
     let new_bob = finish(&fixture, &device, "new-bob");
     assert!(!new_bob.whoami().escrow);
+}
+
+#[test]
+fn signing_out_their_devices_stops_a_lost_one_cancelling_and_the_kit_still_works() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        bob_secret,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+
+    // The owner signs Bob's devices out as the recovery starts: a lost one can't cancel it.
+    let line = alice.start_recovery(bob_id, true).unwrap();
+    assert!(bob.sync().is_err());
+    assert!(bob.cancel_recovery(bob_id).is_err());
+    assert!(!keystead_client::recovery_approved(&line).unwrap());
+
+    // If Bob didn't ask for it, his recovery kit gets him back in, and he can cancel.
+    let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
+    let owner_fingerprint = alice.whoami().fingerprint;
+    let mut back = recover(
+        &fixture.profile("bob-again"),
+        NewAccount {
+            server: &fixture.url,
+            secret: &bob_secret,
+            device_id: DeviceId::random(),
+            device_name: "Bob's other Mac",
+            signer,
+        },
+        Some(&owner_fingerprint),
+    )
+    .unwrap();
+    assert!(back.whoami().recovering);
+    back.cancel_recovery(bob_id).unwrap();
+    assert!(keystead_client::recovery_approved(&line).is_err());
+}
+
+#[test]
+fn password_health_lists_weak_reused_and_old_passwords_you_can_change() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::View)
+        .unwrap();
+    let shared = "Hn3$wQ8z!Pc5#rT1vY6b";
+    for (name, password) in [
+        ("Database", "Xq7#mV2p!Lr9@zK4tW8s"),
+        ("Router", "password1"),
+        ("Mail", shared),
+        ("Billing", shared),
+    ] {
+        let (overview, details) = login(name, password);
+        alice.add(Some("Production"), overview, details).unwrap();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let summary =
+        |health: &keystead_client::PasswordHealth| -> Vec<(String, bool, Vec<String>, bool)> {
+            health
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.name.clone(),
+                        row.weak,
+                        row.reused_with.clone(),
+                        row.old_since.is_some(),
+                    )
+                })
+                .collect()
+        };
+    let s = |text: &str| text.to_owned();
+
+    let health = alice.password_health(now).unwrap();
+    assert_eq!((health.checked, health.ages_known), (4, true));
+    assert_eq!(
+        summary(&health),
+        [
+            (s("Billing"), false, vec![s("Mail")], false),
+            (s("Mail"), false, vec![s("Billing")], false),
+            (s("Router"), true, vec![], false),
+        ]
+    );
+
+    // A year on, every one of them is old too.
+    let later = alice
+        .password_health(now + keystead_client::OLD_AFTER_SECONDS + 60)
+        .unwrap();
+    let names: Vec<&str> = later.rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(names, ["Billing", "Mail", "Router", "Database"]);
+    assert!(later.rows.iter().all(|row| row.old_since.is_some()));
+
+    // Bob can only view Production: nothing of it is his to change, but his own login with
+    // the same password as two in it shows as reused.
+    bob.sync().unwrap();
+    let (overview, details) = login("Personal mail", shared);
+    bob.add(None, overview, details).unwrap();
+    let health = bob.password_health(now).unwrap();
+    assert_eq!(health.checked, 1);
+    assert_eq!(
+        summary(&health),
+        [(
+            s("Personal mail"),
+            false,
+            vec![s("Billing"), s("Mail")],
+            false
+        )]
+    );
 }

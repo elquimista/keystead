@@ -178,6 +178,14 @@ keystead to-change dismiss Bank          # keep a password as it is
 keystead to-change dismiss --user 3      # everything user 3 could see, if they only moved teams
 ```
 
+Password health lists the logins you can change whose password is weak, used for other
+logins too, or unchanged for over a year (old ones need a 0.13.0 server). It's worked out
+on your machine; nothing about the passwords is kept:
+
+```sh
+keystead health
+```
+
 Groups share folders and logins with several people at once, and people added later get
 them too. The owner makes groups; a group's managers add and remove people. Taking
 someone out gives the group, and the folders shared with it, new keys.
@@ -226,7 +234,7 @@ stops new copies, but can't take back what the owner may already have opened:
 
 ```sh
 keystead escrow on                   # Bob, beforehand: let the owner recover his own logins and folders
-keystead recovery start 2            # Alice: prints a line to send Bob
+keystead recovery start 2            # Alice: prints a line to send Bob (--sign-out-devices: his devices stop working now)
 keystead recover-with-help http://127.0.0.1:8080 <token> --owner <owner's fingerprint>  # Bob, on a new machine: shows his new fingerprint and waits; if it stops, run it again
 keystead recovery approve 2 --fingerprint <Bob's new fingerprint>  # Alice, after he reads it out
 keystead recovery cancel             # Bob, on a device he still has, if he didn't ask for it

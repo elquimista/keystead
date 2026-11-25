@@ -87,6 +87,11 @@ struct VaultView: View {
                 model.section = .allLogins
             }
         }
+        .onChange(of: model.section) {
+            if model.section == .health {
+                Task { await model.checkHealth() }
+            }
+        }
         .onChange(of: model.toChange.isEmpty) {
             // The last one was changed or dismissed; the login stays selected.
             if model.toChange.isEmpty && model.section == .toChange {
@@ -119,6 +124,10 @@ private struct Sidebar: View {
                     .tag(AppModel.Section.recentlyDeleted)
                     .help("Logins deleted in the last 30 days, which can be brought back")
             }
+            Label("Password Health", systemImage: "heart.text.square")
+                .badge(model.health?.logins.count ?? 0)
+                .tag(AppModel.Section.health)
+                .help("Weak, reused and old passwords among the logins you can change")
             Section("Folders") {
                 FolderTree(model: model, nodes: FolderNode.tree(model.folders))
                 Button {
@@ -274,6 +283,7 @@ private struct LoginList: View {
         case .folder(let folder): folder
         case .sharedWithMe: "Shared with Me"
         case .toChange: "To Change"
+        case .health: "Password Health"
         case .allLogins, .people, .groups, .recentlyDeleted: "All Logins"
         }
     }
@@ -288,6 +298,17 @@ private struct LoginList: View {
                     if section == .toChange {
                         Text("People who lost access may still know these passwords. Change "
                             + "each one at its website, then save the new one here.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.bottom, 4)
+                            .selectionDisabled()
+                    }
+                    if section == .health {
+                        Text("These logins you can change have a password that's easy to "
+                            + "guess, used for other logins too, or unchanged for over a year. "
+                            + "Change each one at its website, then save the new one here."
+                            + (model.health?.agesKnown == false
+                                ? " Old ones show once your server is on 0.13.0." : ""))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .padding(.bottom, 4)
@@ -368,6 +389,15 @@ private struct LoginList: View {
             let names = ListFormatter.localizedString(byJoining: entries.map(\.userName))
             return "\(names) lost access \(day(entries.first?.since ?? 0))"
         }
+        if section == .health, let entry = model.health(for: item) {
+            var problems: [String] = []
+            if entry.weak { problems.append("Weak") }
+            if !entry.reusedWith.isEmpty {
+                problems.append("Same as " + ListFormatter.localizedString(byJoining: entry.reusedWith))
+            }
+            if let since = entry.oldSince { problems.append("Set \(day(since))") }
+            return problems.joined(separator: " · ")
+        }
         let parts = [item.username, folder == nil ? item.place : ""].filter { !$0.isEmpty }
         return parts.joined(separator: " · ")
     }
@@ -381,6 +411,14 @@ private struct LoginList: View {
                 "Nothing to change", systemImage: "checkmark.shield",
                 description: Text("When someone loses access, the passwords they could see show "
                     + "up here."))
+        } else if section == .health {
+            if let health = model.health {
+                ContentUnavailableView(
+                    "No weak, reused or old passwords", systemImage: "checkmark.shield",
+                    description: Text("Checked \(health.checked) logins you can change."))
+            } else {
+                ProgressView("Checking passwords…")
+            }
         } else if section == .sharedWithMe {
             ContentUnavailableView(
                 "Nothing shared with you", systemImage: "shared.with.you",

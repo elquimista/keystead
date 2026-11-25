@@ -20,9 +20,9 @@ use axum::http::StatusCode;
 use keystead_core::api::{
     AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, DeletedItem, DeletedItems,
     EscrowedFolder, Exposure, Exposures, FolderEscrowRequest, FolderMember, FolderRole,
-    GroupMember, GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members, PutItemRequest,
-    RekeyRequest, Restore, RestoreFolderKeyRequest, Role, RoleRequest, Roles, SavedVersion,
-    SyncEntry, SyncPage, ViaGroup,
+    GroupMember, GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members, PasswordAge,
+    PasswordAges, PutItemRequest, RekeyRequest, Restore, RestoreFolderKeyRequest, Role,
+    RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage, ViaGroup,
 };
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
@@ -878,16 +878,20 @@ pub(crate) async fn put_item(
 
     let seq = next_seq(&mut tx).await?;
     sqlx::query(
-        "INSERT INTO items (id, folder_id, version, seq, body, saved_at)
-         VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
+        "INSERT INTO items (id, folder_id, version, seq, body, saved_at, password_saved_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, CAST(strftime('%s', 'now') AS INTEGER),
+                 CAST(strftime('%s', 'now') AS INTEGER))
          ON CONFLICT (id) DO UPDATE SET folder_id = excluded.folder_id, version = excluded.version,
-                                        seq = excluded.seq, body = excluded.body, saved_at = excluded.saved_at",
+                                        seq = excluded.seq, body = excluded.body, saved_at = excluded.saved_at,
+                                        password_saved_at = CASE WHEN ?6 THEN excluded.saved_at
+                                                                 ELSE items.password_saved_at END",
     )
     .bind(item_id.to_string())
     .bind(item.folder_id.map(|folder_id| folder_id.to_string()))
     .bind(item.version as i64)
     .bind(seq)
     .bind(serde_json::to_string(&item)?)
+    .bind(request.password_changed)
     .execute(&mut *tx)
     .await?;
 
@@ -2212,6 +2216,37 @@ async fn reconcile_with(
         }
     }
     Ok(())
+}
+
+/// `GET /v1/password-ages`: when the password of each live item the caller can open was
+/// last set, as apps said when saving, for password health. Unknown for items last saved
+/// before 0.7.0.
+pub(crate) async fn password_ages(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<PasswordAges>, ApiError> {
+    let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT i.id, i.password_saved_at FROM items i
+         WHERE NOT COALESCE(json_extract(i.body, '$.deleted'), 0)
+           AND (EXISTS (SELECT 1 FROM access a WHERE a.user_id = ?1 AND a.folder_id = i.folder_id)
+                OR EXISTS (SELECT 1 FROM item_reach r WHERE r.user_id = ?1 AND r.item_id = i.id)
+                OR (i.folder_id IS NULL AND json_extract(i.body, '$.owner') = ?1))
+         ORDER BY i.id",
+    )
+    .bind(auth.user_id.0)
+    .fetch_all(&state.readers)
+    .await?;
+    Ok(Json(PasswordAges {
+        items: rows
+            .into_iter()
+            .map(|(item_id, since)| {
+                Ok(PasswordAge {
+                    item_id: parse_item(&item_id)?,
+                    since,
+                })
+            })
+            .collect::<Result<_, ApiError>>()?,
+    }))
 }
 
 /// Records that someone lost access to items while their passwords stayed the same; the

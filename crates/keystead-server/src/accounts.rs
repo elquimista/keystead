@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use axum::Json;
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
@@ -24,6 +24,7 @@ use keystead_core::items::EncryptedItem;
 use keystead_core::keys::{AccountPublicKeys, DevicePublicKey, recovery_message, sign_in_message};
 use rand::RngCore;
 use rand::rngs::OsRng;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
@@ -593,13 +594,23 @@ pub(crate) async fn remove_user(
 
 // MARK: - Recovering with the owner's help
 
-/// `POST /v1/users/{user_id}/recovery` (owner): starts helping someone who lost every device
-/// and their recovery kit. Returns a one-time token to send them; an earlier one stops
-/// working.
+#[derive(Deserialize)]
+pub(crate) struct StartRecoveryParams {
+    /// Sign out the person's devices now (0.13.0 and later).
+    #[serde(default)]
+    sign_out_devices: bool,
+}
+
+/// `POST /v1/users/{user_id}/recovery?sign_out_devices=true` (owner): starts helping
+/// someone who lost every device and their recovery kit. Returns a one-time token to send
+/// them; an earlier one stops working. With `sign_out_devices`, their devices stop working
+/// at once, so a lost one that still works can't cancel the recovery or change escrow; if
+/// they still have one after all, their recovery kit gets them back in.
 pub(crate) async fn start_recovery(
     State(state): State<AppState>,
     auth: Auth,
     Path(user_id): Path<i64>,
+    Query(params): Query<StartRecoveryParams>,
 ) -> Result<Json<RecoveryStarted>, ApiError> {
     let user = UserId(user_id);
     let mut tx = state.writer.begin().await?;
@@ -634,7 +645,20 @@ pub(crate) async fn start_recovery(
     .bind(RECOVERY_LIFETIME_SECONDS)
     .execute(&mut *tx)
     .await?;
+    if params.sign_out_devices {
+        sqlx::query("DELETE FROM devices WHERE user_id = ?")
+            .bind(user.0)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
+    if params.sign_out_devices {
+        state
+            .sessions
+            .lock()
+            .expect("session lock poisoned")
+            .retain(|_, session| session.user_id != user);
+    }
     Ok(Json(RecoveryStarted {
         token: URL_SAFE_NO_PAD.encode(token),
     }))

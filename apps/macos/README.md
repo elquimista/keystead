@@ -41,6 +41,10 @@ account back on a new Mac with a Recovery Kit.
   change are listed under To Change in the sidebar, with a warning on each login and on the
   person's page. Saving a new password takes a login off; Keep It (or Keep All, for someone
   who only moved teams) keeps the password as it is. Needs a 0.5.0 server.
+- **Password Health:** in the sidebar, the logins you can change whose password is weak,
+  used for other logins too, or unchanged for over a year (old ones need a 0.13.0
+  server). It's worked out on your Mac when you open it, and nothing about the passwords
+  is kept.
 - **One-time codes:** a login can keep the setup of a site's one-time codes (Edit…, then
   paste the setup key or otpauth:// link, or From QR Code… to read it from a screenshot).
   Its details then show the current code with the seconds it has left; copying it works
@@ -62,8 +66,9 @@ account back on a new Mac with a Recovery Kit.
   working, and what's shared with them comes back as everyone's Keystead syncs. Under
   People › You, "Let the owner recover my own logins and folders" (escrow) brings back
   their own logins and the folders only they are in too, at the cost of the owner being
-  able to open them. A device they still have
-  warns them and can cancel a recovery they didn't ask for. Needs a 0.13.0 server, and
+  able to open them. A device they still have warns them on every page and can cancel a
+  recovery they didn't ask for, unless the owner chose to sign out their devices when
+  starting it (then their Recovery Kit gets them back in). Needs a 0.13.0 server, and
   every app updated first.
 - **Exporting:** File › Export Logins… saves every login you can open to a KeePass file
   (.kdbx), encrypted with a passphrase you choose, after Touch ID. Folders become groups

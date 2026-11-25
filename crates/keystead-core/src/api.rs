@@ -453,6 +453,21 @@ pub struct PutItemRequest {
     pub password_changed: bool,
 }
 
+/// `GET /v1/password-ages` (0.13.0 and later): when the password of each live item the
+/// caller can open was last set.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PasswordAges {
+    pub items: Vec<PasswordAge>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PasswordAge {
+    pub item_id: ItemId,
+    /// Seconds since 1970 (UTC), as the server recorded it; unknown for items last saved
+    /// before 0.7.0.
+    pub since: Option<i64>,
+}
+
 /// Someone who could open an item lost access to it, so they may still know its password.
 /// It stays until a version with a new password is saved, the item is deleted, someone
 /// dismisses it, or they get access again.

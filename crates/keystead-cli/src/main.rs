@@ -279,6 +279,9 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Password health: logins you can change whose password is weak, reused or over a
+    /// year old
+    Health,
     /// List passwords to change: logins you can change that someone could open before
     /// losing access
     ToChange {
@@ -316,7 +319,12 @@ enum DevicesCommand {
 #[derive(Subcommand)]
 enum RecoveryCommand {
     /// Start: prints a line to send them, like an invite
-    Start { user_id: i64 },
+    Start {
+        user_id: i64,
+        /// Sign out their devices now, so a lost one that still works can't cancel it
+        #[arg(long)]
+        sign_out_devices: bool,
+    },
     /// Whether they've used the line yet, and the new fingerprint
     Status { user_id: i64 },
     /// Approve their new keys after they read you the fingerprint their new device shows
@@ -574,8 +582,14 @@ fn run(cli: Cli) -> Result<()> {
             );
             println!("Save your new recovery kit now: `keystead recovery-kit`.");
         }
-        Command::Recovery(RecoveryCommand::Start { user_id }) => {
-            let line = commands::start_recovery(&home, UserId(user_id))?;
+        Command::Recovery(RecoveryCommand::Start {
+            user_id,
+            sign_out_devices,
+        }) => {
+            let line = commands::start_recovery(&home, UserId(user_id), sign_out_devices)?;
+            if sign_out_devices {
+                println!("Their devices are signed out.");
+            }
             println!("Send this line to them, privately; it works once, for a week:\n");
             println!("{}\n", line.command());
             println!("Then approve with the fingerprint their new device shows:");
@@ -1408,6 +1422,41 @@ fn run(cli: Cli) -> Result<()> {
             }
             commands::purge(&home, &name, folder.as_deref())?;
             println!("Deleted {name} for good.");
+        }
+        Command::Health => {
+            let health = commands::health(&home)?;
+            if health.rows.is_empty() {
+                println!(
+                    "Checked {} logins you can change: none has a weak, reused or old password.",
+                    health.checked
+                );
+            } else {
+                println!("Checked {} logins you can change:", health.checked);
+            }
+            for row in &health.rows {
+                let mut problems = Vec::new();
+                if row.weak {
+                    problems.push("weak".to_owned());
+                }
+                if !row.reused_with.is_empty() {
+                    problems.push(format!("same password as {}", row.reused_with.join(", ")));
+                }
+                if let Some(since) = row.old_since {
+                    problems.push(format!("unchanged since {}", date(since)));
+                }
+                let folder = row
+                    .folder
+                    .as_ref()
+                    .map(|folder| format!("  ({folder})"))
+                    .unwrap_or_default();
+                println!("  {}{folder}: {}", row.name, problems.join("; "));
+            }
+            if !health.ages_known {
+                println!(
+                    "The server doesn't say when passwords were set; update it to 0.13.0 or \
+                     later to see old ones."
+                );
+            }
         }
         Command::ToChange { action: None } => {
             let rows = commands::to_change(&home)?;

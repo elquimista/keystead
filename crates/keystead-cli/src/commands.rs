@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use keystead_client::{
     ApprovedRecovery, DeviceSetupLine, FolderDeletion, ImportPlan, ImportSummary, ImportedLogin,
-    JoiningDevice, KdbxExport, NewAccount, NewFolder, RecoveryClaim, RecoveryLine,
+    JoiningDevice, KdbxExport, NewAccount, NewFolder, PasswordHealth, RecoveryClaim, RecoveryLine,
     RecoveryProgress, RecoveryRequest, RenamedFolder, Vault, claim_recovery, finish_recovery,
     read_kdbx, recovery_progress,
 };
@@ -144,8 +144,8 @@ const RECOVERY_POLL: Duration = Duration::from_secs(3);
 
 /// Starts a recovery with the owner's help for someone (owner only); returns the line to
 /// send them.
-pub fn start_recovery(home: &Path, user: UserId) -> Result<RecoveryLine> {
-    open(home)?.start_recovery(user)
+pub fn start_recovery(home: &Path, user: UserId, sign_out_devices: bool) -> Result<RecoveryLine> {
+    open(home)?.start_recovery(user, sign_out_devices)
 }
 
 pub fn recovery_request(home: &Path, user: UserId) -> Result<Option<RecoveryRequest>> {
@@ -419,6 +419,15 @@ pub fn remove_user(home: &Path, user: UserId) -> Result<(String, usize)> {
 /// Passwords to change, most recent first.
 pub fn to_change(home: &Path) -> Result<Vec<ToChangeRow>> {
     refreshed(home)?.to_change()
+}
+
+/// The logins you can change whose password is weak, reused or over a year old, after a
+/// sync. Worked out here; nothing about the passwords is kept.
+pub fn health(home: &Path) -> Result<PasswordHealth> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    refreshed(home)?.password_health(now)
 }
 
 /// Takes logins off the list of passwords to change: one login (for everyone, or one

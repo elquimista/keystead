@@ -776,6 +776,9 @@ private struct HelpRecoverSheet: View {
     @State private var busy = false
     @State private var error: String?
     @State private var approved: RecoveryApproval?
+    /// Sign out their devices when making the line.
+    @State private var signOut = false
+    @State private var signedOut = false
 
     private var claimed: Bool { request?.claimed == true }
 
@@ -835,6 +838,18 @@ private struct HelpRecoverSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                if signedOut {
+                    Label("\(user.name)'s devices are signed out.", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                } else if line == nil {
+                    Toggle("Sign out \(user.name)'s devices now", isOn: $signOut)
+                    Text("A lost device that still works could cancel this recovery. If "
+                        + "\(user.name) still has one after all, their Recovery Kit gets them "
+                        + "back in.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -887,7 +902,8 @@ private struct HelpRecoverSheet: View {
     }
 
     private func start() async throws {
-        line = try await model.startRecovery(for: user)
+        line = try await model.startRecovery(for: user, signOutDevices: signOut)
+        signedOut = signedOut || signOut
         request = try await model.recoveryRequest(for: user)
     }
 

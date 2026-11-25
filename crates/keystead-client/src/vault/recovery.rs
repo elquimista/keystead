@@ -214,9 +214,16 @@ pub fn finish_recovery(path: &Path, account: NewAccount<'_>, line: &RecoveryLine
 
 impl Vault {
     /// Starts helping someone who lost every device and their recovery kit (owner only).
-    /// Returns the line to send them; an earlier one stops working.
-    pub fn start_recovery(&mut self, user: UserId) -> Result<RecoveryLine> {
-        let path = format!("/v1/users/{user}/recovery");
+    /// Returns the line to send them; an earlier one stops working. With
+    /// `sign_out_devices`, their devices stop working at once, so a lost one that still
+    /// works can't cancel the recovery; if they have one after all, their recovery kit
+    /// gets them back in.
+    pub fn start_recovery(&mut self, user: UserId, sign_out_devices: bool) -> Result<RecoveryLine> {
+        let path = if sign_out_devices {
+            format!("/v1/users/{user}/recovery?sign_out_devices=true")
+        } else {
+            format!("/v1/users/{user}/recovery")
+        };
         let started: RecoveryStarted = match self.call(|client| client.post_empty(&path))? {
             Ok(started) => started,
             Err(Failure::Status {

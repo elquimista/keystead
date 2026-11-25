@@ -236,6 +236,10 @@ const MIGRATIONS: &[&str] = &[
     // the new device never finished can be done again without losing anything.
     "ALTER TABLE users ADD COLUMN escrow_consent BLOB;
      ALTER TABLE users ADD COLUMN escrow_revision INTEGER NOT NULL DEFAULT 0;",
+    // 13 (0.13.0): when each item's password was last set, for password health. Items saved
+    // before get the time they were last saved, which is no earlier.
+    "ALTER TABLE items ADD COLUMN password_saved_at INTEGER;
+     UPDATE items SET password_saved_at = saved_at;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -406,6 +410,7 @@ pub fn router(state: AppState) -> Router {
             delete(vault::dismiss_exposure),
         )
         .route("/v1/exposures", get(vault::exposures))
+        .route("/v1/password-ages", get(vault::password_ages))
         .route("/v1/deleted", get(vault::deleted_items))
         .route("/v1/deleted/{item_id}", delete(vault::purge_item))
         .route("/v1/sync", get(vault::sync))
