@@ -138,7 +138,9 @@ person or on a call. Then share folders, or single logins, with them.
 
 ## Updating
 
-Releases are listed under the repository's
+Releases are listed on the repository's
+[Releases page](https://github.com/elquimista/keystead/releases) from 0.13.1 on, with the
+Mac app to download, and all of them under its
 [tags](https://github.com/elquimista/keystead/tags). To move to one:
 
 ```sh
@@ -237,6 +239,13 @@ with the owner's help: apps before 0.13.0 can't check a recovered person's new k
 they stop sharing with that person and ignore what they save. Apps from 0.13.0 work with
 older servers, saying the server needs updating for what it can't do. The Mac app can now
 write a file you choose in a Save panel, for exports.
+
+**Updating to 0.13.1.** The server is the same as 0.13.0, but 0.13.0's image was never
+published (its release waited on a macOS build that never got a machine), so a server on
+0.12.0 goes straight to 0.13.1: follow the 0.13.0 note above, backup included. The Mac app
+gets a new look, is about half the size, syncs on its own every few minutes, and has
+keyboard shortcuts for the selected login. From this release on, each release's page has
+the Mac app to download.
 
 ## Backups
 
