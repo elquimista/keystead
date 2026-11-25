@@ -94,6 +94,7 @@ keystead ls
 keystead show "AWS root"             # the password; --notes for the notes
 keystead edit "AWS root"             # new password; or --rename, --username, --url, --notes
 keystead rm Bank                     # delete for everyone who can open it (asks first)
+keystead mv "AWS root" --to Staging  # move to another folder; --own takes it out of folders
 ```
 
 To move from Passbolt, export from it in the KDBX format (with a passphrase), then import

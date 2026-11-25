@@ -184,6 +184,9 @@ const MIGRATIONS: &[&str] = &[
          transfer_key TEXT,
          wrapped_secret TEXT
      );",
+    // 8 (0.12.0): moving items between folders. Members of the folder an item left are
+    // told it moved, so their devices drop the copy that still says it's theirs.
+    "ALTER TABLE item_leave_log ADD COLUMN moved INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in

@@ -858,6 +858,19 @@ impl Vault {
         Ok(self.vault()?.purge(item_id_from(&item_id)?)?)
     }
 
+    /// Moves a login to another folder, or out of folders as yours (`None`). Who had it
+    /// only through its old folder loses it.
+    pub fn move_login(
+        &self,
+        item_id: String,
+        to_folder: Option<String>,
+    ) -> Result<SaveOutcome, CoreError> {
+        Ok(self
+            .vault()?
+            .move_item(item_id_from(&item_id)?, to_folder.as_deref())?
+            .into())
+    }
+
     /// Deletes a login for everyone who can open it.
     pub fn delete_login(&self, item_id: String) -> Result<SaveOutcome, CoreError> {
         Ok(self.vault()?.delete(item_id_from(&item_id)?)?.into())

@@ -250,8 +250,9 @@ rather than failing.
 An item outside folders has `"owner": <user id>` and `keys.owner` instead of `folder_id`
 and `keys.folder`. Absent fields are left out.
 
-- `version` starts at 1 and goes up by exactly one per saved change. An item never moves
-  to another folder or owner.
+- `version` starts at 1 and goes up by exactly one per saved change. Since 0.12.0 a
+  version may put the item in another folder, or out of folders as its author's own
+  (see Moving an item).
 - `author` is the user who saved this version. Their **account signing key** signs the
   whole version, key copies included, so the server can't add anyone:
 
@@ -440,8 +441,18 @@ user is the author and the version is `base_version + 1` (or 1 for a new item). 
 author must be an editor or manager of the current version (see Roles); a new item must
 be in a folder where the author edits or manages, or be the author's own. Adding anyone
 to `people`, or dropping anyone, takes a manager, except that anyone who can save may
-drop people the owner removed from the team. The item can't change folder, owner or go
-back to format 1, and everyone newly in `people` must be approved and not removed. Adding
+drop people the owner removed from the team. The item can't go back to format 1, and
+everyone newly in `people` must be approved and not removed.
+
+**Moving an item** (0.12.0 and later) is saving a version with another `folder_id`, or
+none and the author as `owner`, under a new item key sealed for the new place; people and
+groups it's shared with directly keep their copies. The author must be able to change it
+(edit or manage) and to add items to the new folder; an item in no folder can only be
+moved by its owner. Members of the old folder who can't reach it now lose it like anyone
+removed: their feed gets `left_item` with `"moved": true`, telling devices to drop the
+copy that still says it's in one of their folders, and it goes on their passwords to
+change. Servers before 0.12.0 refuse moves. Apps before 0.12.0 ignore `moved`, so they
+keep showing a moved item in its old folder until they're updated. Adding
 or dropping a group also takes a manager; a group new to the item gets its copy at the
 group's current generation, and no copy may name a generation the group hasn't reached.
 `PutItemRequest.roles` gives the roles of people new to `people`, and `group_roles` those
@@ -571,7 +582,8 @@ consistent snapshot:
 - `left`: drop a folder, keeping its items that were also shared with the user directly.
 - `rekeyed`: a folder the user can open has a new key: the new one wrapped for them or
   their group (`via_group`), its generation, the whole chain and the info sealed with it.
-- `left_item`: the user lost direct access to an item.
+- `left_item`: the user lost direct access to an item; with `"moved": true`, it moved to a
+  folder they can't open, so drop it whatever folder the local copy names.
 - `group`: the user joined a group, or one they're in changed: its `entries`, its current
   secret wrapped for them with its `generation`, and the `chain` to older ones. It comes
   before anything that needs the group's keys.
@@ -590,5 +602,4 @@ with them or their groups directly, the highest of the ways in), and every page
   server that lied could let someone save who shouldn't, though every version stays
   signed by its author. A group's managers and key are signed; who is in it isn't.
 - Groups inside groups (on purpose: no loops, and access stays easy to follow).
-- Moving an item to another folder.
 - Paginating a large folder that arrives with a join.

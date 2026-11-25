@@ -61,6 +61,7 @@ enum DebugSnapshots {
                 ("6c2b-closed", { model.sheet = nil }),
                 ("6c2c-history", { model.sheet = .history(model.items[0]) }),
                 ("6c2c1-import", { model.sheet = .importLogins }),
+                ("6c2c2-move", { model.sheet = .moveLogin(model.items[0]) }),
                 ("6c2d-closed", { model.sheet = nil }),
                 // AWS root: in a folder, and also shared with Mo.
                 ("6c3-delete-login", { model.sheet = .deleteLogin(model.items[0]) }),

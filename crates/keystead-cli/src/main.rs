@@ -221,6 +221,24 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Move a login to another folder (--to), or out of folders as your own (--own). Who
+    /// had it only through its old folder loses it
+    Mv {
+        name: String,
+        /// The folder it's in now, if several logins have that name
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(
+            long,
+            value_name = "FOLDER",
+            required_unless_present = "own",
+            conflicts_with = "own"
+        )]
+        to: Option<String>,
+        /// Out of folders: only you, and whoever it's shared with directly, keep it
+        #[arg(long)]
+        own: bool,
+    },
     /// List logins deleted in the last 30 days that you can bring back
     Deleted,
     /// Bring back a login deleted in the last 30 days
@@ -1081,6 +1099,17 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
+        Command::Mv {
+            name, folder, to, ..
+        } => match commands::move_item(&home, &name, folder.as_deref(), to.as_deref())? {
+            EditOutcome::Saved { .. } => match to {
+                Some(to) => println!("Moved {name} to {to}."),
+                None => println!("Moved {name} out of folders; it's your own now."),
+            },
+            EditOutcome::Conflict { author, .. } => {
+                println!("Not moved: {author} changed it first; try again.");
+            }
+        },
         Command::Deleted => {
             let rows: Vec<Vec<String>> = commands::deleted(&home)?
                 .into_iter()

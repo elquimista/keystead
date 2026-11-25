@@ -1631,7 +1631,11 @@ impl Vault {
             };
             let no_keys = Vec::new();
             let folder_keys = folder.map_or(&no_keys, |(keys, _)| keys);
-            let key = unlock_with(item, folder_keys, &self.keys, me, &self.groups)?;
+            // One that can't be opened here (a copy left behind by a move, say) is left
+            // out rather than failing the whole list.
+            let Ok(key) = unlock_with(item, folder_keys, &self.keys, me, &self.groups) else {
+                continue;
+            };
             let overview = item.open_overview(&key)?;
             rows.push(ItemRow {
                 id: item.id,
@@ -2356,6 +2360,89 @@ impl Vault {
         Ok(outcome)
     }
 
+    /// Moves a login to another folder, or out of folders as your own (`None`), in a new
+    /// version with a new key. Everyone who had it only through its old folder loses it,
+    /// and its password goes on their passwords to change; people and groups it's shared
+    /// with directly keep it. A login in no folder can only be moved by its owner.
+    pub fn move_item(&mut self, item_id: ItemId, to: Option<&str>) -> Result<EditOutcome> {
+        self.check_server_takes_items()?;
+        self.sync()?;
+        let current = self.live_item(item_id)?.clone();
+        let me = self.profile.user_id;
+        if current.owner.is_some_and(|owner| owner != me) {
+            bail!("only its owner can move a login that's in no folder");
+        }
+        let destination = to
+            .map(|folder| self.profile.find_folder(&self.keys, &self.groups, folder))
+            .transpose()?;
+        if destination == current.folder_id && (destination.is_some() || current.owner == Some(me))
+        {
+            bail!("it's already there");
+        }
+        if let Some(folder_id) = destination
+            && self.profile.folder_role(folder_id) < Role::Edit
+        {
+            bail!("you can only view that folder, so you can't move logins into it");
+        }
+        if self.profile.item_role(&current) < Role::Edit {
+            bail!("you can only view this login, so you can't move it");
+        }
+        let old_key = self.item_key(&current)?;
+        let overview = current.open_overview(&old_key)?;
+        let details = current.open_details(&old_key)?;
+
+        let key = ItemKey::generate();
+        let mut keys = ItemKeys::default();
+        match destination {
+            Some(folder_id) => {
+                let folder_key = self
+                    .profile
+                    .folder_key(&self.keys, &self.groups, folder_id)?;
+                keys.folder = Some(key.seal_for_folder(item_id, folder_id, &folder_key));
+            }
+            None => keys.owner = Some(key.seal_for_owner(item_id, me, &self.keys)),
+        }
+        // People and groups it's shared with keep it; the new owner needs no copy of their
+        // own.
+        for person in &current.keys.people {
+            if self.profile.is_removed(person.user_id)
+                || (destination.is_none() && person.user_id == me)
+            {
+                continue;
+            }
+            let recipient = self
+                .profile
+                .trusted_keys(person.user_id)
+                .context("someone this login is shared with isn't approved")?;
+            keys.people.push(PersonKey {
+                user_id: person.user_id,
+                wrapped_key: recipient.wrap_item_key(&key, item_id)?,
+            });
+        }
+        for copy in &current.keys.groups {
+            if !self.profile.group_exists(copy.group_id) {
+                continue;
+            }
+            let (_, entry) = self.profile.team_group(copy.group_id)?;
+            keys.groups.push(GroupKeyCopy {
+                group_id: copy.group_id,
+                generation: entry.generation,
+                wrapped_key: entry.encryption.wrap_item_key(&key, item_id)?,
+            });
+        }
+        let at = ItemVersion {
+            id: item_id,
+            folder_id: destination,
+            owner: destination.is_none().then_some(me),
+            version: current.version + 1,
+            author: me,
+        };
+        let item = EncryptedItem::seal(at, &key, keys, &self.keys, &overview, &details)?;
+        let outcome = self.put_version(&current, item, Vec::new(), Vec::new(), false)?;
+        self.save()?;
+        Ok(outcome)
+    }
+
     /// Shares one login with an approved user by giving them a copy of its key, in a new
     /// version. They see that login only, not the rest of its folder.
     pub fn share_item(&mut self, item_id: ItemId, user: UserId, role: Role) -> Result<String> {
@@ -2791,12 +2878,14 @@ impl Vault {
                 self.groups = self.profile.group_keyring(&self.keys);
             }
             SyncEntry::Left { folder_id, .. } => self.forget_folder(folder_id),
-            SyncEntry::LeftItem { item_id, .. } => {
-                // Keep it if one of our folders still has it.
-                let in_folder = self.profile.items.get(&item_id).is_some_and(|item| {
-                    item.folder_id
-                        .is_some_and(|folder_id| self.profile.folders.contains_key(&folder_id))
-                });
+            SyncEntry::LeftItem { item_id, moved, .. } => {
+                // Keep it if one of our folders still has it, unless it moved: then the
+                // folder on our copy is out of date.
+                let in_folder = !moved
+                    && self.profile.items.get(&item_id).is_some_and(|item| {
+                        item.folder_id
+                            .is_some_and(|folder_id| self.profile.folders.contains_key(&folder_id))
+                    });
                 if !in_folder {
                     self.profile.items.remove(&item_id);
                 }

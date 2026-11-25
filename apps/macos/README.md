@@ -13,6 +13,10 @@ account back on a new Mac with a Recovery Kit.
   password. Each login can be edited (name, username, website, password and notes; notes
   stay hidden until shown, like the password), shared with a person or a group, or
   deleted for everyone who can open it.
+- **Moving logins:** Move To… (in a login's details or right-click menu) moves it to
+  another folder you can add to, or out of folders as yours. Whoever had it only through
+  the old folder loses it, and its password goes on their To Change list; people and
+  groups it's shared with directly keep it. Needs a 0.12.0 server.
 - **Folders inside folders:** folders named like "Production / Databases" show nested in
   the sidebar. New Folder Inside… (a folder's right-click menu) makes one that starts out
   shared like its parent, or private. After that each folder has its own access: sharing

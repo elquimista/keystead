@@ -38,6 +38,7 @@ final class AppModel {
         case addLogin(folder: String?)
         case editLogin(ItemSummary)
         case history(ItemSummary)
+        case moveLogin(ItemSummary)
         case deleteLogin(ItemSummary)
         case shareLogin(ItemSummary)
         /// A new folder, or one inside another.
@@ -68,6 +69,7 @@ final class AppModel {
             switch self {
             case .addLogin(let folder): "add-\(folder ?? "")"
             case .history(let item): "history-\(item.id)"
+            case .moveLogin(let item): "move-\(item.id)"
             case .editLogin(let item): "edit-\(item.id)"
             case .deleteLogin(let item): "delete-\(item.id)"
             case .shareLogin(let item): "share-login-\(item.id)"
@@ -582,6 +584,25 @@ final class AppModel {
         let outcome = try await perform { try $0.updateLogin(itemId: id, fields: fields) }
         await reloadLocal()
         return conflictNote(outcome, doing: "your changes weren't saved")
+    }
+
+    /// Whether a login can be moved by you: you can change it, and it's in a folder or
+    /// yours.
+    func canMove(_ item: ItemSummary) -> Bool {
+        item.role != .view && item.owner == nil && !(item.folder == nil && item.sharedWithMe)
+    }
+
+    /// Moves a login to another folder, or out of folders as yours (`nil`), and shows it
+    /// there. Returns a note if someone else changed it first.
+    func move(_ item: ItemSummary, to folder: String?) async throws -> String? {
+        let id = item.id
+        let outcome = try await perform { try $0.moveLogin(itemId: id, toFolder: folder) }
+        await reloadLocal()
+        if case .saved = outcome {
+            section = folder.map { .folder($0) } ?? .allLogins
+            selectedItemID = id
+        }
+        return conflictNote(outcome, doing: "it wasn't moved")
     }
 
     /// A login's history, newest first, fetched fresh (editors and managers).

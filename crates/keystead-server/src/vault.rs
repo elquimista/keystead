@@ -58,7 +58,7 @@ const FEED_QUERY: &str = "
     SELECT seq, 'rekey', NULL, folder_id, NULL
     FROM rekey_log WHERE user_id = ?1 AND seq > ?2
     UNION ALL
-    SELECT seq, 'left_item', NULL, item_id, NULL
+    SELECT seq, CASE WHEN moved THEN 'moved_item' ELSE 'left_item' END, NULL, item_id, NULL
     FROM item_leave_log WHERE user_id = ?1 AND seq > ?2
     UNION ALL
     SELECT seq, 'joined_item', NULL, item_id, NULL
@@ -498,10 +498,30 @@ pub(crate) async fn put_item(
                 Role::Edit,
                 "change this login",
             )?;
+            // Moving: from where the mover can change it, to a folder where they can add
+            // logins, or out of folders as their own. A login in no folder stays its
+            // owner's to move.
             if current.folder_id != item.folder_id || current.owner != item.owner {
-                return Err(ApiError::BadRequest(
-                    "items can't move between folders or owners".into(),
-                ));
+                if current.owner.is_some_and(|owner| owner != auth.user_id) {
+                    return Err(ApiError::Forbidden(
+                        "only its owner can move a login that's in no folder".into(),
+                    ));
+                }
+                match (item.folder_id, item.owner) {
+                    (Some(folder_id), _) => {
+                        require(
+                            folder_role(&mut tx, auth.user_id, folder_id).await?,
+                            Role::Edit,
+                            "move logins into that folder",
+                        )?;
+                    }
+                    (None, Some(owner)) if owner == auth.user_id => {}
+                    _ => {
+                        return Err(ApiError::BadRequest(
+                            "a login moved out of folders becomes the mover's own".into(),
+                        ));
+                    }
+                }
             }
             // Format 3 goes back to 2 when its last group is removed, but nothing goes
             // back to format 1.
@@ -532,7 +552,12 @@ pub(crate) async fn put_item(
     let after: HashSet<UserId> = item.keys.people.iter().map(|p| p.user_id).collect();
     let added: Vec<UserId> = after.difference(&before).copied().collect();
     let mut dropped_active = false;
-    let dropped: Vec<UserId> = before.difference(&after).copied().collect();
+    // Someone it was shared with who becomes its owner, by moving it, isn't dropped.
+    let dropped: Vec<UserId> = before
+        .difference(&after)
+        .copied()
+        .filter(|&user| Some(user) != item.owner)
+        .collect();
     for &user in &dropped {
         let removed = user_entry(&mut tx, user)
             .await?
@@ -600,8 +625,8 @@ pub(crate) async fn put_item(
     sqlx::query(
         "INSERT INTO items (id, folder_id, version, seq, body, saved_at)
          VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
-         ON CONFLICT (id) DO UPDATE SET version = excluded.version, seq = excluded.seq,
-                                        body = excluded.body, saved_at = excluded.saved_at",
+         ON CONFLICT (id) DO UPDATE SET folder_id = excluded.folder_id, version = excluded.version,
+                                        seq = excluded.seq, body = excluded.body, saved_at = excluded.saved_at",
     )
     .bind(item_id.to_string())
     .bind(item.folder_id.map(|folder_id| folder_id.to_string()))
@@ -691,11 +716,55 @@ pub(crate) async fn put_item(
     // Everyone whose reach may have changed: people and members of groups, before and after.
     let mut affected: BTreeSet<UserId> = before.union(&after).copied().collect();
     affected.extend(item.owner);
+    affected.extend(current.as_ref().and_then(|current| current.owner));
     for group in groups_before.union(&groups_after) {
         affected.extend(group_member_ids(&mut tx, *group).await?);
     }
     for user in affected {
         reconcile(&mut tx, user).await?;
+    }
+    // Moved out of a folder: its members who can't reach it now lose it, as if removed,
+    // and their devices are told it moved.
+    if let Some(old_folder) = current
+        .as_ref()
+        .and_then(|current| current.folder_id)
+        .filter(|&folder_id| Some(folder_id) != item.folder_id)
+    {
+        let members: Vec<i64> =
+            sqlx::query_scalar("SELECT user_id FROM access WHERE folder_id = ?")
+                .bind(old_folder.to_string())
+                .fetch_all(&mut *tx)
+                .await?;
+        for member in members {
+            let reaches: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM access WHERE user_id = ?1 AND folder_id = ?2)
+                     OR EXISTS (SELECT 1 FROM item_reach WHERE user_id = ?1 AND item_id = ?3)",
+            )
+            .bind(member)
+            .bind(item.folder_id.map(|folder_id| folder_id.to_string()))
+            .bind(item_id.to_string())
+            .fetch_one(&mut *tx)
+            .await?;
+            if reaches {
+                continue;
+            }
+            let seq = next_seq(&mut tx).await?;
+            sqlx::query(
+                "INSERT INTO item_leave_log (seq, user_id, item_id, moved) VALUES (?, ?, ?, 1)",
+            )
+            .bind(seq)
+            .bind(member)
+            .bind(item_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(&format!(
+                "{EXPOSE} VALUES (?1, ?2, CAST(strftime('%s', 'now') AS INTEGER)) {EXPOSE_AGAIN}"
+            ))
+            .bind(item_id.to_string())
+            .bind(member)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     tx.commit().await?;
     Ok(Json(item))
@@ -1086,9 +1155,10 @@ pub(crate) async fn sync(
                     });
                 }
             }
-            ("left_item", _, Some(item_id)) => entries.push(SyncEntry::LeftItem {
+            ("left_item" | "moved_item", _, Some(item_id)) => entries.push(SyncEntry::LeftItem {
                 seq,
                 item_id: parse_item(&item_id)?,
+                moved: kind == "moved_item",
             }),
             // Reached through a group joined after the item's latest version, which the
             // item rows would never send again. Later versions arrive as item rows.

@@ -14,6 +14,8 @@ struct SheetContent: View {
             EditLoginSheet(model: model, item: item)
         case .history(let item):
             HistorySheet(model: model, item: item)
+        case .moveLogin(let item):
+            MoveLoginSheet(model: model, item: item)
         case .deleteLogin(let item):
             DeleteLoginSheet(model: model, item: item)
         case .shareLogin(let item):
@@ -749,6 +751,55 @@ private struct ImportSheet: View {
         if panel.runModal() == .OK {
             file = panel.url
         }
+    }
+}
+
+/// Moves a login to another folder you can add to, or out of folders as yours, and says
+/// who loses it.
+private struct MoveLoginSheet: View {
+    let model: AppModel
+    let item: ItemSummary
+    /// The folder it goes to; nil is no folder (yours).
+    @State private var destination: String??
+
+    private var choices: [String] {
+        model.folders.filter { $0 != item.folder && model.folderRoles[$0] != .view }
+    }
+
+    var body: some View {
+        SheetScaffold(
+            title: "Move \u{201C}\(item.name)\u{201D}", actionTitle: "Move",
+            canAct: destination != nil
+        ) {
+            guard let destination else { return false }
+            _ = try await model.move(item, to: destination)
+            return true
+        } content: {
+            Form {
+                Picker("To", selection: $destination) {
+                    Text("Choose…").tag(String??.none)
+                    if item.folder != nil {
+                        Text("No folder (only you)").tag(String??.some(nil))
+                        Divider()
+                    }
+                    ForEach(choices, id: \.self) { Text($0).tag(String??.some($0)) }
+                }
+            }
+            Text(consequence)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(width: 460)
+    }
+
+    private var consequence: String {
+        let kept = "People and groups it's shared with directly keep it."
+        guard let folder = item.folder else {
+            return "Everyone in the folder you choose gets it. " + kept
+        }
+        return "Whoever has it only through \u{201C}\(folder)\u{201D} loses it, and its password "
+            + "goes on their To Change list. Everyone in the folder you choose gets it. " + kept
     }
 }
 

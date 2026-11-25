@@ -299,6 +299,8 @@ private struct LoginList: View {
                         Divider()
                         Button("Edit…") { model.sheet = .editLogin(item) }
                             .disabled(item.role == .view)
+                        Button("Move To…") { model.sheet = .moveLogin(item) }
+                            .disabled(!model.canMove(item))
                         Button(item.role == .manage ? "Share…" : "Access…") {
                             model.sheet = .shareLogin(item)
                         }
@@ -549,6 +551,8 @@ private struct LoginDetail: View {
                     }
                     Button("History…") { model.sheet = .history(item) }
                         .disabled(item.role == .view)
+                    Button("Move To…") { model.sheet = .moveLogin(item) }
+                        .disabled(!model.canMove(item))
                         .help("Earlier versions of this login, and bringing one back")
                     Spacer()
                     Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }

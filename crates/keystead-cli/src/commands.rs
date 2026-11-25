@@ -560,6 +560,19 @@ pub fn one_time_code(home: &Path, name: &str, folder: Option<&str>) -> Result<On
         .ok_or_else(|| anyhow::anyhow!("{name} has no one-time codes; add them with edit --otp"))
 }
 
+/// Moves a login to another folder, or out of folders as the caller's own.
+pub fn move_item(
+    home: &Path,
+    name: &str,
+    folder: Option<&str>,
+    to: Option<&str>,
+) -> Result<EditOutcome> {
+    let mut vault = open(home)?;
+    vault.sync()?;
+    let item_id = vault.find_item(name, folder)?;
+    vault.move_item(item_id, to)
+}
+
 /// Deletes a login for everyone who can open it.
 pub fn remove(home: &Path, name: &str, folder: Option<&str>) -> Result<EditOutcome> {
     let mut vault = open(home)?;

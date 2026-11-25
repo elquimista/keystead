@@ -1492,3 +1492,81 @@ fn a_folder_inside_another_starts_out_shared_like_it() {
     );
     assert!(alice.create_folder_inside("Nowhere", "X", true).is_err());
 }
+
+#[test]
+fn a_login_moves_between_folders_and_who_had_it_only_there_loses_it() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+    let carol_id = carol_identity.user_id;
+
+    // Production: Bob views. Staging: only Carol, who edits.
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::View)
+        .unwrap();
+    alice.create_folder("Staging").unwrap();
+    alice.share_folder("Staging", carol_id, Role::Edit).unwrap();
+    let (overview, details) = login("Database", "db-pw");
+    alice.add(Some("Production"), overview, details).unwrap();
+    let database = alice.find_item("Database", None).unwrap();
+    bob.sync().unwrap();
+    assert!(
+        bob.move_item(database, Some("Staging")).is_err(),
+        "Bob only views it"
+    );
+
+    // To Staging: Bob loses it, and it's on Alice's passwords to change for him; Carol,
+    // only in Staging, gets it.
+    alice.move_item(database, Some("Staging")).unwrap();
+    assert!(
+        alice.move_item(database, Some("Staging")).is_err(),
+        "already there"
+    );
+    bob.sync().unwrap();
+    assert!(bob.list().unwrap().is_empty());
+    alice.sync().unwrap();
+    alice.sync().unwrap();
+    let rows = alice.to_change().unwrap();
+    assert_eq!((rows.len(), rows[0].user_name.as_str()), (1, "Bob"));
+    carol.sync().unwrap();
+    let rows = carol.list().unwrap();
+    assert_eq!(rows[0].folder.as_deref(), Some("Staging"));
+    assert_eq!(carol.open_item(database).unwrap().1.password, "db-pw");
+
+    // Out of folders, as Alice's own: Carol loses it too, and can't move it back.
+    alice.move_item(database, None).unwrap();
+    carol.sync().unwrap();
+    assert!(carol.list().unwrap().is_empty());
+    let row = alice
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == database)
+        .unwrap();
+    assert_eq!(row.folder, None);
+    assert!(carol.move_item(database, Some("Staging")).is_err());
+
+    // Back into Production: Bob has it again, and isn't on the list any more.
+    alice.move_item(database, Some("Production")).unwrap();
+    bob.sync().unwrap();
+    assert_eq!(bob.list().unwrap()[0].folder.as_deref(), Some("Production"));
+    alice.sync().unwrap();
+    assert!(
+        alice
+            .to_change()
+            .unwrap()
+            .iter()
+            .all(|row| row.user_name != "Bob")
+    );
+    assert_eq!(alice.open_item(database).unwrap().1.password, "db-pw");
+}

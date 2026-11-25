@@ -572,8 +572,15 @@ pub enum SyncEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via_group: Option<ViaGroup>,
     },
-    /// The user lost direct access to a login; drop it unless a folder still gives it.
-    LeftItem { seq: i64, item_id: ItemId },
+    /// The user lost direct access to a login; drop it unless a folder still gives it. With
+    /// `moved`, it went to a folder they can't open (or out of folders), so drop it even
+    /// if the copy they have says it's in one of theirs.
+    LeftItem {
+        seq: i64,
+        item_id: ItemId,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        moved: bool,
+    },
     /// The user joined a group, or one they're in changed: its entries, its current
     /// secret wrapped for them, and the chain to older secrets. Comes before anything
     /// that needs the group's key.
