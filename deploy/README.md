@@ -267,6 +267,12 @@ in with the key once, which asks for Touch ID or the password only if Keystead h
 unlocked that long. The limit comes from the server, so update it; the order doesn't
 matter, and 0.14.0 apps keep working with it.
 
+**Updating to 0.14.2.** The server is the same as 0.14.1; updating it is optional. When the
+Mac app has to sign in with its key again while unlocked, it now locks instead of macOS
+asking for Touch ID or the password out of the blue, and unlocking signs in. With a server
+older than 0.14.0 that happens every 15 minutes, and the lock screen says to update it, so
+update such a server first.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
