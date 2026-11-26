@@ -35,6 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(code) = state.pending_setup_code().await? {
         println!("This server isn't set up yet. Setup code: {code}");
         println!("Use it once to become the owner, for example: keystead setup <server> {code}");
+        if let Some(until) = state.setup_code_works_until().await? {
+            println!("It works until {until}. After that, restart the server for a new one.");
+        }
     }
 
     let listener = tokio::net::TcpListener::bind(listen).await?;

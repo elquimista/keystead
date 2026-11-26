@@ -77,6 +77,17 @@ pub(crate) async fn join(
 ) -> Result<StatusCode, ApiError> {
     check_name(&request.device_name)?;
     let token_hash = token_hash(&request.token)?;
+    // Looked up without the writer first (see `AppState::writer`).
+    let waiting: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM device_transfers
+         WHERE token_hash = ? AND transfer_key IS NULL AND expires_at >= {NOW})"
+    ))
+    .bind(&token_hash[..])
+    .fetch_one(&state.readers)
+    .await?;
+    if !waiting {
+        return Err(ApiError::NotFound);
+    }
     let mut tx = state.writer.begin().await?;
     let joined = sqlx::query(&format!(
         "UPDATE device_transfers SET device_name = ?, transfer_key = ?
@@ -155,15 +166,28 @@ pub(crate) async fn claim(
     Json(request): Json<ClaimDeviceTransferRequest>,
 ) -> Result<Json<ClaimedAccountSecret>, ApiError> {
     let token_hash = token_hash(&request.token)?;
-    let mut tx = state.writer.begin().await?;
-    let row: Option<Option<String>> = sqlx::query_scalar(&format!(
+    let sealed = format!(
         "SELECT wrapped_secret FROM device_transfers
          WHERE token_hash = ? AND transfer_key IS NOT NULL AND expires_at >= {NOW}"
-    ))
-    .bind(&token_hash[..])
-    .fetch_optional(&mut *tx)
-    .await?;
-    let wrapped_secret = row
+    );
+    // The new device asks every few seconds while it waits. Until the secret is there,
+    // and for a token that doesn't work, the answer comes without the writer (see
+    // `AppState::writer`).
+    let waiting: Option<String> = sqlx::query_scalar::<_, Option<String>>(&sealed)
+        .bind(&token_hash[..])
+        .fetch_optional(&state.readers)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if waiting.is_none() {
+        return Ok(Json(ClaimedAccountSecret {
+            wrapped_secret: None,
+        }));
+    }
+    let mut tx = state.writer.begin().await?;
+    let wrapped_secret = sqlx::query_scalar::<_, Option<String>>(&sealed)
+        .bind(&token_hash[..])
+        .fetch_optional(&mut *tx)
+        .await?
         .ok_or(ApiError::NotFound)?
         .map(|wrapped| serde_json::from_str(&wrapped))
         .transpose()?;

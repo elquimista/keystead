@@ -8,7 +8,8 @@ Keystead app ──HTTPS──▶ Cloudflare ──HTTPS──▶ nginx ──HT
 ```
 
 The Keystead server listens only on the machine's own `127.0.0.1`. The firewall lets only
-Cloudflare reach nginx.
+Cloudflare reach nginx. nginx limits how many requests each client address makes, so one
+address can't flood the server.
 
 **What Cloudflare sees.** HTTPS ends at Cloudflare, so Cloudflare can read the requests,
 just as the server can. Passwords and folder contents are encrypted on the Mac before they
@@ -119,11 +120,14 @@ curl https://keys.example.com/v1/health
 ## 5. Claim the server, right away
 
 Until someone claims it, anyone with the one-time setup code can become the owner. The
-code is only in the server's log:
+code is only in the server's log, and works for a day from the server's first start:
 
 ```sh
 docker compose logs server
 ```
+
+If the day has passed, `docker compose restart server` makes a new code; use the last one
+in the log.
 
 In Keystead on your Mac, choose **Set up a new team** and enter `https://keys.example.com`,
 the setup code and your name, then confirm with Touch ID. You're the owner. The setup code
@@ -292,6 +296,15 @@ change a group once it has been signed for; the server tells them to update. Som
 owner hasn't approved yet can no longer share anything or add a second device until they
 are, and signing out of the Mac app now asks for Touch ID or the password.
 
+**Updating to 0.16.0.** Update the server first, then the apps; older apps keep working
+with it. Invites now work for seven days, and the owner can revoke one nobody has used,
+under People. Invites made before the update run out seven days after it.
+
+Copy the new `keystead.nginx.conf` over yours as in step 3, putting your domain (and
+port) back in: it now limits how many requests each client address makes. The server
+itself keeps only a few sessions for each device, and a setup code works for a day, which
+matters only for a server nobody has claimed yet.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
@@ -332,7 +345,13 @@ know about changes made since. Have people re-add anything they changed.
 - If the app reports "server answered 403" (or 503) without a reason, Cloudflare probably
   challenged or blocked it: look in Cloudflare's **Security > Events** for
   `keys.example.com`.
+- If the app reports "server answered 429", nginx turned the request away: that address
+  made more requests than `keystead.nginx.conf` allows. The limits are far above what a
+  team's apps make, even a large office behind one address; raise `rate` and `burst`
+  there if yours meets them, and reload nginx.
 - **Without Cloudflare's proxy** (grey cloud), the Keystead app would see the Origin CA
   certificate, which only Cloudflare trusts, and refuse to connect. Before turning the
   proxy off, switch nginx to a Let's Encrypt certificate (certbot) and open port 443 to
-  everyone.
+  everyone. Also change the `map` in `keystead.nginx.conf` so that `$keystead_client` is
+  always `$binary_remote_addr`: without Cloudflare in front, anyone can send a
+  `CF-Connecting-IP` of their own and so get around the limits.

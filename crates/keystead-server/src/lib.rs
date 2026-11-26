@@ -274,6 +274,10 @@ const MIGRATIONS: &[&str] = &[
 /// order (see `prototypes/change-feed`); reads use a pool.
 #[derive(Clone)]
 pub struct AppState {
+    /// The one connection that writes. A route anyone can call without signing in (with
+    /// an invite, a recovery line, a new device's line, the setup code) checks what it
+    /// was given on a reader before asking for this one, so a flood of tokens that don't
+    /// work never queues ahead of people's saves.
     writer: SqlitePool,
     readers: SqlitePool,
     sessions: Arc<Mutex<HashMap<[u8; 32], accounts::SessionInfo>>>,
@@ -307,10 +311,27 @@ impl AppState {
             .fetch_one(&writer)
             .await?;
         if users == 0 {
+            // A code that ran out is replaced, here at start. One from before codes ran
+            // out (0.16.0) gets its day from now.
+            let mut tx = writer.begin().await?;
+            sqlx::query(&format!(
+                "DELETE FROM settings WHERE name IN ('setup_code', 'setup_code_expires')
+                   AND EXISTS (SELECT 1 FROM settings WHERE name = 'setup_code_expires'
+                               AND CAST(value AS INTEGER) <= {NOW})"
+            ))
+            .execute(&mut *tx)
+            .await?;
             sqlx::query("INSERT OR IGNORE INTO settings (name, value) VALUES ('setup_code', ?)")
                 .bind(new_setup_code())
-                .execute(&writer)
+                .execute(&mut *tx)
                 .await?;
+            sqlx::query(&format!(
+                "INSERT OR IGNORE INTO settings (name, value)
+                 VALUES ('setup_code_expires', {NOW} + {SETUP_CODE_LASTS})"
+            ))
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
         }
 
         Ok(Self {
@@ -322,11 +343,25 @@ impl AppState {
         })
     }
 
-    /// The setup code, until someone has used it.
+    /// The setup code, until someone has used it or it has run out.
     pub async fn pending_setup_code(&self) -> Result<Option<String>, sqlx::Error> {
-        sqlx::query_scalar("SELECT value FROM settings WHERE name = 'setup_code'")
-            .fetch_optional(&self.readers)
-            .await
+        sqlx::query_scalar(&format!(
+            "SELECT value FROM settings WHERE name = 'setup_code'
+               AND EXISTS (SELECT 1 FROM settings WHERE name = 'setup_code_expires'
+                           AND CAST(value AS INTEGER) > {NOW})"
+        ))
+        .fetch_optional(&self.readers)
+        .await
+    }
+
+    /// Until when the setup code works, like "2026-11-27 14:05 UTC".
+    pub async fn setup_code_works_until(&self) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT strftime('%Y-%m-%d %H:%M UTC', CAST(value AS INTEGER), 'unixepoch')
+             FROM settings WHERE name = 'setup_code_expires'",
+        )
+        .fetch_optional(&self.readers)
+        .await
     }
 }
 
@@ -462,6 +497,12 @@ async fn health() -> Json<Health> {
         membership: 1,
     })
 }
+
+/// How long a setup code works. A server is claimed right after it's first started, so a
+/// code still lying in an old log, or a server left unclaimed, isn't a way to own it for
+/// good. Restarting an unclaimed server whose code ran out makes a new one.
+const SETUP_CODE_LASTS: i64 = 24 * 60 * 60;
+const NOW: &str = "CAST(strftime('%s', 'now') AS INTEGER)";
 
 /// Twelve characters in three groups, from an alphabet without look-alikes (about 60 bits).
 fn new_setup_code() -> String {

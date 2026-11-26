@@ -139,6 +139,11 @@ alive for good; after that the server answers 403, and the device uses the sessi
 it ends, then signs in with its key. Older servers answer 404, and the device signs in
 each time instead.
 
+A device has at most eight sessions at a time, and four challenges waiting; one more ends
+or drops its oldest (0.16.0 and later). An app has two sessions while it renews, and each
+command-line command signs in for its own, so this is only met by a device that signs in
+or renews over and over. The same goes for an account's recovery challenges (see below).
+
 An account can have several devices. Each has an optional name, like "Ana's MacBook Pro",
 and the time it was added. A signed-in device can list the account's devices and remove the
 others; a removed device's sessions end at once. A device removes itself by **signing out**
@@ -629,6 +634,15 @@ codes (400, 401, 403, 404, 409).
 format the server stores; servers older than 0.2.0 leave it out and store only format 1,
 so clients check it before saving. Servers with groups (0.4.0 and later) say 3, and with
 one-time codes (0.6.0 and later) 4.
+
+**Setup.** The setup code works once, and (0.16.0 and later) for a day from the server's
+first start: after that `POST /v1/setup` answers 403 to the right code too, and an
+unclaimed server makes a new code when it's restarted. A wrong code is 403, a server
+already set up 409.
+
+**Too many requests.** A proxy in front of the server may limit how many requests one
+address makes, as the nginx configuration in `deploy/` does, and answer 429 without
+asking the server.
 
 **Invites.** An invite's token works once, and (0.16.0 and later) for seven days:
 `Invite` is `{"token", "expires_at"}`. The server keeps only the token's SHA-256, so the

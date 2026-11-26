@@ -1,5 +1,7 @@
 //! Setup, sign-in, invites, owner approval, the directory, recovery and devices.
 
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -28,6 +30,7 @@ use rand::rngs::OsRng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
+use subtle::ConstantTimeEq;
 
 use crate::groups::{is_owner, leave_group, parse_group};
 use crate::vault::{leave, leave_item, parse_folder, recovered};
@@ -40,6 +43,13 @@ const SESSION_LIFETIME: Duration = Duration::from_secs(15 * 60);
 /// copied session token can't be kept alive for good.
 const RENEWAL_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(60);
+/// How many sessions one device has at a time. An app has two while it renews, and each
+/// command-line command signs in for its own; one more ends the oldest. With this the
+/// server keeps a few per device, however often one signs in or renews.
+const SESSIONS_PER_DEVICE: usize = 8;
+/// How many sign-in challenges wait for one device, and recovery challenges for one
+/// account, at a time; one more drops the oldest.
+const CHALLENGES_EACH: usize = 4;
 /// How long an invite works: long enough for a new colleague to get to it, short enough
 /// that a line left in an old message isn't a way in for good.
 const INVITE_LASTS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -57,6 +67,33 @@ pub(crate) struct SessionInfo {
     /// When renewing stops working: `RENEWAL_LIMIT` after the device signed in with its
     /// key, carried over to each renewed session.
     renewable_until: Instant,
+}
+
+/// Makes room in `map` for one more of `mine`: drops everything that has run out, then
+/// the oldest of `mine` until fewer than `most` are left. What's kept for each device or
+/// account is bounded, so the whole map is, and going through it stays quick.
+fn make_room<K, V>(
+    map: &mut HashMap<K, V>,
+    most: usize,
+    expires: impl Fn(&V) -> Instant,
+    mine: impl Fn(&V) -> bool,
+) where
+    K: Clone + Eq + Hash,
+{
+    let now = Instant::now();
+    map.retain(|_, value| expires(value) > now);
+    let mut own: Vec<(K, Instant)> = map
+        .iter()
+        .filter(|(_, value)| mine(value))
+        .map(|(key, value)| (key.clone(), expires(value)))
+        .collect();
+    if own.len() < most {
+        return;
+    }
+    own.sort_by_key(|(_, expires)| *expires);
+    for (key, _) in &own[..=own.len() - most] {
+        map.remove(key);
+    }
 }
 
 pub(crate) struct PendingChallenge {
@@ -115,18 +152,10 @@ pub(crate) async fn setup(
         .verify(&request.keys)
         .map_err(|_| ApiError::BadRequest("the owner's self-approval does not verify".into()))?;
 
+    // Checked without the writer first (see `AppState::writer`), then again with it.
+    check_setup_code(&mut *state.readers.acquire().await?, &request.setup_code).await?;
     let mut tx = state.writer.begin().await?;
-    let code: Option<String> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE name = 'setup_code'")
-            .fetch_optional(&mut *tx)
-            .await?;
-    match code {
-        None => return Err(ApiError::Conflict("this server is already set up".into())),
-        Some(code) if code != request.setup_code => {
-            return Err(ApiError::Forbidden("wrong setup code".into()));
-        }
-        Some(_) => {}
-    }
+    check_setup_code(&mut tx, &request.setup_code).await?;
     sqlx::query(
         "INSERT INTO users (id, name, encryption_key, signing_key, approval, is_owner)
          VALUES (?, ?, ?, ?, ?, 1)",
@@ -146,11 +175,38 @@ pub(crate) async fn setup(
         &request.device_name,
     )
     .await?;
-    sqlx::query("DELETE FROM settings WHERE name = 'setup_code'")
+    sqlx::query("DELETE FROM settings WHERE name IN ('setup_code', 'setup_code_expires')")
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(Json(Enrolled { user_id: owner }))
+}
+
+/// Whether `given` is this server's setup code and still works. The comparison takes the
+/// same time wherever the two differ, so how long an answer takes says nothing about the
+/// code.
+async fn check_setup_code(conn: &mut SqliteConnection, given: &str) -> Result<(), ApiError> {
+    let code: Option<(String, bool)> = sqlx::query_as(&format!(
+        "SELECT value, COALESCE((SELECT CAST(value AS INTEGER) > {NOW} FROM settings
+                                 WHERE name = 'setup_code_expires'), 0)
+         FROM settings WHERE name = 'setup_code'"
+    ))
+    .fetch_optional(conn)
+    .await?;
+    let Some((code, works)) = code else {
+        return Err(ApiError::Conflict("this server is already set up".into()));
+    };
+    if !bool::from(code.as_bytes().ct_eq(given.as_bytes())) {
+        return Err(ApiError::Forbidden("wrong setup code".into()));
+    }
+    if !works {
+        return Err(ApiError::Forbidden(
+            "this setup code has run out: it works for a day. Restart the server and use \
+             the new code it prints"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// `POST /v1/sign-in/challenge`.
@@ -164,13 +220,17 @@ pub(crate) async fn challenge(
     let mut challenge = vec![0u8; 32];
     OsRng.fill_bytes(&mut challenge);
     let mut challenges = state.challenges.lock().expect("challenge lock poisoned");
-    let now = Instant::now();
-    challenges.retain(|_, pending| pending.expires > now);
+    make_room(
+        &mut challenges,
+        CHALLENGES_EACH,
+        |pending| pending.expires,
+        |pending| pending.device_id == request.device_id,
+    );
     challenges.insert(
         challenge.clone(),
         PendingChallenge {
             device_id: request.device_id,
-            expires: now + CHALLENGE_LIFETIME,
+            expires: Instant::now() + CHALLENGE_LIFETIME,
         },
     );
     Ok(Json(Challenge {
@@ -238,14 +298,18 @@ async fn start_session(
     OsRng.fill_bytes(&mut token);
     {
         let mut sessions = state.sessions.lock().expect("session lock poisoned");
-        let now = Instant::now();
-        sessions.retain(|_, session| session.expires > now);
+        make_room(
+            &mut sessions,
+            SESSIONS_PER_DEVICE,
+            |session| session.expires,
+            |session| session.device_id == device_id,
+        );
         sessions.insert(
             hash(&token),
             SessionInfo {
                 user_id,
                 device_id,
-                expires: now + SESSION_LIFETIME,
+                expires: Instant::now() + SESSION_LIFETIME,
                 renewable_until,
             },
         );
@@ -356,20 +420,28 @@ pub(crate) async fn accept_invite(
     let token = URL_SAFE_NO_PAD
         .decode(&request.token)
         .map_err(|_| ApiError::Forbidden("invalid invite".into()))?;
-    let mut tx = state.writer.begin().await?;
-    let name: String = sqlx::query_scalar(&format!(
+    let waiting = format!(
         "SELECT name FROM invites WHERE token_hash = ? AND used = 0 AND expires_at > {NOW}"
-    ))
-    .bind(&hash(&token)[..])
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| {
+    );
+    let gone = || {
         ApiError::Forbidden(
             "this invite doesn't work: it was used, revoked, or is more than seven days \
              old. Ask the owner for a new one"
                 .into(),
         )
-    })?;
+    };
+    // Looked up without the writer first (see `AppState::writer`), then again with it.
+    sqlx::query_scalar::<_, String>(&waiting)
+        .bind(&hash(&token)[..])
+        .fetch_optional(&state.readers)
+        .await?
+        .ok_or_else(gone)?;
+    let mut tx = state.writer.begin().await?;
+    let name: String = sqlx::query_scalar(&waiting)
+        .bind(&hash(&token)[..])
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(gone)?;
     sqlx::query("UPDATE invites SET used = 1 WHERE token_hash = ?")
         .bind(&hash(&token)[..])
         .execute(&mut *tx)
@@ -453,13 +525,17 @@ pub(crate) async fn recovery_challenge(
     let mut challenge = vec![0u8; 32];
     OsRng.fill_bytes(&mut challenge);
     let mut recoveries = state.recoveries.lock().expect("recovery lock poisoned");
-    let now = Instant::now();
-    recoveries.retain(|_, pending| pending.expires > now);
+    make_room(
+        &mut recoveries,
+        CHALLENGES_EACH,
+        |pending| pending.expires,
+        |pending| pending.user_id == UserId(user_id),
+    );
     recoveries.insert(
         challenge.clone(),
         PendingRecovery {
             user_id: UserId(user_id),
-            expires: now + CHALLENGE_LIFETIME,
+            expires: Instant::now() + CHALLENGE_LIFETIME,
         },
     );
     Ok(Json(RecoveryChallenge {
@@ -484,23 +560,29 @@ pub(crate) async fn recover(
         Some(pending) if pending.expires > Instant::now() => pending.user_id,
         _ => return Err(ApiError::Unauthorized),
     };
-    let mut tx = state.writer.begin().await?;
-    let entry = user_entry(&mut tx, user)
-        .await?
-        .ok_or(ApiError::Unauthorized)?;
-    // Removed since the challenge was given out: a challenge isn't a way back in.
-    if entry.removed {
-        return Err(ApiError::Unauthorized);
-    }
     let message = recovery_message(
         request.challenge.as_slice(),
         request.device_id,
         &request.device_key,
     );
+    // The signature is checked without the writer (see `AppState::writer`): anyone who
+    // knows an account's public keys can get a challenge for it.
+    let entry = {
+        let mut conn = state.readers.acquire().await?;
+        user_entry(&mut conn, user).await?
+    }
+    .ok_or(ApiError::Unauthorized)?;
     entry
         .keys
         .verify(&message, request.signature.as_slice())
         .map_err(|_| ApiError::Unauthorized)?;
+    let mut tx = state.writer.begin().await?;
+    // Removed, or given new keys in a recovery, since the challenge was given out: a
+    // challenge isn't a way back in.
+    match user_entry(&mut tx, user).await? {
+        Some(now) if !now.removed && now.keys == entry.keys => {}
+        _ => return Err(ApiError::Unauthorized),
+    }
     add_device(
         &mut tx,
         request.device_id,
@@ -932,21 +1014,30 @@ pub(crate) async fn claim_recovery(
             "device name must be at most {MAX_NAME_LENGTH} characters"
         )));
     }
-    let mut tx = state.writer.begin().await?;
-    let row: Option<(i64, Option<String>, Option<Vec<u8>>)> = sqlx::query_as(&format!(
+    type Waiting = (i64, Option<String>, Option<Vec<u8>>);
+    let waiting = format!(
         "SELECT user_id, device_id, encryption_key FROM recoveries
          WHERE token_hash = ? AND NOT approved AND expires_at > {NOW}"
-    ))
-    .bind(&hash(&token)[..])
-    .fetch_optional(&mut *tx)
-    .await?;
-    let (user_id, device_id, encryption) = row.ok_or_else(|| {
+    );
+    let gone = || {
         ApiError::Forbidden(
             "this recovery line was cancelled, has expired or was already approved; ask the \
              owner for a new one"
                 .into(),
         )
-    })?;
+    };
+    // Looked up without the writer first (see `AppState::writer`), then again with it.
+    sqlx::query_as::<_, Waiting>(&waiting)
+        .bind(&hash(&token)[..])
+        .fetch_optional(&state.readers)
+        .await?
+        .ok_or_else(gone)?;
+    let mut tx = state.writer.begin().await?;
+    let (user_id, device_id, encryption): Waiting = sqlx::query_as(&waiting)
+        .bind(&hash(&token)[..])
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(gone)?;
     match device_id {
         Some(device_id) => {
             if device_id != request.device_id.to_string()
@@ -1336,7 +1427,7 @@ mod tests {
     }
 
     fn session<'a>(
-        sessions: &'a mut std::collections::HashMap<[u8; 32], SessionInfo>,
+        sessions: &'a mut HashMap<[u8; 32], SessionInfo>,
         token: &str,
     ) -> &'a mut SessionInfo {
         let bytes = URL_SAFE_NO_PAD.decode(token).unwrap();

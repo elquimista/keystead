@@ -37,7 +37,8 @@ cargo fmt --all --check
 
 Run the server. It listens on `127.0.0.1:8080` (set `KEYSTEAD_LISTEN` to change it) and
 keeps its database in `./keystead-data` (set `KEYSTEAD_DATA`). On first start it prints a
-one-time setup code. Whoever uses it, in the Mac app (Set up a new team) or with
+one-time setup code, which works for a day; after that, restarting a server nobody has
+claimed prints a new one. Whoever uses it, in the Mac app (Set up a new team) or with
 `keystead setup`, becomes the team's **owner**: the one account that invites and approves
 people, removes them from the team and makes groups. Running the server doesn't make you
 the owner, and the server holds no key that opens anything.

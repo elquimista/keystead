@@ -2754,3 +2754,185 @@ async fn invites_run_out_and_can_be_taken_back() {
     let (status, _) = alice.call(&server, Method::DELETE, &path, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// One device signing in or renewing over and over, or asking for challenges it never
+/// answers, leaves the server holding a few of each for it, not one per request.
+#[tokio::test]
+async fn a_device_keeps_only_its_newest_sessions_and_challenges() {
+    let server = Server::new().await;
+    let mut alice = set_up_owner(&server).await;
+    let works = async |token: &str| {
+        let (status, _) = server
+            .call(Method::GET, "/v1/devices", Some(token), None)
+            .await;
+        status == StatusCode::OK
+    };
+
+    // Eight sessions at a time: the ninth ends the oldest.
+    let mut tokens = vec![alice.token.clone()];
+    for _ in 0..8 {
+        alice.sign_in(&server).await;
+        tokens.push(alice.token.clone());
+    }
+    assert!(!works(&tokens[0]).await);
+    for token in &tokens[1..] {
+        assert!(works(token).await);
+    }
+    // Renewing counts the same, so a session renewed in a loop pushes out only its
+    // own device's older ones.
+    let mut bob = invite(&server, &alice, "Bob").await;
+    bob.sign_in(&server).await;
+    for _ in 0..20 {
+        let (status, body) = alice
+            .call(&server, Method::POST, "/v1/sign-in/renew", None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        alice.token = decode::<Session>(body).token;
+    }
+    assert!(!works(&tokens[8]).await);
+    assert!(works(&alice.token).await);
+    assert!(works(&bob.token).await);
+
+    // Four challenges wait for a device: a fifth drops the first, which then signs
+    // nobody in.
+    let mut challenges = Vec::new();
+    for _ in 0..5 {
+        let (status, body) = server
+            .call(
+                Method::POST,
+                "/v1/sign-in/challenge",
+                None,
+                json(&ChallengeRequest {
+                    device_id: alice.device_id,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        challenges.push(decode::<Challenge>(body).challenge);
+    }
+    let answer = async |challenge: &keystead_core::encoding::Bytes| {
+        let signature = alice
+            .device
+            .sign(&sign_in_message(alice.device_id, challenge.as_slice()));
+        let request = SignInRequest {
+            device_id: alice.device_id,
+            challenge: challenge.clone(),
+            signature,
+        };
+        server
+            .call(Method::POST, "/v1/sign-in", None, json(&request))
+            .await
+            .0
+    };
+    assert_eq!(answer(&challenges[0]).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(answer(&challenges[4]).await, StatusCode::OK);
+
+    // The same for the challenges of a recovery kit, which anyone who knows an account's
+    // public keys can ask for.
+    let mut recoveries = Vec::new();
+    for _ in 0..5 {
+        let (status, body) = recovery_challenge(&server, alice.keys.public()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        recoveries.push(decode::<RecoveryChallenge>(body).challenge);
+    }
+    // Only its device key and id are used: the account's own keys sign.
+    let new_device = Person::new("Alice");
+    let answer = async |challenge: &keystead_core::encoding::Bytes| {
+        let device_key = new_device.device.public();
+        let signature = alice.keys.sign(&recovery_message(
+            challenge.as_slice(),
+            new_device.device_id,
+            &device_key,
+        ));
+        let request = RecoverRequest {
+            challenge: challenge.clone(),
+            device_id: new_device.device_id,
+            device_key,
+            device_name: "Alice's new Mac".into(),
+            signature,
+        };
+        server
+            .call(Method::POST, "/v1/recover", None, json(&request))
+            .await
+            .0
+    };
+    assert_eq!(answer(&recoveries[0]).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(answer(&recoveries[4]).await, StatusCode::OK);
+}
+
+/// A setup code works for a day. After that, a server nobody claimed makes a new one
+/// when it's restarted, and the old one is no use to whoever finds it in a log.
+#[tokio::test]
+async fn the_setup_code_runs_out_and_a_restart_makes_a_new_one() {
+    let mut server = Server::new().await;
+    let mut alice = Person::new("Alice");
+    alice.user_id = UserId(1);
+    let mut entry = alice.entry();
+    entry.approve(&alice.keys);
+    let request = |code: &str| {
+        json(&SetupRequest {
+            setup_code: code.to_owned(),
+            name: "Alice".into(),
+            keys: alice.keys.public(),
+            device_id: alice.device_id,
+            device_key: alice.device.public(),
+            device_name: "Alice's Mac".into(),
+            approval: entry.approval.clone().unwrap(),
+        })
+    };
+
+    // A code from before codes ran out gets a day from the first start that knows of it.
+    server
+        .sql("DELETE FROM settings WHERE name = 'setup_code_expires'")
+        .await;
+    let (status, body) = server
+        .call(Method::POST, "/v1/setup", None, request(&server.setup_code))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let state = AppState::open(&server.path).await.unwrap();
+    assert_eq!(
+        state.pending_setup_code().await.unwrap().as_deref(),
+        Some(server.setup_code.as_str())
+    );
+    assert!(state.setup_code_works_until().await.unwrap().is_some());
+
+    // A day later it's refused, and only for someone who has it does the server say why.
+    server
+        .sql(
+            "UPDATE settings SET value = CAST(strftime('%s', 'now') AS INTEGER) - 1
+             WHERE name = 'setup_code_expires'",
+        )
+        .await;
+    assert_eq!(state.pending_setup_code().await.unwrap(), None);
+    let (status, body) = server
+        .call(Method::POST, "/v1/setup", None, request(&server.setup_code))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.to_string().contains("run out"), "{body}");
+    let (status, body) = server
+        .call(Method::POST, "/v1/setup", None, request("WRONG-CODE-0000"))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.to_string().contains("wrong setup code"), "{body}");
+
+    // The restart makes a new code, and that one claims the server.
+    let state = AppState::open(&server.path).await.unwrap();
+    let old = std::mem::replace(
+        &mut server.setup_code,
+        state.pending_setup_code().await.unwrap().unwrap(),
+    );
+    assert_ne!(old, server.setup_code);
+    server.router = router(state);
+    let (status, _) = server
+        .call(Method::POST, "/v1/setup", None, request(&old))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = server
+        .call(Method::POST, "/v1/setup", None, request(&server.setup_code))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = server
+        .call(Method::POST, "/v1/setup", None, request(&server.setup_code))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
