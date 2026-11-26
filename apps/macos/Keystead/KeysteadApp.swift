@@ -30,7 +30,7 @@ struct KeysteadApp: App {
                 .task { await DebugMeasure.runIfRequested(model) }
             #endif
         }
-        .defaultSize(width: 920, height: 580)
+        .defaultSize(width: 970, height: 580)
         .commands { AppCommands(model: model) }
 
         // Quick access from the menu bar: search and copy without opening the window.

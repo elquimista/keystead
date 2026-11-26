@@ -945,6 +945,25 @@ final class AppModel {
         await reloadDeleted()
     }
 
+    /// Deletes everything in Recently Deleted for good, one login at a time. The server
+    /// lists only logins you can change, so each is yours to delete. Stops at the first
+    /// one that fails and says why; the ones before it are gone.
+    func purgeAll() async {
+        let ids = recentlyDeleted.map(\.itemId)
+        message = nil
+        for (done, id) in ids.enumerated() {
+            do {
+                try await perform { try $0.purgeLogin(itemId: id) }
+            } catch {
+                message = done == 0
+                    ? describe(error)
+                    : "Deleted \(done) of \(ids.count) for good, then: \(describe(error))"
+                break
+            }
+        }
+        await reloadDeleted()
+    }
+
     /// Loads the device list on its own, so an older server that has no device list
     /// doesn't make syncing look broken. Asked for where it's shown, not on every sync.
     func reloadDevices() async {

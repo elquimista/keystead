@@ -10,16 +10,21 @@ struct VaultView: View {
             Sidebar(model: model, selection: $model.section)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210)
         } content: {
-            switch model.section ?? .allLogins {
-            case .people:
-                PeopleList(model: model, selection: $model.selectedUserID)
-            case .groups:
-                GroupList(model: model, selection: $model.selectedGroupID)
-            case .recentlyDeleted:
-                DeletedList(model: model, selection: $model.selectedDeletedID)
-            case let section:
-                LoginList(model: model, section: section, search: $search, selection: $model.selectedItemID)
+            Group {
+                switch model.section ?? .allLogins {
+                case .people:
+                    PeopleList(model: model, selection: $model.selectedUserID)
+                case .groups:
+                    GroupList(model: model, selection: $model.selectedGroupID)
+                case .recentlyDeleted:
+                    DeletedList(model: model, selection: $model.selectedDeletedID)
+                case let section:
+                    LoginList(model: model, section: section, search: $search, selection: $model.selectedItemID)
+                }
             }
+            // Room for a folder's name and its two buttons, so they stay on the list's side
+            // of the toolbar like every other section's.
+            .navigationSplitViewColumnWidth(min: 260, ideal: 260)
         } detail: {
             if model.section == .people {
                 if let user = model.users.first(where: { $0.id == model.selectedUserID }) {
@@ -27,6 +32,7 @@ struct VaultView: View {
                 } else {
                     Text("Select a person")
                         .foregroundStyle(.secondary)
+                        .toolbar { PersonActions(model: model, user: nil) }
                 }
             } else if model.section == .recentlyDeleted {
                 if let login = model.recentlyDeleted.first(where: { $0.id == model.selectedDeletedID }) {
@@ -35,6 +41,7 @@ struct VaultView: View {
                 } else {
                     Text(model.recentlyDeleted.isEmpty ? "" : "Select a login")
                         .foregroundStyle(.secondary)
+                        .toolbar { DeletedActions(login: nil) }
                 }
             } else if model.section == .groups {
                 if let group = model.groups.first(where: { $0.id == model.selectedGroupID }) {
@@ -313,7 +320,10 @@ private struct LoginList: View {
 
     private var title: String {
         switch section {
-        case .folder(let folder): folder
+        // Its own name: the sidebar shows where it sits, and the whole path leaves no room
+        // for the folder's buttons.
+        case .folder(let folder):
+            folder.components(separatedBy: FolderNode.separator).last ?? folder
         case .sharedWithMe: "Shared with Me"
         case .toChange: "To Change"
         case .health: "Password Health"
@@ -393,18 +403,18 @@ private struct LoginList: View {
         .navigationTitle(title)
         .searchable(text: $search, prompt: "Search logins")
         .toolbar {
-            // Only where a new login shows up in the list: a login added from Password
-            // Health, To Change or Shared with Me wouldn't be in them.
-            if section == .allLogins || folder != nil {
-                ToolbarItem {
-                    Button {
-                        model.sheet = .addLogin(folder: folder)
-                    } label: {
-                        Label("New Login", systemImage: "plus")
-                    }
-                    .help("Add a login")
-                    .disabled(folder.map { model.folderRoles[$0] == .view } ?? false)
+            // Always there, so the toolbar keeps one layout in every section; greyed out
+            // where a new login wouldn't show up in the list (Password Health, To Change,
+            // Shared with Me) or the folder is view only.
+            ToolbarItem {
+                let addsHere = section == .allLogins || folder != nil
+                Button {
+                    model.sheet = .addLogin(folder: folder)
+                } label: {
+                    Label("New Login", systemImage: "plus")
                 }
+                .help(addsHere ? "Add a login" : "New logins go in All Logins or a folder")
+                .disabled(!addsHere || folder.map { model.folderRoles[$0] == .view } ?? false)
             }
             if let folder {
                 ToolbarItem {
@@ -903,6 +913,8 @@ private struct OneTimeCodeRow: View {
 private struct DeletedList: View {
     let model: AppModel
     @Binding var selection: DeletedLogin.ID?
+    @State private var confirmingPurgeAll = false
+    @State private var busy = false
 
     var body: some View {
         List(model.recentlyDeleted, selection: $selection) { login in
@@ -922,6 +934,61 @@ private struct DeletedList: View {
             .padding(.vertical, 3)
         }
         .navigationTitle("Recently Deleted")
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    confirmingPurgeAll = true
+                } label: {
+                    Label("Delete All\u{2026}", systemImage: "xmark.bin")
+                }
+                .help("Delete everything here for good now")
+                .disabled(busy || model.recentlyDeleted.isEmpty)
+            }
+        }
+        .confirmationDialog(purgeAllQuestion, isPresented: $confirmingPurgeAll) {
+            Button(model.recentlyDeleted.count == 1 ? "Delete for Good" : "Delete All for Good",
+                   role: .destructive) {
+                busy = true
+                Task {
+                    await model.purgeAll()
+                    busy = false
+                }
+            }
+        } message: {
+            Text(model.recentlyDeleted.count == 1
+                ? "It can't be brought back afterwards, by you or anyone it was shared with."
+                : "They can't be brought back afterwards, by you or anyone they were shared with.")
+        }
+    }
+
+    private var purgeAllQuestion: String {
+        let logins = model.recentlyDeleted
+        return logins.count == 1
+            ? "Delete \u{201C}\(logins[0].name)\u{201D} for good?"
+            : "Delete all \(logins.count) logins for good?"
+    }
+}
+
+/// A deleted login's buttons in the toolbar: Bring Back and Delete Now. With none selected
+/// they're there all the same, greyed out, so the toolbar keeps one layout.
+private struct DeletedActions: ToolbarContent {
+    let login: DeletedLogin?
+    var bringBack: () -> Void = {}
+    var deleteNow: () -> Void = {}
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button(action: bringBack) {
+                Label("Bring Back", systemImage: "arrow.uturn.backward")
+            }
+            .help("Bring it back for everyone who had it")
+            .disabled(login == nil)
+            Button(action: deleteNow) {
+                Label("Delete Now", systemImage: "trash")
+            }
+            .help("Delete it for good now")
+            .disabled(login == nil)
+        }
     }
 }
 
@@ -966,20 +1033,10 @@ private struct DeletedDetail: View {
         .formStyle(.grouped)
         .disabled(busy)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    run { note = try await model.undelete(login) }
-                } label: {
-                    Label("Bring Back", systemImage: "arrow.uturn.backward")
-                }
-                .help("Bring it back for everyone who had it")
-                Button {
-                    confirmingPurge = true
-                } label: {
-                    Label("Delete Now", systemImage: "trash")
-                }
-                .help("Delete it for good now")
-            }
+            DeletedActions(
+                login: login,
+                bringBack: { run { note = try await model.undelete(login) } },
+                deleteNow: { confirmingPurge = true })
         }
         .confirmationDialog(
             "Delete \u{201C}\(login.name)\u{201D} for good?", isPresented: $confirmingPurge
@@ -1040,16 +1097,69 @@ private struct PeopleList: View {
         }
         .navigationTitle("People")
         .toolbar {
-            if model.isOwner {
-                ToolbarItem {
-                    Button {
-                        model.sheet = .invite
-                    } label: {
-                        Label("Invite", systemImage: "person.badge.plus")
-                    }
-                    .help("Invite someone to your team")
+            ToolbarItem {
+                Button {
+                    model.sheet = .invite
+                } label: {
+                    Label("Invite", systemImage: "person.badge.plus")
                 }
+                .help(model.isOwner ? "Invite someone to your team" : "Only the owner invites people")
+                .disabled(!model.isOwner)
             }
+        }
+    }
+}
+
+/// A person's buttons in the toolbar: Approve, Share a Folder and More. Always there,
+/// greyed out where they don't apply or with nobody selected, like a login's and a group's.
+private struct PersonActions: ToolbarContent {
+    let model: AppModel
+    let user: User?
+
+    private var isMe: Bool { user != nil && user?.userId == model.identity?.userId }
+    /// Approved and still on the team.
+    private var active: Bool { user.map { $0.approved && !$0.removed } ?? false }
+    /// Joined, and waiting for the owner to check their fingerprint.
+    private var canApprove: Bool { model.isOwner && (user.map { !$0.approved && !$0.removed } ?? false) }
+    private var canShare: Bool {
+        active && !isMe && model.folders.contains { model.manages(folder: $0) }
+    }
+    /// Helping someone recover and removing them are the owner's to do, for anyone else.
+    private var canManage: Bool { model.isOwner && active && !(user?.isOwner ?? true) }
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                if let user { model.sheet = .approve(user) }
+            } label: {
+                Label("Approve", systemImage: "checkmark.seal")
+            }
+            .help(canApprove
+                ? "Approve \(user?.name ?? "them") once they've read out their fingerprint"
+                : "Approve someone waiting to join; only the owner can")
+            .disabled(!canApprove)
+            Button {
+                if let user { model.sheet = .share(folder: nil, user: user) }
+            } label: {
+                Label("Share a Folder", systemImage: "folder.badge.plus")
+            }
+            .help(user.map { "Share a folder with \($0.name)" } ?? "Share a folder with someone")
+            .disabled(!canShare)
+            Menu {
+                if let user {
+                    Button(user.recovering ? "Continue Recovery…" : "Help Recover…") {
+                        model.sheet = .helpRecover(user)
+                    }
+                    Divider()
+                    Button("Remove from Team…", role: .destructive) {
+                        model.sheet = .removeUser(user)
+                    }
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .help("Help Recover and Remove from Team")
+            .disabled(!canManage)
         }
     }
 }
@@ -1196,29 +1306,18 @@ private struct PersonDetail: View {
                 PasswordsToChange(model: model, user: user)
             } else {
                 Section {
-                    ActionRow(
-                        title: "Folders", button: "Share a Folder…",
-                        disabled: !model.folders.contains { model.manages(folder: $0) }
-                    ) {
-                        model.sheet = .share(folder: nil, user: user)
-                    }
                 } header: {
                     header
-                } footer: {
-                    Text("Sharing a folder gives \(user.name) everything in it, now and later.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
                 }
                 PasswordsToChange(model: model, user: user)
                 if model.isOwner && !user.isOwner {
                     Section {
-                        ActionRow(
-                            title: user.recovering ? "A recovery is waiting for you" : "Recovery",
-                            button: user.recovering ? "Continue…" : "Help Recover…"
-                        ) {
-                            model.sheet = .helpRecover(user)
+                        if user.recovering {
+                            ActionRow(title: "A recovery is waiting for you", button: "Continue…") {
+                                model.sheet = .helpRecover(user)
+                            }
+                        } else {
+                            LabeledContent("Escrow", value: user.escrow ? "On" : "Off")
                         }
                     } header: {
                         Text("If \(user.name) loses everything")
@@ -1233,24 +1332,11 @@ private struct PersonDetail: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .multilineTextAlignment(.leading)
                     }
-                    Section {
-                        ActionRow(
-                            title: "Remove from the team", button: "Remove…", role: .destructive
-                        ) {
-                            model.sheet = .removeUser(user)
-                        }
-                    } footer: {
-                        Text("Their devices stop working and they lose every folder and login, "
-                            + "for example when they leave the company.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .multilineTextAlignment(.leading)
-                    }
                 }
             }
         }
         .formStyle(.grouped)
+        .toolbar { PersonActions(model: model, user: user) }
     }
 }
 
@@ -1343,15 +1429,14 @@ private struct GroupList: View {
         }
         .navigationTitle("Groups")
         .toolbar {
-            if model.isOwner {
-                ToolbarItem {
-                    Button {
-                        model.sheet = .newGroup
-                    } label: {
-                        Label("New Group", systemImage: "plus")
-                    }
-                    .help("Make a group")
+            ToolbarItem {
+                Button {
+                    model.sheet = .newGroup
+                } label: {
+                    Label("New Group", systemImage: "plus")
                 }
+                .help(model.isOwner ? "Make a group" : "Only the owner makes groups")
+                .disabled(!model.isOwner)
             }
         }
     }
