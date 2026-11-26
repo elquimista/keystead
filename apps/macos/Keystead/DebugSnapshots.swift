@@ -168,6 +168,7 @@ enum DebugSnapshots {
                 ("w7-adding-this-mac", { model.showDemoJoining() }),
                 ("w8-waiting-for-owner", { model.showDemoWaitingForOwner() }),
                 ("w9-locked", { model.showDemoPhase(.locked) }),
+                ("w9b-locked-to-sign-in", { model.showDemoLockedToSignIn() }),
                 ("w10-working", { model.showDemoPhase(.working("Unlocking…")) }),
                 ("w11-back", { model.showDemoPhase(.unlocked) }),
             ]

@@ -73,9 +73,26 @@ struct SecureEnclaveSigningKey {
 /// the `ecdsa-p256-sha256` device key scheme in docs/format.md.
 final class SecureEnclaveSigner: DeviceSigner, @unchecked Sendable {
     private let key: SecureEnclaveSigningKey
+    /// The approval the key was restored with; none for a key used only for its public half.
+    private let context: LAContext?
+    private let state = NSLock()
+    private var neededApproval = false
 
-    init(key: SecureEnclaveSigningKey) {
+    init(key: SecureEnclaveSigningKey, context: LAContext? = nil) {
         self.key = key
+        self.context = context
+    }
+
+    /// From now on, a signature that needs Touch ID or the Mac password again fails at once
+    /// instead of macOS asking out of the blue (see `neededYou`). macOS checks this on every
+    /// use of the key.
+    func stopAsking() {
+        context?.interactionNotAllowed = true
+    }
+
+    /// Whether a signature failed because macOS would have had to ask.
+    var neededYou: Bool {
+        state.withLock { neededApproval }
     }
 
     func publicKey() -> Data {
@@ -83,15 +100,21 @@ final class SecureEnclaveSigner: DeviceSigner, @unchecked Sendable {
     }
 
     func sign(message: Data) throws -> Data {
-        try key.privateKey.signature(for: message).rawRepresentation
+        do {
+            return try key.privateKey.signature(for: message).rawRepresentation
+        } catch let error as LAError where error.code == .notInteractive {
+            state.withLock { neededApproval = true }
+            throw CoreError.Failed(message: "this Mac's key needs Touch ID or your Mac password")
+        }
     }
 }
 
 enum DeviceAuthentication {
     /// Asks for Touch ID, or the Mac password as a fallback, and returns the
     /// authenticated context. Its approval covers using both keys right after, but not for
-    /// as long as Keystead stays unlocked: macOS asks again for a use minutes later, which
-    /// is why sessions are renewed without the key.
+    /// as long as Keystead stays unlocked: macOS would ask again for a use minutes later,
+    /// which is why sessions are renewed without the key, and why Keystead locks instead
+    /// once unlocked (`SecureEnclaveSigner.stopAsking`).
     @MainActor
     static func authenticate(reason: String) async throws -> LAContext {
         let context = LAContext()

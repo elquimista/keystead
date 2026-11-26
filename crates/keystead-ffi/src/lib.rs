@@ -732,6 +732,12 @@ impl Vault {
         }))
     }
 
+    /// Whether the server renews sessions without the device key (0.14.0 and later), as far
+    /// as this session has seen; if not, signing in with the key comes every 15 minutes.
+    pub fn server_renews_sessions(&self) -> Result<bool, CoreError> {
+        Ok(self.vault()?.server_renews_sessions())
+    }
+
     pub fn identity(&self) -> Result<Identity, CoreError> {
         let whoami = self.vault()?.whoami();
         Ok(Identity {

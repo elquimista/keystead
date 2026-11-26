@@ -121,6 +121,10 @@ account back on a new Mac with a Recovery Kit.
   also clears the clipboard if it still holds a password Keystead copied. A Debug build
   launched with `-autoLockTest` prints the time since Keystead was last used every second
   and locks after 5 seconds.
+- **Signing in again:** when the server needs this Mac to sign in with its key again (24
+  hours after it last did, after the server forgot the session, as in a restart, or every
+  15 minutes with a server before 0.14.0), Keystead locks instead of macOS asking for Touch
+  ID or the password out of the blue, and says why on the lock screen. Unlocking signs in.
 - **Sign out:** People › You, Settings › Account or Vault › Sign Out, after a confirmation. The
   server forgets this Mac, and the account's files and keys here are deleted; coming back
   takes the Recovery Kit.

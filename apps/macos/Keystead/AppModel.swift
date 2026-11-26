@@ -228,6 +228,10 @@ final class AppModel {
     var search = ""
 
     private var vault: Vault?
+    /// The unlocked vault's device key; see `lockToSignInAgain`.
+    private var signer: SecureEnclaveSigner?
+    /// Why Keystead locked itself, shown on the lock screen until the next unlock.
+    private(set) var lockNote: String?
     private let store = DeviceStore()
     private let clipboard = SecureClipboard()
     private var copiedNoticeTask: Task<Void, Never>?
@@ -629,7 +633,8 @@ final class AppModel {
                 reason: "set up Keystead on this Mac")
             let signer = SecureEnclaveSigner(
                 key: try SecureEnclaveSigningKey.restore(
-                    from: approved.device.signingKey, context: context))
+                    from: approved.device.signingKey, context: context),
+                context: context)
             let profilePath = store.profileURL.path
             let (line, secret, deviceId, deviceName) =
                 (approved.line, approved.secret, approved.device.deviceId, approved.deviceName)
@@ -639,7 +644,7 @@ final class AppModel {
                     deviceId: deviceId, deviceName: deviceName, signer: signer)
             }.value
             approvedKeys = nil
-            try await finishUnlocking(vault)
+            try await finishUnlocking(vault, signer: signer)
             // New keys mean a new kit; the old one no longer works.
             sheet = .recoveryKit(afterSetup: false)
         } catch {
@@ -743,7 +748,8 @@ final class AppModel {
             let context = try await DeviceAuthentication.authenticate(
                 reason: "set up Keystead on this Mac")
             let signer = SecureEnclaveSigner(
-                key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context))
+                key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context),
+                context: context)
             let secretBytes = secret.withUnsafeBytes { Data($0) }
             let profilePath = store.profileURL.path
             let deviceId = device.deviceId
@@ -751,7 +757,7 @@ final class AppModel {
             let vault = try await Task.detached {
                 try create(profilePath, secretBytes, deviceId, deviceName, signer)
             }.value
-            try await finishUnlocking(vault)
+            try await finishUnlocking(vault, signer: signer)
             return true
         } catch {
             store.removeDevice()
@@ -765,6 +771,7 @@ final class AppModel {
 
     func unlock() async {
         message = nil
+        lockNote = nil
         phase = .working("Unlocking…")
         do {
             let device = try store.load()
@@ -773,13 +780,14 @@ final class AppModel {
                 from: device.agreementKey, context: context)
             let secret = try AccountSecretWrap.unwrap(device.accountSecret, with: agreementKey.privateKey)
             let signer = SecureEnclaveSigner(
-                key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context))
+                key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context),
+                context: context)
             let secretBytes = secret.withUnsafeBytes { Data($0) }
             let profilePath = store.profileURL.path
             let vault = try await Task.detached {
                 try Vault.open(profilePath: profilePath, accountSecret: secretBytes, signer: signer)
             }.value
-            try await finishUnlocking(vault)
+            try await finishUnlocking(vault, signer: signer)
         } catch {
             phase = .locked
             message = describe(error)
@@ -791,6 +799,8 @@ final class AppModel {
         autoSyncTask?.cancel()
         autoSyncTask = nil
         vault = nil
+        signer = nil
+        lockNote = nil
         items = []
         folders = []
         folderRoles = [:]
@@ -821,8 +831,28 @@ final class AppModel {
         lock()
     }
 
-    private func finishUnlocking(_ vault: Vault) async throws {
+    /// Locks instead of macOS asking for Touch ID or the Mac password out of the blue.
+    /// Signing in to the server again needs this Mac's key, and its approval from unlocking
+    /// lasts only minutes: this comes 24 hours after the last sign-in, when the server has
+    /// forgotten the session (after a restart, say), or every 15 minutes with a server too
+    /// old to renew sessions. Unlocking signs in again.
+    private func lockToSignInAgain(_ vault: Vault) async {
+        let renews = (try? await Task.detached { try vault.serverRenewsSessions() }.value) ?? true
+        guard self.vault === vault else { return }
+        lock()
+        lockNote = Self.signInAgainNote(serverRenews: renews)
+    }
+
+    static func signInAgainNote(serverRenews: Bool) -> String {
+        "Unlock to sign in to your team's server again."
+            + (serverRenews
+                ? "" : " Until your server is on 0.14.0 or later, this comes every 15 minutes.")
+    }
+
+    private func finishUnlocking(_ vault: Vault, signer: SecureEnclaveSigner) async throws {
         self.vault = vault
+        self.signer = signer
+        lockNote = nil
         identity = try vault.identity()
         // The window opens with the copy on this Mac, then syncs: the server may be slow
         // or out of reach, and an empty list meanwhile looks like the logins are gone.
@@ -831,6 +861,9 @@ final class AppModel {
         phase = .unlocked
         startAutoSync()
         await refresh()
+        // Signed in, while the approval from unlocking still holds. Later uses of the key
+        // lock Keystead instead of asking; see `lockToSignInAgain`.
+        signer.stopAsking()
     }
 
     /// Keeps this Mac's copy fresh without a button: every five minutes while unlocked, and
@@ -876,7 +909,8 @@ final class AppModel {
         } while syncAgain
         isSyncing = false
         lastSync = .now
-        if !hasSynced { hasSynced = true }
+        // Not if it locked meanwhile: the next unlock gets its logins afresh.
+        if !hasSynced && phase == .unlocked { hasSynced = true }
     }
 
     private func syncOnce() async {
@@ -1577,7 +1611,14 @@ final class AppModel {
     /// Runs a blocking call on the vault off the main thread.
     private func perform<T: Sendable>(_ work: @escaping @Sendable (Vault) throws -> T) async throws -> T {
         guard let vault else { throw AppError("Keystead is locked.") }
-        return try await Task.detached { try work(vault) }.value
+        let signer = self.signer
+        do {
+            return try await Task.detached { try work(vault) }.value
+        } catch {
+            guard let signer, signer.neededYou else { throw error }
+            await lockToSignInAgain(vault)
+            throw AppError("Keystead locked to sign in to your team's server again.")
+        }
     }
 }
 
@@ -1816,7 +1857,16 @@ extension AppModel {
 
     func showDemoPhase(_ phase: Phase) {
         recoveryClaim = nil
+        lockNote = nil
         self.phase = phase
+    }
+
+    /// Locked to sign in again, with a server too old to renew sessions: the longest note.
+    /// The failed sync's message stays hidden behind it.
+    func showDemoLockedToSignIn() {
+        message = "Couldn't sync (Keystead locked to sign in to your team's server again)."
+        lockNote = Self.signInAgainNote(serverRenews: false)
+        phase = .locked
     }
 
     func showDemoNotices() {

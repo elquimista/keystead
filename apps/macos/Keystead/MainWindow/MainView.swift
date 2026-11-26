@@ -538,8 +538,11 @@ struct LockedView: View {
             VStack(spacing: 4) {
                 Text("\(appName) Is Locked")
                     .font(.title2.weight(.semibold))
-                Text("Unlock to see your logins.")
+                Text(model.lockNote ?? "Unlock to see your logins.")
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Button {
                 Task { await model.unlock() }
@@ -550,7 +553,8 @@ struct LockedView: View {
             .controlSize(.large)
             .keyboardShortcut(.defaultAction)
             .padding(.top, 4)
-            if let message = model.message {
+            // Not when it locked itself: the message is then what that stopped, like a sync.
+            if model.lockNote == nil, let message = model.message {
                 Text(message)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

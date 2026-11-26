@@ -842,6 +842,13 @@ impl Vault {
         &self.profile
     }
 
+    /// Whether the server renews sessions without the device key, as far as this session
+    /// has seen. A server from before 0.14.0 doesn't, so the device signs in with its key
+    /// each time a session ends, every 15 minutes.
+    pub fn server_renews_sessions(&self) -> bool {
+        self.server_renews
+    }
+
     pub fn whoami(&self) -> Whoami {
         let me = self
             .profile
