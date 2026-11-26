@@ -5,6 +5,23 @@ struct VaultView: View {
     @Bindable var model: AppModel
     @State private var search = ""
 
+    /// What To Change and Password Health are for, under "No Login Selected" while their
+    /// list has logins. Each row already says what's wrong with its login.
+    private var sectionAbout: String? {
+        switch model.section {
+        case .toChange where !model.toChangeByItem.isEmpty:
+            "People who lost access may still know these passwords. Change each one at its "
+                + "website, then save the new one here."
+        case .health where !model.healthByItem.isEmpty:
+            "These logins you can change have a password that's easy to guess, used for "
+                + "other logins too, or unchanged for over a year. Change each one at its "
+                + "website, then save the new one here."
+                + (model.health?.agesKnown == false
+                    ? " Old ones show once your server is on 0.13.0." : "")
+        default: nil
+        }
+    }
+
     var body: some View {
         NavigationSplitView {
             Sidebar(model: model, selection: $model.section)
@@ -56,8 +73,14 @@ struct VaultView: View {
                 LoginDetail(model: model, item: item)
                     .id(item.id)
             } else {
-                ContentUnavailableView("No Login Selected", systemImage: "key.horizontal")
-                    .toolbar { LoginActions(model: model, item: nil) }
+                ContentUnavailableView {
+                    Label("No Login Selected", systemImage: "key.horizontal")
+                } description: {
+                    if let about = sectionAbout {
+                        Text(about)
+                    }
+                }
+                .toolbar { LoginActions(model: model, item: nil) }
             }
         }
         .overlay(alignment: .bottom) {
@@ -337,26 +360,9 @@ private struct LoginList: View {
             if items.isEmpty {
                 emptyState
             } else {
+                // Rows only, like every other list; what a section is for shows in the login
+                // pane until one is picked.
                 List(selection: $selection) {
-                    if section == .toChange {
-                        Text("People who lost access may still know these passwords. Change "
-                            + "each one at its website, then save the new one here.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
-                            .selectionDisabled()
-                    }
-                    if section == .health {
-                        Text("These logins you can change have a password that's easy to "
-                            + "guess, used for other logins too, or unchanged for over a year. "
-                            + "Change each one at its website, then save the new one here."
-                            + (model.health?.agesKnown == false
-                                ? " Old ones show once your server is on 0.13.0." : ""))
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
-                            .selectionDisabled()
-                    }
                     rows(items)
                 }
                 .contextMenu(forSelectionType: ItemSummary.ID.self) { ids in

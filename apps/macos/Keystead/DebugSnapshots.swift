@@ -143,7 +143,11 @@ enum DebugSnapshots {
                     model.section = .toChange
                     model.selectedItemID = model.items[0].id
                 }),
-                ("6e9b-password-health", { model.section = .health }),
+                ("6e9a-to-change-none-selected", { model.selectedItemID = nil }),
+                ("6e9b-password-health", {
+                    model.section = .health
+                    model.selectedItemID = model.items[0].id
+                }),
                 // Database isn't in Password Health: opening it leaves nothing selected.
                 ("6e9c-database-selected", {
                     model.section = .allLogins
