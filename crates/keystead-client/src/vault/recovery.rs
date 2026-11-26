@@ -670,8 +670,12 @@ impl Vault {
             wrapped_key: recipient.wrap_folder_key(&key, folder_id)?,
         };
         let path = format!("/v1/folders/{folder_id}/members/{user}/key");
-        let () = self.call(|client| client.put(&path, &request))??;
-        Ok(())
+        match self.call(|client| client.put::<_, ()>(&path, &request))? {
+            // Not waiting any more: the folder's new key, made a moment ago, went to them
+            // too. Or the key changed since; the next sync asks again if it's still needed.
+            Ok(()) | Err(Failure::Status { code: 409, .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn restore_group(&mut self, group_id: GroupId, user: UserId) -> Result<()> {
@@ -700,8 +704,11 @@ impl Vault {
             wrapped_secret: recipient.wrap_group_secret(&secret, group_id, generation)?,
         };
         let path = format!("/v1/groups/{group_id}/members/{user}/secret");
-        let () = self.call(|client| client.put(&path, &request))??;
-        Ok(())
+        match self.call(|client| client.put::<_, ()>(&path, &request))? {
+            // As for a folder: the group's new secret already went to them.
+            Ok(()) | Err(Failure::Status { code: 409, .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Saves a login again as it is, with every copy made for its people's current keys.
