@@ -1012,8 +1012,9 @@ pub(crate) async fn approve_recovery(
 
     sqlx::query(
         "INSERT INTO retired_keys
-             (user_id, revision, name, encryption_key, signing_key, approval, signed_before)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (user_id, revision, name, encryption_key, signing_key, approval, signed_before,
+              escrow_consent)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(user.0)
     .bind(entry.revision)
@@ -1022,6 +1023,8 @@ pub(crate) async fn approve_recovery(
     .bind(&entry.keys.signing.0[..])
     .bind(old_approval.as_slice())
     .bind(serde_json::to_string(signed)?)
+    // Their agreement to escrow goes with the keys that made it.
+    .bind(entry.escrow_consent.as_ref().map(Bytes::as_slice))
     .execute(&mut *tx)
     .await?;
     // The escrowed personal key stays until the new device puts its own in escrow, so if
@@ -1152,6 +1155,12 @@ pub(crate) async fn delete_escrow(
     .bind(auth.user_id.0)
     .execute(&mut *tx)
     .await?;
+    // And the agreements kept with their earlier keys, or their next device after a
+    // recovery would take those as still standing.
+    sqlx::query("UPDATE retired_keys SET escrow_consent = NULL WHERE user_id = ?")
+        .bind(auth.user_id.0)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM folder_escrow WHERE user_id = ?")
         .bind(auth.user_id.0)
         .execute(&mut *tx)

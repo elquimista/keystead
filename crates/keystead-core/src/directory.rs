@@ -58,6 +58,10 @@ pub struct RetiredKeys {
     pub name: String,
     pub keys: AccountPublicKeys,
     pub approval: Bytes,
+    /// Their agreement to escrow, signed with these keys, if it stood when the keys were
+    /// replaced (0.15.0 and later). It's how their next device knows they had agreed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escrow_consent: Option<Bytes>,
 }
 
 fn is_zero(revision: &u32) -> bool {
@@ -132,6 +136,21 @@ impl DirectoryEntry {
     pub fn consented_to_escrow(&self) -> bool {
         self.escrow_consent.as_ref().is_some_and(|consent| {
             verify_escrow_consent(&self.keys, self.user_id, self.revision, consent).is_ok()
+        })
+    }
+
+    /// Whether this person had agreed to escrow with keys they had before their current
+    /// ones: keys the owner approved, and their own signature made with them. After a
+    /// recovery, that's what lets their new device agree again without asking; nobody
+    /// else, the server included, can make that signature. Any earlier keys count, not
+    /// just the last: a recovery whose device never finished leaves keys that agreed to
+    /// nothing. Turning escrow off drops the agreements kept with earlier keys.
+    pub fn earlier_keys_consented(&self, owner: &AccountPublicKeys) -> bool {
+        self.retired_keys(owner).into_iter().any(|retired| {
+            retired.escrow_consent.as_ref().is_some_and(|consent| {
+                verify_escrow_consent(&retired.keys, self.user_id, retired.revision, consent)
+                    .is_ok()
+            })
         })
     }
 
@@ -249,6 +268,48 @@ mod tests {
     }
 
     #[test]
+    fn only_their_own_earlier_keys_say_they_had_agreed_to_escrow() {
+        let owner = AccountKeys::derive(&AccountSecret::generate());
+        let (mut bob, old) = entry("Bob");
+        bob.approve(&owner);
+        let new = AccountKeys::derive(&AccountSecret::generate());
+        let recovered = |consent: Option<Bytes>, approved: bool| {
+            let mut entry = bob.clone();
+            entry.retired.push(RetiredKeys {
+                revision: 0,
+                name: bob.name.clone(),
+                keys: bob.keys.clone(),
+                approval: if approved {
+                    bob.approval.clone().unwrap()
+                } else {
+                    Bytes(vec![0; 64])
+                },
+                escrow_consent: consent,
+            });
+            entry.keys = new.public();
+            entry.revision = 1;
+            entry.approve(&owner);
+            entry.earlier_keys_consented(&owner.public())
+        };
+        // Their earlier keys' own signature, for the revision those keys had.
+        assert!(recovered(Some(escrow_consent(&old, bob.user_id, 0)), true));
+        assert!(!recovered(None, true));
+        // Not someone else's signature, the owner's included; not one for another
+        // revision or person; and not from keys the owner never approved.
+        assert!(!recovered(
+            Some(escrow_consent(&owner, bob.user_id, 0)),
+            true
+        ));
+        assert!(!recovered(Some(escrow_consent(&new, bob.user_id, 0)), true));
+        assert!(!recovered(Some(escrow_consent(&old, bob.user_id, 1)), true));
+        assert!(!recovered(Some(escrow_consent(&old, UserId(3), 0)), true));
+        assert!(!recovered(
+            Some(escrow_consent(&old, bob.user_id, 0)),
+            false
+        ));
+    }
+
+    #[test]
     fn new_keys_after_a_recovery_sign_their_revision_and_the_old_ones_still_verify() {
         let owner = AccountKeys::derive(&AccountSecret::generate());
         let (mut bob, old) = entry("Bob");
@@ -260,6 +321,7 @@ mod tests {
             name: bob.name.clone(),
             keys: bob.keys.clone(),
             approval: bob.approval.clone().unwrap(),
+            escrow_consent: None,
         });
         recovered.keys = new.public();
         recovered.revision = 1;

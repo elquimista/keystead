@@ -243,9 +243,14 @@ When approving, the owner's app opens the escrowed key and wraps it the same way
 new keys; the person's sync gets it as `recovered_key`, opens their own items with it
 and saves them again under the new personal key. The escrowed key stays until the
 account escrows a key for its new revision, so a recovery the new device never finished
-can be done again without losing anything. If own items or folders came back from
-escrow, the new device agrees to escrow again with its new keys and escrows its new
-personal key (`escrow_needed`); otherwise escrow stays off until the person turns it on.
+can be done again without losing anything. The new device agrees to escrow again with its
+new keys, and escrows its new personal key (`escrow_needed`), only if the person's earlier
+keys had agreed: from 0.15.0 the server keeps the `escrow_consent` that stood with each set
+of retired keys (see Directory), and the device checks that signature against keys the
+owner approved. Otherwise escrow stays off until the person turns it on. What comes back
+from escrow doesn't count, as that is the server's say: anyone can wrap a key for an
+account and call it its earlier personal key. Turning escrow off also drops the
+agreements kept with earlier keys.
 Turning escrow off doesn't take back a key the owner may already have opened: the
 personal key comes from the account secret and stays the same.
 
@@ -254,7 +259,9 @@ group, their app also puts a copy of the folder's current key in escrow, sealed 
 XChaCha20-Poly1305 under the personal key with associated data
 `transcript("keystead/folder-key/escrow/v1", folder id, generation, user id)`
 (`PUT /v1/folders/{id}/escrow`). Each sync's `escrow_folders` lists the folders whose
-current key has no copy yet: new ones, and ones with a new key. The server drops a
+current key has no copy yet: new ones, and ones with a new key. A client puts a folder's key
+in escrow only if the folder's signed members name its own account and nobody else (see
+Signed members), whatever the list says. The server drops a
 folder's copy as soon as anyone else can open the folder, since they can give it back,
 and when the person leaves it or turns escrow off. After a recovery, `restore.escrowed`
 lists these folders with their copies. The person's app opens each with the earlier
@@ -424,7 +431,8 @@ transcript("keystead/directory-entry/v2", user id, revision, name, encryption ke
 Clients remember the highest revision the owner approved for each person and never share
 with an earlier one, so a server can't swap old keys back in. The owner's app remembers
 the revision it approves as it approves it. The earlier keys stay
-listed under `retired`, each with its revision, name and the owner's approval as given,
+listed under `retired`, each with its revision, name and the owner's approval as given
+(and, from 0.15.0, the person's `escrow_consent` if it stood when the keys were replaced),
 so what they signed still verifies, but only what they had signed by the recovery.
 Someone holding the lost device's secret can't sign anything new with them.
 

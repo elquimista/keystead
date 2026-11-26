@@ -461,10 +461,15 @@ impl Vault {
             }
         }
         let own = self.own_items_under_earlier_keys();
-        // Own logins or folders came back from escrow, so this account had agreed to it with
-        // its earlier keys; it agrees again with its new ones. Otherwise escrow stays off
-        // until the person turns it on: the server alone can't turn it on.
-        let escrow_came_back = came_back || !own.is_empty();
+        // After a recovery this account agrees to escrow again, with its new keys, only if
+        // its earlier keys had: their signature, kept with them. Not because something
+        // came back from escrow, which is the server's say, and a server can make a key
+        // that opens for this account and call it one. Otherwise escrow stays off until
+        // the person turns it on.
+        let agreed_before = self
+            .profile
+            .trusted_entry(self.profile.user_id)
+            .is_some_and(|entry| entry.earlier_keys_consented(&self.profile.owner));
         for item_id in own {
             if let Err(error) = self.resave(item_id) {
                 summary.rekey_problems.push(format!(
@@ -473,7 +478,7 @@ impl Vault {
             }
         }
         if duties.escrow_needed
-            && (self.escrow_on() || escrow_came_back)
+            && (self.escrow_on() || agreed_before)
             && let Err(error) = self.escrow_personal_key()
         {
             summary.rekey_problems.push(format!(
@@ -518,6 +523,18 @@ impl Vault {
             return Ok(());
         };
         let generation = record.generation;
+        // Escrow is for folders nobody else can open. Which those are is the folder's
+        // signed members' say, not the server's: only one that names this account alone.
+        if self.profile.membership {
+            let me = self.profile.user_id;
+            let only_mine = record
+                .entries
+                .last()
+                .is_some_and(|latest| latest.members == [me] && latest.groups.is_empty());
+            if !only_mine {
+                return Ok(());
+            }
+        }
         let key = self
             .profile
             .folder_key(&self.keys, &self.groups, folder_id)?;

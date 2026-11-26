@@ -243,6 +243,8 @@ const MIGRATIONS: &[&str] = &[
     // 14 (0.15.0): each folder's members, signed by its members, one entry per change.
     // Clients wrap a folder's key only for who its latest entry names. And the entries of
     // groups since deleted, which folder entries their members signed are checked against.
+    // And with someone's retired keys, their agreement to escrow if it stood then: their
+    // next device agrees again only on that, not on the server's say.
     "CREATE TABLE folder_entries (
          folder_id TEXT NOT NULL REFERENCES folders (id),
          revision INTEGER NOT NULL,
@@ -254,7 +256,8 @@ const MIGRATIONS: &[&str] = &[
          revision INTEGER NOT NULL,
          body TEXT NOT NULL,
          PRIMARY KEY (group_id, revision)
-     ) WITHOUT ROWID;",
+     ) WITHOUT ROWID;
+     ALTER TABLE retired_keys ADD COLUMN escrow_consent BLOB;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -504,7 +507,7 @@ const USER_COLUMNS: &str = "SELECT id, name, encryption_key, signing_key, approv
                                     AND r.expires_at > CAST(strftime('%s', 'now') AS INTEGER)) \
                             FROM users";
 
-type RetiredRow = (i64, u32, String, Vec<u8>, Vec<u8>, Vec<u8>);
+type RetiredRow = (i64, u32, String, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
 
 async fn user_entry(
     conn: &mut SqliteConnection,
@@ -518,7 +521,7 @@ async fn user_entry(
         return Ok(None);
     };
     let retired: Vec<RetiredRow> = sqlx::query_as(
-        "SELECT user_id, revision, name, encryption_key, signing_key, approval
+        "SELECT user_id, revision, name, encryption_key, signing_key, approval, escrow_consent
          FROM retired_keys WHERE user_id = ? ORDER BY revision",
     )
     .bind(user.0)
@@ -532,7 +535,7 @@ async fn all_retired(
     conn: &mut SqliteConnection,
 ) -> Result<HashMap<i64, Vec<RetiredRow>>, ApiError> {
     let rows: Vec<RetiredRow> = sqlx::query_as(
-        "SELECT user_id, revision, name, encryption_key, signing_key, approval
+        "SELECT user_id, revision, name, encryption_key, signing_key, approval, escrow_consent
          FROM retired_keys ORDER BY user_id, revision",
     )
     .fetch_all(conn)
@@ -578,17 +581,20 @@ fn entry_from_row(
         revision,
         retired: retired
             .into_iter()
-            .map(|(_, revision, name, encryption, signing, approval)| {
-                Ok(RetiredKeys {
-                    revision,
-                    name,
-                    keys: AccountPublicKeys {
-                        encryption: stored_key(encryption)?,
-                        signing: stored_key(signing)?,
-                    },
-                    approval: approval.into(),
-                })
-            })
+            .map(
+                |(_, revision, name, encryption, signing, approval, consent)| {
+                    Ok(RetiredKeys {
+                        revision,
+                        name,
+                        keys: AccountPublicKeys {
+                            encryption: stored_key(encryption)?,
+                            signing: stored_key(signing)?,
+                        },
+                        approval: approval.into(),
+                        escrow_consent: consent.map(Into::into),
+                    })
+                },
+            )
             .collect::<Result<_, ApiError>>()?,
         escrow,
         escrow_consent: escrow_consent.map(Into::into),

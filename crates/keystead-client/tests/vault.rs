@@ -2408,9 +2408,10 @@ fn escrow_and_approvals_take_the_right_signatures() {
             .is_err()
     );
 
-    // Nothing of Bob's own came back from escrow, so it stays off until he turns it on.
+    // Bob had agreed to escrow with his earlier keys, so his new device agrees again,
+    // whether or not anything of his own was there to come back.
     let new_bob = finish(&fixture, &device, "new-bob");
-    assert!(!new_bob.whoami().escrow);
+    assert!(new_bob.whoami().escrow);
 }
 
 #[test]
@@ -2784,4 +2785,65 @@ fn a_folder_from_before_signed_members_gets_them_from_a_manager() {
     assert_eq!(alice.profile().folders[&folder].entries, entries);
     bob.add(Some("Old"), overview, details).unwrap();
     assert_eq!(bob.profile().folders[&folder].entries, entries);
+}
+
+#[test]
+fn a_lying_server_cant_turn_escrow_on() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        bob_secret,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let bob_public = AccountKeys::derive(&bob_secret).public();
+    let (overview, details) = login("Bank", "bank-pw");
+    bob.add(None, overview, details).unwrap();
+    let folder = bob.create_folder("Personal").unwrap();
+    assert!(!bob.whoami().escrow);
+
+    // Bob never agreed to escrow and never recovered. The server makes it look as if he
+    // just had: a personal key of its own choosing as his earlier one, a folder of his
+    // "back from escrow" under it, and escrow marked as wanted.
+    let servers = AccountKeys::derive(&AccountSecret::generate());
+    let earlier_key = servers.wrap_personal_key_for(&bob_public, bob_id).unwrap();
+    let from_escrow =
+        keystead_core::keys::FolderKey::generate().seal_for_escrow(&servers, folder, 0, bob_id);
+    let json = |value: &dyn erased::Json| value.json().replace('\'', "\'\'");
+    fixture.lie(&format!(
+        "UPDATE users SET escrow_on = 1, recovered_key = '{}' WHERE id = {bob_id};
+         UPDATE members SET pending = 1 WHERE user_id = {bob_id} AND folder_id = '{folder}';
+         DELETE FROM access WHERE user_id = {bob_id} AND folder_id = '{folder}';
+         INSERT INTO folder_escrow (user_id, folder_id, generation, sealed)
+             VALUES ({bob_id}, '{folder}', 0, '{}')",
+        json(&earlier_key),
+        json(&from_escrow),
+    ));
+    bob.sync().unwrap();
+    bob.sync().unwrap();
+
+    // His app doesn't agree to escrow on the server's say: his personal key stays his.
+    assert!(!bob.whoami().escrow);
+    alice.sync().unwrap();
+    let row = alice
+        .users()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.user_id == bob_id)
+        .unwrap();
+    assert!(!row.escrow);
+}
+
+/// Anything serde can write, as JSON text, for `Fixture::lie`.
+mod erased {
+    pub trait Json {
+        fn json(&self) -> String;
+    }
+
+    impl<T: serde::Serialize> Json for T {
+        fn json(&self) -> String {
+            serde_json::to_string(self).unwrap()
+        }
+    }
 }
