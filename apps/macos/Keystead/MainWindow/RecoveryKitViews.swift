@@ -112,6 +112,15 @@ struct RecoveryKitSheet: View {
         }
         .padding(20)
         .frame(width: 540)
+        // Wherever the sheet was opened (Settings keeps its own sheets, which locking
+        // doesn't close), the words don't stay on screen once Keystead locks.
+        .onChange(of: model.phase) {
+            if model.phase != .unlocked {
+                kit = nil
+                revealed = false
+                dismiss()
+            }
+        }
         #if DEBUG
         .task {
             // Demo snapshots show the kit itself; there's no Touch ID to wait for.

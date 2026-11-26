@@ -72,9 +72,9 @@ struct SecureEnclaveSigningKey {
 /// Hands the signing key to the Rust client, which signs in with it. The format matches
 /// the `ecdsa-p256-sha256` device key scheme in docs/format.md.
 final class SecureEnclaveSigner: DeviceSigner, @unchecked Sendable {
-    private let key: SecureEnclaveSigningKey
+    private var key: SecureEnclaveSigningKey
     /// The approval the key was restored with; none for a key used only for its public half.
-    private let context: LAContext?
+    private var context: LAContext?
     private let state = NSLock()
     private var neededApproval = false
 
@@ -87,7 +87,17 @@ final class SecureEnclaveSigner: DeviceSigner, @unchecked Sendable {
     /// instead of macOS asking out of the blue (see `neededYou`). macOS checks this on every
     /// use of the key.
     func stopAsking() {
-        context?.interactionNotAllowed = true
+        state.withLock { context }?.interactionNotAllowed = true
+    }
+
+    /// Takes an approval just given with Touch ID or the Mac password, in place of the one
+    /// from unlocking, which stopped signing minutes after it (see `stopAsking`).
+    func approveAgain(key: SecureEnclaveSigningKey, context: LAContext) {
+        state.withLock {
+            self.key = key
+            self.context = context
+            neededApproval = false
+        }
     }
 
     /// Whether a signature failed because macOS would have had to ask.
@@ -96,12 +106,12 @@ final class SecureEnclaveSigner: DeviceSigner, @unchecked Sendable {
     }
 
     func publicKey() -> Data {
-        key.privateKey.publicKey.x963Representation
+        state.withLock { key }.privateKey.publicKey.x963Representation
     }
 
     func sign(message: Data) throws -> Data {
         do {
-            return try key.privateKey.signature(for: message).rawRepresentation
+            return try state.withLock { key }.privateKey.signature(for: message).rawRepresentation
         } catch let error as LAError where error.code == .notInteractive {
             state.withLock { neededApproval = true }
             throw CoreError.Failed(message: "this Mac's key needs Touch ID or your Mac password")

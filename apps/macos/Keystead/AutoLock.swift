@@ -9,7 +9,8 @@ import AppKit
 /// - at once when the screen locks, the Mac or its display goes to sleep, or another user
 ///   takes over the screen.
 ///
-/// Locking this way also clears the clipboard if it still holds a password Keystead copied.
+/// Locking this way also clears the clipboard if it still holds a password Keystead copied,
+/// and so does quitting.
 @MainActor
 final class AutoLock {
     /// Minutes without using Keystead before it locks; 0 means never.
@@ -38,6 +39,13 @@ final class AutoLock {
             observe(workspace, name)
         }
         observe(DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked"))
+        // Quitting ends the 30-second timer that would have cleared a copied password.
+        let quitting = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.model.clearClipboardBeforeQuitting() }
+        }
+        observers.append((NotificationCenter.default, quitting))
 
         // Only events sent to Keystead's own windows: what happens in other apps isn't
         // using Keystead.

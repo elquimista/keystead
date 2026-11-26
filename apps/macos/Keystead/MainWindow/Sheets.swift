@@ -1,4 +1,5 @@
 import CoreImage
+import LocalAuthentication
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -2440,6 +2441,7 @@ struct SignOutSheet: View {
     let showKit: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var busy = false
+    @State private var problem: String?
 
     /// Whether this Mac is the account's only device, as far as the device list shows.
     private var onlyDevice: Bool { !model.devices.contains { !$0.current } }
@@ -2459,6 +2461,11 @@ struct SignOutSheet: View {
                     + "\(host(model.identity?.server ?? "your server")) again.",
                       systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let problem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
@@ -2483,11 +2490,19 @@ struct SignOutSheet: View {
         .frame(width: 460)
     }
 
+    /// Signs out once Touch ID or the Mac password confirms it; otherwise the sheet stays.
     private func signOut() async {
         busy = true
-        await model.signOut()
+        problem = nil
+        do {
+            try await model.signOut()
+            dismiss()
+        } catch let error as LAError where error.code == .userCancel || error.code == .appCancel {
+            // Cancelled at the prompt: nothing to say.
+        } catch {
+            problem = describe(error)
+        }
         busy = false
-        dismiss()
     }
 }
 

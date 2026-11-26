@@ -590,7 +590,7 @@ private struct LoginDetail: View {
                     FieldRow("Website", copyHelp: "Copy website address", valueCopies: false) {
                         model.copy(item.url)
                     } value: {
-                        if let url = URL(string: item.url), url.scheme != nil {
+                        if let url = webURL(item.url) {
                             Link(item.url, destination: url)
                                 .help("Open in your browser")
                         } else {
@@ -1848,6 +1848,16 @@ func status(of user: User) -> String {
 /// "on Nov 24, 2026" from seconds since 1970.
 func day(_ seconds: Int64) -> String {
     "on " + Date(timeIntervalSince1970: TimeInterval(seconds)).formatted(date: .abbreviated, time: .omitted)
+}
+
+/// A login's website as a link to open, if it's a web address. Anyone who can edit a shared
+/// login sets this text, so nothing else becomes a link: other schemes (smb, ssh,
+/// shortcuts, an app's own) would open whatever handles them on this Mac.
+func webURL(_ text: String) -> URL? {
+    guard let url = URL(string: text.trimmed), let scheme = url.scheme?.lowercased(),
+        scheme == "https" || scheme == "http", url.host() != nil
+    else { return nil }
+    return url
 }
 
 /// "keys.example.com" from "https://keys.example.com".

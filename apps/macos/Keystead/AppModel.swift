@@ -774,24 +774,32 @@ final class AppModel {
         lockNote = nil
         phase = .working("Unlocking…")
         do {
-            let device = try store.load()
+            // Before asking: nothing to unlock on a Mac that isn't set up.
+            _ = try store.load()
             let context = try await DeviceAuthentication.authenticate(reason: "unlock Keystead")
-            let agreementKey = try SecureEnclaveDeviceKey.restore(
-                from: device.agreementKey, context: context)
-            let secret = try AccountSecretWrap.unwrap(device.accountSecret, with: agreementKey.privateKey)
-            let signer = SecureEnclaveSigner(
-                key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context),
-                context: context)
-            let secretBytes = secret.withUnsafeBytes { Data($0) }
-            let profilePath = store.profileURL.path
-            let vault = try await Task.detached {
-                try Vault.open(profilePath: profilePath, accountSecret: secretBytes, signer: signer)
-            }.value
+            let (vault, signer) = try await openVault(with: context)
             try await finishUnlocking(vault, signer: signer)
         } catch {
             phase = .locked
             message = describe(error)
         }
+    }
+
+    /// Opens this Mac's vault with an approval just given. Doesn't touch the network.
+    private func openVault(with context: LAContext) async throws -> (Vault, SecureEnclaveSigner) {
+        let device = try store.load()
+        let agreementKey = try SecureEnclaveDeviceKey.restore(
+            from: device.agreementKey, context: context)
+        let secret = try AccountSecretWrap.unwrap(device.accountSecret, with: agreementKey.privateKey)
+        let signer = SecureEnclaveSigner(
+            key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context),
+            context: context)
+        let secretBytes = secret.withUnsafeBytes { Data($0) }
+        let profilePath = store.profileURL.path
+        let vault = try await Task.detached {
+            try Vault.open(profilePath: profilePath, accountSecret: secretBytes, signer: signer)
+        }.value
+        return (vault, signer)
     }
 
     /// Drops the unlocked vault; its keys are freed with it.
@@ -1068,6 +1076,11 @@ final class AppModel {
 
     func dismissMessage() {
         message = nil
+    }
+
+    /// Quitting ends the timer that clears a copied password, so it's cleared now.
+    func clearClipboardBeforeQuitting() {
+        clipboard.clearNow()
     }
 
     /// Copies something that isn't secret, like a username or an invite.
@@ -1541,18 +1554,34 @@ final class AppModel {
 
     /// Signs out: the server forgets this Mac, so it can't sign in again, and the account's
     /// files and keys on this Mac are deleted. Coming back takes the Recovery Kit. Ends on the
-    /// welcome screen. The vault is already unlocked, so there's no Touch ID step; the
-    /// confirmation sheet guards against signing out by accident.
-    func signOut() async {
+    /// welcome screen.
+    ///
+    /// It takes Touch ID or the Mac password first, locked or not: signing out deletes the
+    /// account from this Mac, which for an owner with one device and no Recovery Kit loses
+    /// the team. Throws, with nothing done, if that isn't given. Once it is, the Mac
+    /// forgets the account even if the vault won't open or the server can't be told, so a
+    /// Mac whose account is broken can still be reset.
+    func signOut() async throws {
         #if DEBUG
         if isDemo {
             forgetAccount(note: nil)
             return
         }
         #endif
+        let context = try await DeviceAuthentication.authenticate(reason: "sign out of this Mac")
         var notTold: String?
         do {
-            notTold = try await perform { try $0.signOut() }
+            if vault != nil, let signer {
+                // The approval from unlocking has stopped signing; this one tells the server.
+                let device = try store.load()
+                signer.approveAgain(
+                    key: try SecureEnclaveSigningKey.restore(from: device.signingKey, context: context),
+                    context: context)
+                notTold = try await perform { try $0.signOut() }
+            } else {
+                let (vault, _) = try await openVault(with: context)
+                notTold = try await Task.detached { try vault.signOut() }.value
+            }
         } catch {
             notTold = describe(error)
         }

@@ -12,7 +12,8 @@ account back on a new Mac with a Recovery Kit.
   and their details on the right. Double-click a login (or press Return or ⌘C) to copy its
   password. Each login can be edited (name, username, website, password and notes; notes
   stay hidden until shown, like the password), shared with a person or a group, or
-  deleted for everyone who can open it. The sidebar's rows stay put even when empty, and
+  deleted for everyone who can open it. A login's website is a link only if it's a web
+  address (http or https); anything else shows as text. The sidebar's rows stay put even when empty, and
   ⌘1 to ⌘7 go to them in order, from All Logins to Groups. Every list can be searched.
 - **Login menu:** what can be done with the selected login, greyed out when its role
   doesn't allow it: Copy Username (⇧⌘C), Copy One-Time Code (⌥⌘C), Edit… (⌘E), Share… or
@@ -127,7 +128,8 @@ account back on a new Mac with a Recovery Kit.
   hours after it last did, after the server forgot the session, as in a restart, or every
   15 minutes with a server before 0.14.0), Keystead locks instead of macOS asking for Touch
   ID or the password out of the blue, and says why on the lock screen. Unlocking signs in.
-- **Sign out:** People › You, Settings › Account or Vault › Sign Out, after a confirmation. The
+- **Sign out:** People › You, Settings › Account or Vault › Sign Out, after a confirmation
+  and Touch ID or the Mac password, whether Keystead is locked or not. The
   server forgets this Mac, and the account's files and keys here are deleted; coming back
   takes the Recovery Kit.
 - **Keys:** two Secure Enclave keys per Mac. One signs in to the server
@@ -139,7 +141,8 @@ account back on a new Mac with a Recovery Kit.
   marked concealed for clipboard managers, and after 30 seconds, if still on the clipboard,
   give way to what was there before you copied (kept in memory only). Copying several in a
   row brings back what was there before the first, never an earlier password; another
-  app's secret is cleared, not put back; locking because you're away just clears. On
+  app's secret is cleared, not put back; locking because you're away, and quitting, just
+  clear. On
   macOS 26 and later, reading the clipboard can make macOS ask, so Keystead only puts
   things back if it may paste from other apps without asking (System Settings › Privacy &
   Security); otherwise it just clears, as before.
