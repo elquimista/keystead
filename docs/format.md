@@ -508,7 +508,8 @@ sync tells a group's managers in it when it needs a new secret (`group_rekey_nee
 
 Sharing a folder with a group names both the folder key's generation and the group's,
 and both must be current. `Groups` (from `GET /v1/groups`) lists every group with its
-`entries`, its `members` and whether it `needs_rekey`. `Members` also lists the `groups` a folder or item is shared
+`entries`, its `members` and whether it `needs_rekey`; for an account the owner hasn't
+approved, the list is empty. `Members` also lists the `groups` a folder or item is shared
 with, with their roles.
 
 ## API
@@ -609,7 +610,9 @@ group's current generation, and no copy may name a generation the group hasn't r
 of groups new to `groups`, and `password_changed` (left out when false) that its password
 differs from the previous version's (see Passwords to change). A live version may follow a
 deletion marker, which brings the item back (see Recently deleted). If another version was
-saved first, it answers 409 with that version.
+saved first, it answers 409 with that version. A first version under an id already in use
+gets the item there back the same way only if the caller can open it; anyone else gets a
+409 with just an error, so an id kept by someone who lost access shows them nothing.
 
 ### Roles
 
@@ -621,7 +624,10 @@ Everyone who can open a folder or an item has a role there:
 | `edit` | Also save new versions: change and delete items |
 | `manage` | Also share, change roles, remove people, and give a folder a new key |
 
-A folder's creator manages it, and so does an item's owner. A folder or item shared with
+A folder's creator manages it, and so does an item's owner. Sharing also takes the owner's
+approval: an account that joined with an invite and isn't approved yet keeps folders and
+items of its own, but the server refuses (403) its sharing a folder or an item with
+anyone or any group. A folder or item shared with
 a group gives the group a role, which is everyone's in it. Someone with access more than
 one way (through a folder, directly, through groups) gets the highest role. A folder
 always keeps at least one manager, a person or a group. Members and shares from before roles existed are managers, since everyone could
@@ -674,7 +680,9 @@ current key again (`rekeyed`), as their copy may have been the group's.
 sessions and removes their devices, takes them out of every group and folder (marking
 each for a new key) and every item shared with them. Their directory entry stays, with `"removed":
 true`, so what they signed still verifies; nobody can share with them again, and their
-account can't be recovered. A folder left without a manager gets one: whoever has been
+account can't be recovered: recovery challenges given out before the removal stop working
+with it. Removing someone already removed answers 404, and removes any device the account
+still has. A folder left without a manager gets one: whoever has been
 in it longest. Clients drop removed people's copies from items as they save them.
 
 **History** (0.7.0 and later). When a version replaces another, the server keeps the one

@@ -417,6 +417,10 @@ pub(crate) async fn recover(
     let entry = user_entry(&mut tx, user)
         .await?
         .ok_or(ApiError::Unauthorized)?;
+    // Removed since the challenge was given out: a challenge isn't a way back in.
+    if entry.removed {
+        return Err(ApiError::Unauthorized);
+    }
     let message = recovery_message(
         request.challenge.as_slice(),
         request.device_id,
@@ -557,7 +561,18 @@ pub(crate) async fn remove_user(
     }
     match user_entry(&mut tx, user).await? {
         Some(entry) if !entry.removed => {}
-        _ => return Err(ApiError::NotFound),
+        // Already removed. Whatever device is still there goes too, so removing again is
+        // the way to evict one that got in around the removal (possible up to 0.14.2).
+        Some(_) => {
+            sqlx::query("DELETE FROM devices WHERE user_id = ?")
+                .bind(user.0)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            forget_sessions(&state, user);
+            return Err(ApiError::NotFound);
+        }
+        None => return Err(ApiError::NotFound),
     }
     sqlx::query(
         "UPDATE users SET removed_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE id = ?",
@@ -624,12 +639,23 @@ pub(crate) async fn remove_user(
         .await?;
     }
     tx.commit().await?;
+    forget_sessions(&state, user);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ends a removed person's sessions, and the recovery challenges given out for their
+/// account, so neither outlives the removal.
+fn forget_sessions(state: &AppState, user: UserId) {
     state
         .sessions
         .lock()
         .expect("session lock poisoned")
         .retain(|_, session| session.user_id != user);
-    Ok(StatusCode::NO_CONTENT)
+    state
+        .recoveries
+        .lock()
+        .expect("recovery lock poisoned")
+        .retain(|_, pending| pending.user_id != user);
 }
 
 // MARK: - Recovering with the owner's help

@@ -120,6 +120,7 @@ pub(crate) async fn add_member(
         Role::Manage,
         "share this folder",
     )?;
+    require_approved_to_share(&mut tx, auth.user_id).await?;
     require_shareable(&mut tx, request.user_id).await?;
     if direct_role(&mut tx, request.user_id, folder_id)
         .await?
@@ -593,6 +594,7 @@ pub(crate) async fn add_folder_group(
         Role::Manage,
         "share this folder",
     )?;
+    require_approved_to_share(&mut tx, auth.user_id).await?;
     let (group_generation, _) = group_key_state(&mut tx, request.group_id).await?;
     if request.group_generation != group_generation {
         return Err(ApiError::Conflict(
@@ -745,7 +747,17 @@ pub(crate) async fn put_item(
             };
             (require(role, Role::Edit, "add logins here")?, 1)
         }
-        (None, Some(current)) => return Err(ApiError::ItemConflict(Box::new(current.clone()))),
+        // The id is taken. Only someone who can open that login gets it back: anyone
+        // else, such as a person who lost access and kept its id, learns nothing more.
+        (None, Some(current)) => {
+            return Err(
+                if item_role(&mut tx, auth.user_id, current).await?.is_some() {
+                    ApiError::ItemConflict(Box::new(current.clone()))
+                } else {
+                    ApiError::Conflict("a login with that id already exists".into())
+                },
+            );
+        }
         (Some(_), None) => return Err(ApiError::NotFound),
         (Some(base), Some(current)) => {
             let role = require(
@@ -839,6 +851,9 @@ pub(crate) async fn put_item(
         return Err(ApiError::Forbidden(
             "you need manage access to change who this login is shared with".into(),
         ));
+    }
+    if !added.is_empty() || groups_after.difference(&groups_before).next().is_some() {
+        require_approved_to_share(&mut tx, auth.user_id).await?;
     }
     for &user in &added {
         require_shareable(&mut tx, user).await?;
@@ -1723,6 +1738,36 @@ pub(crate) async fn require_shareable(
         _ => Err(ApiError::Forbidden(format!(
             "user {user} is not approved, or was removed"
         ))),
+    }
+}
+
+/// Whether the owner approved this account and hasn't removed it.
+pub(crate) async fn is_approved(
+    conn: &mut SqliteConnection,
+    user: UserId,
+) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar(
+        "SELECT approval IS NOT NULL AND removed_at IS NULL FROM users WHERE id = ?",
+    )
+    .bind(user.0)
+    .fetch_optional(&mut *conn)
+    .await?
+    .unwrap_or(false))
+}
+
+/// Only an account the owner approved gives anyone else access. An invite alone, which
+/// can leak, lets an account keep logins of its own; it can't put a folder or a login in
+/// a teammate's app for them to save into.
+pub(crate) async fn require_approved_to_share(
+    conn: &mut SqliteConnection,
+    user: UserId,
+) -> Result<(), ApiError> {
+    if is_approved(conn, user).await? {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden(
+            "the owner hasn't approved you yet, so you can't share".into(),
+        ))
     }
 }
 

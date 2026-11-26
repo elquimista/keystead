@@ -22,7 +22,7 @@ use sqlx::SqliteConnection;
 
 use crate::accounts::{Auth, check_name};
 use crate::vault::{
-    parse_folder, reconcile, require_another_manager, require_shareable, resend_keys,
+    is_approved, parse_folder, reconcile, require_another_manager, require_shareable, resend_keys,
 };
 use crate::{ApiError, AppState, next_seq, user_entry};
 
@@ -74,11 +74,16 @@ pub(crate) async fn create_group(
 }
 
 /// `GET /v1/groups`: every group, its entries and its members, for anyone on the team.
+/// An account the owner hasn't approved gets an empty list: it can't be in a group or
+/// share with one, and an invite alone shouldn't show how the team is organised.
 pub(crate) async fn groups(
     State(state): State<AppState>,
-    _auth: Auth,
+    auth: Auth,
 ) -> Result<Json<Groups>, ApiError> {
     let mut conn = state.readers.acquire().await?;
+    if !is_approved(&mut conn, auth.user_id).await? {
+        return Ok(Json(Groups { groups: Vec::new() }));
+    }
     let rows: Vec<(String, bool)> =
         sqlx::query_as("SELECT id, needs_rekey FROM team_groups ORDER BY rowid")
             .fetch_all(&mut *conn)

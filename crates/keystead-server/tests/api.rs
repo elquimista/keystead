@@ -2174,3 +2174,198 @@ async fn a_session_renews_without_the_device_key() {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }
+
+#[tokio::test]
+async fn an_id_already_taken_shows_the_login_only_to_people_who_can_open_it() {
+    let server = Server::new().await;
+    let (_alice, bob, carol) = team(&server).await;
+    let (folder_id, key) = create_folder(&server, &bob, "Bob's").await;
+    // Carol is in the folder for a while, then removed; nobody gives it a new key yet.
+    let (status, _) = add_to_folder(&server, &bob, (folder_id, &key), &carol, Role::View, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let item = new_item(&bob, folder_id, &key, "Bank");
+    let (status, _) = bob.put(&server, &item, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = bob
+        .call(
+            &server,
+            Method::DELETE,
+            &format!("/v1/folders/{folder_id}/members/{}", carol.user_id),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Bob changes the password because Carol left; the folder still has its old key.
+    let at = ItemVersion {
+        id: item.id,
+        folder_id: Some(folder_id),
+        owner: None,
+        version: 2,
+        author: bob.user_id,
+    };
+    let changed = seal(&bob, &key, at, "Bank", "new-password-after-removal");
+    let (status, body) = bob.put(&server, &changed, Some(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Carol kept the login's id. Starting a login of her own under it is refused, and the
+    // answer doesn't carry Bob's.
+    let item_key = ItemKey::generate();
+    let at = ItemVersion {
+        id: item.id,
+        folder_id: None,
+        owner: Some(carol.user_id),
+        version: 1,
+        author: carol.user_id,
+    };
+    let keys = ItemKeys {
+        owner: Some(item_key.seal_for_owner(at.id, carol.user_id, &carol.keys)),
+        ..ItemKeys::default()
+    };
+    let hers = seal_with(&carol, &item_key, at, keys, "x", "x");
+    let (status, body) = carol.put(&server, &hers, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.get("current").is_none(), "{body}");
+    assert!(body["error"].is_string(), "{body}");
+
+    // Bob can open it, so the same mistake from him still gets the current version back.
+    let (status, body) = bob.put(&server, &item, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let conflict: Conflict = decode(body);
+    assert_eq!(conflict.current, changed);
+}
+
+#[tokio::test]
+async fn a_recovery_challenge_from_before_a_removal_adds_no_device() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    // Bob, with his account secret kept, as his recovery kit keeps it.
+    let secret = AccountSecret::generate();
+    let (_, body) = server
+        .call(
+            Method::POST,
+            "/v1/invites",
+            alice.token(),
+            json(&InviteRequest { name: "Bob".into() }),
+        )
+        .await;
+    let invite: Invite = decode(body);
+    let mut bob = Person::with_secret("Bob", &secret);
+    let (status, body) = server
+        .call(
+            Method::POST,
+            "/v1/invites/accept",
+            None,
+            json(&AcceptInviteRequest {
+                token: invite.token,
+                keys: bob.keys.public(),
+                device_id: bob.device_id,
+                device_key: bob.device.public(),
+                device_name: "Bob's Mac".into(),
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let enrolled: Enrolled = decode(body);
+    bob.user_id = enrolled.user_id;
+    bob.sign_in(&server).await;
+    approve(&server, &alice, &bob).await;
+
+    // Two challenges for a new device, asked for while he's still on the team.
+    let spare = Person::with_secret("Bob", &secret);
+    let mut challenges = Vec::new();
+    for _ in 0..2 {
+        let (status, body) = recovery_challenge(&server, spare.keys.public()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        challenges.push(decode::<RecoveryChallenge>(body));
+    }
+    let (status, _) = alice
+        .call(
+            &server,
+            Method::DELETE,
+            &format!("/v1/users/{}", bob.user_id),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Neither works afterwards: removing him forgot them, and a removed account takes no
+    // new device.
+    for challenge in challenges {
+        let device_key = spare.device.public();
+        let signature = spare.keys.sign(&recovery_message(
+            challenge.challenge.as_slice(),
+            spare.device_id,
+            &device_key,
+        ));
+        let (status, body) = server
+            .call(
+                Method::POST,
+                "/v1/recover",
+                None,
+                json(&RecoverRequest {
+                    challenge: challenge.challenge,
+                    device_id: spare.device_id,
+                    device_key,
+                    device_name: "after removal".into(),
+                    signature,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
+    let (status, _) = recovery_challenge(&server, spare.keys.public()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Removing him again finds nothing left to remove.
+    let (status, _) = alice
+        .call(
+            &server,
+            Method::DELETE,
+            &format!("/v1/users/{}", bob.user_id),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn someone_the_owner_has_not_approved_cannot_share() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let bob = invite(&server, &alice, "Bob").await;
+    approve(&server, &alice, &bob).await;
+    // Mallory used an invite; the owner hasn't approved her.
+    let mallory = invite(&server, &alice, "Mallory").await;
+
+    // She keeps logins and folders of her own.
+    let (own, own_key) = private_item(&server, &mallory, "Hers").await;
+    let (folder_id, key) = create_folder(&server, &mallory, "Shared - Finance").await;
+    let in_folder = new_item(&mallory, folder_id, &key, "In her folder");
+    let (status, body) = mallory.put(&server, &in_folder, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // But she can't put the folder in Bob's app, or share a login with him.
+    let (status, body) =
+        add_to_folder(&server, &mallory, (folder_id, &key), &bob, Role::Edit, 0).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let keys = ItemKeys {
+        people: vec![copy_for(&bob, &own_key, own.id)],
+        ..own.keys.clone()
+    };
+    let shared = next(&mallory, &own_key, &own, keys, "own-secret");
+    let (status, body) = mallory.put(&server, &shared, Some(1)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(bob.sync(&server, 0, 100).await.entries.is_empty());
+
+    // Nor does she see how the team is organised.
+    let (status, body) = mallory.call(&server, Method::GET, "/v1/groups", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(decode::<Groups>(body).groups.is_empty());
+
+    // Once approved, she shares like anyone.
+    approve(&server, &alice, &mallory).await;
+    let (status, body) =
+        add_to_folder(&server, &mallory, (folder_id, &key), &bob, Role::Edit, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = mallory.put(&server, &shared, Some(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
