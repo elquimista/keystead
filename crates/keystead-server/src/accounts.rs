@@ -12,9 +12,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use keystead_core::api::{
     AcceptInviteRequest, ApprovalRequest, ApproveRecoveryRequest, Challenge, ChallengeRequest,
     ClaimRecoveryRequest, DeviceInfo, DeviceList, Directory, Enrolled, EscrowRequest, Invite,
-    InviteRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RecoveryClaimed,
-    RecoveryInProgress, RecoveryStarted, RecoveryState, RecoveryTokenRequest, Session,
-    SetupRequest, SignInRequest,
+    InviteRequest, Invites, PendingInvite, RecoverRequest, RecoveryChallenge,
+    RecoveryChallengeRequest, RecoveryClaimed, RecoveryInProgress, RecoveryStarted, RecoveryState,
+    RecoveryTokenRequest, Session, SetupRequest, SignInRequest,
 };
 use keystead_core::directory::{DirectoryEntry, SignedBefore, verify_escrow_consent};
 use keystead_core::encoding::Bytes;
@@ -40,6 +40,11 @@ const SESSION_LIFETIME: Duration = Duration::from_secs(15 * 60);
 /// copied session token can't be kept alive for good.
 const RENEWAL_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(60);
+/// How long an invite works: long enough for a new colleague to get to it, short enough
+/// that a line left in an old message isn't a way in for good.
+const INVITE_LASTS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// `invites.used` for an invite the owner took back; 1 is one someone joined with.
+const TAKEN_BACK: i64 = 2;
 const MAX_NAME_LENGTH: usize = 100;
 /// How long a line for recovering with the owner's help works.
 const RECOVERY_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -273,15 +278,73 @@ pub(crate) async fn create_invite(
     require_owner(&mut tx, auth.user_id).await?;
     let mut token = [0u8; 32];
     OsRng.fill_bytes(&mut token);
-    sqlx::query("INSERT INTO invites (token_hash, name) VALUES (?, ?)")
-        .bind(&hash(&token)[..])
-        .bind(&request.name)
-        .execute(&mut *tx)
-        .await?;
+    // Rows stay, used or not, so an id is never given to another invite: a list of them
+    // on the owner's screen can't end up taking back someone else's.
+    let expires_at: i64 = sqlx::query_scalar(&format!(
+        "INSERT INTO invites (token_hash, name, id, created_at, expires_at)
+         VALUES (?, ?, (SELECT COALESCE(MAX(id), 0) + 1 FROM invites), {NOW}, {NOW} + ?)
+         RETURNING expires_at"
+    ))
+    .bind(&hash(&token)[..])
+    .bind(&request.name)
+    .bind(INVITE_LASTS.as_secs() as i64)
+    .fetch_one(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(Json(Invite {
         token: URL_SAFE_NO_PAD.encode(token),
+        expires_at: Some(expires_at),
     }))
+}
+
+/// `GET /v1/invites` (owner only): the invites not used yet that still work, oldest first.
+pub(crate) async fn invites(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Invites>, ApiError> {
+    let mut conn = state.readers.acquire().await?;
+    require_owner(&mut conn, auth.user_id).await?;
+    let rows: Vec<(i64, String, i64, i64)> = sqlx::query_as(&format!(
+        "SELECT id, name, created_at, expires_at FROM invites
+         WHERE used = 0 AND expires_at > {NOW} ORDER BY id"
+    ))
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(Json(Invites {
+        invites: rows
+            .into_iter()
+            .map(|(id, name, created_at, expires_at)| PendingInvite {
+                id,
+                name,
+                created_at,
+                expires_at,
+            })
+            .collect(),
+    }))
+}
+
+/// `DELETE /v1/invites/{id}` (owner only): takes back an invite nobody has used. Its line
+/// stops working at once. One already used is a person by now: removing them is
+/// `DELETE /v1/users/{id}`.
+pub(crate) async fn revoke_invite(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    require_owner(&mut tx, auth.user_id).await?;
+    let gone = sqlx::query(&format!(
+        "UPDATE invites SET used = {TAKEN_BACK} WHERE id = ? AND used = 0"
+    ))
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    if gone == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /v1/invites/accept`: registers the invitee's keys and first device. The new
@@ -294,12 +357,19 @@ pub(crate) async fn accept_invite(
         .decode(&request.token)
         .map_err(|_| ApiError::Forbidden("invalid invite".into()))?;
     let mut tx = state.writer.begin().await?;
-    let name: String =
-        sqlx::query_scalar("SELECT name FROM invites WHERE token_hash = ? AND used = 0")
-            .bind(&hash(&token)[..])
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| ApiError::Forbidden("invalid or used invite".into()))?;
+    let name: String = sqlx::query_scalar(&format!(
+        "SELECT name FROM invites WHERE token_hash = ? AND used = 0 AND expires_at > {NOW}"
+    ))
+    .bind(&hash(&token)[..])
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        ApiError::Forbidden(
+            "this invite doesn't work: it was used, revoked, or is more than seven days \
+             old. Ask the owner for a new one"
+                .into(),
+        )
+    })?;
     sqlx::query("UPDATE invites SET used = 1 WHERE token_hash = ?")
         .bind(&hash(&token)[..])
         .execute(&mut *tx)

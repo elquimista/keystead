@@ -2386,7 +2386,8 @@ private struct InviteSheet: View {
         } content: {
             if let invitation {
                 Text("Send it to \(name.trimmed) directly, for example in a private message. It "
-                    + "works once.")
+                    + "works once" + (invitation.expiresAt.map { ", until \(date($0))" } ?? "")
+                    + ".")
                     .fixedSize(horizontal: false, vertical: true)
                 Form {
                     Section {
@@ -2394,7 +2395,9 @@ private struct InviteSheet: View {
                     } footer: {
                         FormFooter("They paste it into Keystead's welcome screen. Once they've joined, "
                             + "they show up under People: approve them after they read you their "
-                            + "fingerprint.")
+                            + "fingerprint."
+                            + (invitation.expiresAt == nil
+                                ? "" : " Until then, you can revoke the invite from People."))
                     }
                 }
                 .sheetForm()

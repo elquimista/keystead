@@ -147,6 +147,18 @@ pub struct Invitation {
     pub token: String,
     pub owner_fingerprint: String,
     pub command: String,
+    /// When it stops working; none from a server older than 0.16.0, whose invites work
+    /// until used, and none for an invite read from its line.
+    pub expires_at: Option<i64>,
+}
+
+/// An invite nobody has used yet, as the owner sees it. The line itself isn't kept.
+#[derive(uniffi::Record)]
+pub struct PendingInvitation {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 impl From<InviteInfo> for Invitation {
@@ -156,6 +168,7 @@ impl From<InviteInfo> for Invitation {
             server: invite.server,
             token: invite.token,
             owner_fingerprint: invite.owner_fingerprint,
+            expires_at: invite.expires_at,
         }
     }
 }
@@ -1100,6 +1113,27 @@ impl Vault {
     /// Creates a single-use invite (owner only). `name` is how the new user will appear.
     pub fn invite(&self, name: String) -> Result<Invitation, CoreError> {
         Ok(self.vault()?.invite(&name)?.into())
+    }
+
+    /// The invites nobody has used yet (owner only), oldest first, fetched fresh; `None`
+    /// if the server is older than 0.16.0, which doesn't list them.
+    pub fn pending_invites(&self) -> Result<Option<Vec<PendingInvitation>>, CoreError> {
+        Ok(self.vault()?.pending_invites()?.map(|invites| {
+            invites
+                .into_iter()
+                .map(|invite| PendingInvitation {
+                    id: invite.id,
+                    name: invite.name,
+                    created_at: invite.created_at,
+                    expires_at: invite.expires_at,
+                })
+                .collect()
+        }))
+    }
+
+    /// Revokes an invite nobody has used (owner only): its line stops working at once.
+    pub fn revoke_invite(&self, id: i64) -> Result<(), CoreError> {
+        Ok(self.vault()?.revoke_invite(id)?)
     }
 
     /// Approves a user (owner only) if the fingerprint they read out matches their keys.

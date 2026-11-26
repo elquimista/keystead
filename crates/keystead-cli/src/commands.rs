@@ -16,7 +16,7 @@ pub use keystead_client::{
     DeletedRow, DeviceRow, EditOutcome, GroupRow, GroupShareRow, HistoryRow, InviteInfo, ItemRow,
     MemberRow, SyncSummary, ToChangeRow, UserRow, Whoami, generate_password,
 };
-pub use keystead_core::api::Role;
+pub use keystead_core::api::{PendingInvite, Role};
 use keystead_core::ids::{DeviceId, ItemId, UserId};
 use keystead_core::items::{Details, Overview};
 use keystead_core::keys::{AccountSecret, SoftwareDeviceKey};
@@ -283,6 +283,15 @@ pub fn remove_device(home: &Path, device: DeviceId) -> Result<()> {
 
 pub fn invite(home: &Path, name: &str) -> Result<InviteInfo> {
     open(home)?.invite(name)
+}
+
+/// The invites nobody has used yet; `None` if the server is too old to list them.
+pub fn pending_invites(home: &Path) -> Result<Option<Vec<PendingInvite>>> {
+    open(home)?.pending_invites()
+}
+
+pub fn revoke_invite(home: &Path, id: i64) -> Result<()> {
+    open(home)?.revoke_invite(id)
 }
 
 pub fn whoami(home: &Path) -> Result<Whoami> {

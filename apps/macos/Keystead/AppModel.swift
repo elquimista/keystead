@@ -205,6 +205,9 @@ final class AppModel {
     /// The server keeps deleted logins for 30 days (0.9.0 and later); nil until it's asked.
     private(set) var keepsDeleted: Bool?
     var selectedDeletedID: DeletedLogin.ID?
+    /// The invites nobody has used yet, oldest first. Only the owner has any, and only
+    /// from a server on 0.16.0 or later.
+    private(set) var invites: [PendingInvitation] = []
     /// This account's devices, this Mac included.
     private(set) var devices: [AccountDevice] = []
     /// Why the device list couldn't be loaded, such as a server older than 0.2.0.
@@ -223,6 +226,8 @@ final class AppModel {
     /// The login or person selected in the main window's list.
     var selectedItemID: ItemSummary.ID?
     var selectedUserID: User.ID?
+    /// An invite selected under People instead of a person.
+    var selectedInviteID: PendingInvitation.ID?
     var selectedGroupID: GroupSummary.ID?
     /// The menu bar panel's search.
     var search = ""
@@ -817,6 +822,7 @@ final class AppModel {
         toChange = []
         health = nil
         recentlyDeleted = []
+        invites = []
         devices = []
         devicesProblem = nil
         hasSynced = false
@@ -825,6 +831,7 @@ final class AppModel {
         section = .allLogins
         selectedItemID = nil
         selectedUserID = nil
+        selectedInviteID = nil
         copiedName = nil
         message = nil
         phase = .locked
@@ -945,6 +952,7 @@ final class AppModel {
         }
         await reloadLocal()
         await reloadDeleted()
+        await reloadInvites()
     }
 
     /// Sets a property only if its value changed, so the views that show it aren't drawn
@@ -1006,6 +1014,18 @@ final class AppModel {
             }
         }
         await reloadDeleted()
+    }
+
+    /// Loads the owner's unused invites on its own, like Recently Deleted. A server older
+    /// than 0.16.0 lists none; if it can't be asked, the ones already shown stay.
+    func reloadInvites() async {
+        #if DEBUG
+        if isDemo { return }
+        #endif
+        guard isOwner else { return }
+        do {
+            update(\.invites, to: try await perform { try $0.pendingInvites() } ?? [])
+        } catch {}
     }
 
     /// Loads the device list on its own, so an older server that has no device list
@@ -1469,7 +1489,28 @@ final class AppModel {
     /// Creates a single-use invite (owner only).
     func invite(name: String) async throws -> Invitation {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return try await perform { try $0.invite(name: name) }
+        let invitation = try await perform { try $0.invite(name: name) }
+        await reloadInvites()
+        return invitation
+    }
+
+    /// Revokes an invite nobody has used (owner only): its line stops working at once.
+    func revokeInvite(_ invite: PendingInvitation) async throws {
+        #if DEBUG
+        if isDemo {
+            invites.removeAll { $0.id == invite.id }
+            return
+        }
+        #endif
+        let id = invite.id
+        do {
+            try await perform { try $0.revokeInvite(id: id) }
+        } catch {
+            // Used or run out meanwhile: show what's waiting now.
+            await reloadInvites()
+            throw error
+        }
+        await reloadInvites()
     }
 
     /// Approves a user (owner only) if the fingerprint they read out matches their keys.
@@ -1703,6 +1744,11 @@ extension AppModel {
                 demoUser(2, "Mo", escrow: true),
                 demoUser(3, "Sam", approved: false),
                 demoUser(4, "Pat", removed: true),
+            ]
+            model.invites = [
+                PendingInvitation(
+                    id: 7, name: "Riley", createdAt: 1_795_300_000,
+                    expiresAt: 1_795_300_000 + 7 * 86_400),
             ]
             model.folders = ["Production", "Production / Databases", "Staging"]
             // Mo's Staging folder, shared with Olivia to view.
@@ -1959,6 +2005,8 @@ extension GroupShare: Identifiable {
 extension User: Identifiable {
     public var id: Int64 { userId }
 }
+
+extension PendingInvitation: Identifiable {}
 
 extension Person: Identifiable {
     public var id: Int64 { userId }

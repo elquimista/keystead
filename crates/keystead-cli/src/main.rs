@@ -30,8 +30,13 @@ enum Command {
         #[arg(long)]
         name: String,
     },
-    /// Invite someone to the server (owner only)
+    /// Invite someone to the server (owner only): the line works once, for seven days
     Invite { name: String },
+    /// List the invites nobody has used yet, or revoke one (owner only)
+    Invites {
+        #[command(subcommand)]
+        action: Option<InvitesCommand>,
+    },
     /// Join a server with an invite
     Join {
         server: String,
@@ -308,6 +313,12 @@ enum ToChangeCommand {
 }
 
 #[derive(Subcommand)]
+enum InvitesCommand {
+    /// Revoke an invite nobody has used: its line stops working at once
+    Revoke { id: i64 },
+}
+
+#[derive(Subcommand)]
 enum DevicesCommand {
     /// Add another device to your account: shows a line for it, then asks for the code it
     /// shows, and sends it your account, sealed so only it can open it
@@ -483,10 +494,46 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Invite { name } => {
             let invite = commands::invite(&home, &name)?;
-            println!("Send {name} this command. It works once:\n");
+            match invite.expires_at {
+                Some(expires) => println!(
+                    "Send {name} this command. It works once, until {}:\n",
+                    date(expires)
+                ),
+                None => println!("Send {name} this command. It works once:\n"),
+            }
             println!("  {}\n", invite.command());
             println!("Then compare fingerprints with them and run:");
             println!("  keystead approve <their user id> --fingerprint <their fingerprint>");
+            if invite.expires_at.is_some() {
+                println!("\nTo revoke it before they use it, see `keystead invites`.");
+            }
+        }
+        Command::Invites { action: None } => match commands::pending_invites(&home)? {
+            None => println!(
+                "The server is older than Keystead 0.16.0 and doesn't list invites: they work \
+                 until used. Update it to 0.16.0 or later."
+            ),
+            Some(invites) if invites.is_empty() => println!("No invites are waiting."),
+            Some(invites) => {
+                let rows = invites
+                    .into_iter()
+                    .map(|invite| {
+                        vec![
+                            invite.id.to_string(),
+                            invite.name,
+                            date(invite.created_at),
+                            date(invite.expires_at),
+                        ]
+                    })
+                    .collect();
+                print_table(&["ID", "FOR", "MADE", "WORKS UNTIL"], rows);
+            }
+        },
+        Command::Invites {
+            action: Some(InvitesCommand::Revoke { id }),
+        } => {
+            commands::revoke_invite(&home, id)?;
+            println!("Revoked. Its line doesn't work any more.");
         }
         Command::Join {
             server,

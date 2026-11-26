@@ -258,6 +258,16 @@ const MIGRATIONS: &[&str] = &[
          PRIMARY KEY (group_id, revision)
      ) WITHOUT ROWID;
      ALTER TABLE retired_keys ADD COLUMN escrow_consent BLOB;",
+    // 15 (0.16.0): invites stop working after seven days, and the owner can list the ones
+    // not used yet and take one back. Ones from before get seven days from now.
+    "ALTER TABLE invites ADD COLUMN id INTEGER;
+     ALTER TABLE invites ADD COLUMN created_at INTEGER;
+     ALTER TABLE invites ADD COLUMN expires_at INTEGER;
+     UPDATE invites SET id = rowid;
+     UPDATE invites SET created_at = CAST(strftime('%s', 'now') AS INTEGER),
+         expires_at = CAST(strftime('%s', 'now') AS INTEGER) + 604800
+     WHERE used = 0;
+     CREATE UNIQUE INDEX invites_id ON invites (id);",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -327,7 +337,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sign-in/challenge", post(accounts::challenge))
         .route("/v1/sign-in", post(accounts::sign_in))
         .route("/v1/sign-in/renew", post(accounts::renew))
-        .route("/v1/invites", post(accounts::create_invite))
+        .route(
+            "/v1/invites",
+            post(accounts::create_invite).get(accounts::invites),
+        )
+        .route("/v1/invites/{id}", delete(accounts::revoke_invite))
         .route("/v1/invites/accept", post(accounts::accept_invite))
         .route("/v1/recover/challenge", post(accounts::recovery_challenge))
         .route("/v1/recover", post(accounts::recover))

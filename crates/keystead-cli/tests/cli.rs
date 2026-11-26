@@ -164,6 +164,52 @@ fn alice_and_bob_share_a_password() {
 }
 
 #[test]
+fn the_owner_lists_invites_and_takes_one_back() {
+    let fixture = Fixture::start();
+    let alice = fixture.home("alice");
+    commands::setup(&alice, &fixture.url, &fixture.setup_code, "Alice").unwrap();
+    assert_eq!(commands::pending_invites(&alice).unwrap(), Some(Vec::new()));
+
+    let for_bob = commands::invite(&alice, "Bob").unwrap();
+    let for_carol = commands::invite(&alice, "Carol").unwrap();
+    let waiting = commands::pending_invites(&alice).unwrap().unwrap();
+    let names: Vec<&str> = waiting.iter().map(|invite| invite.name.as_str()).collect();
+    assert_eq!(names, ["Bob", "Carol"]);
+    // An invite works for seven days, and its line says until when.
+    assert_eq!(waiting[0].expires_at - waiting[0].created_at, 7 * 86_400);
+    assert_eq!(for_bob.expires_at, Some(waiting[0].expires_at));
+
+    // Bob's invite is taken back: his line stops working, and Carol's still does.
+    commands::revoke_invite(&alice, waiting[0].id).unwrap();
+    let error = commands::join(
+        &fixture.home("bob"),
+        &for_bob.server,
+        &for_bob.token,
+        &for_bob.owner_fingerprint,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("revoked"), "{error}");
+    assert!(!fixture.home("bob").join("profile.json").exists());
+    let carol = fixture.home("carol");
+    commands::join(
+        &carol,
+        &for_carol.server,
+        &for_carol.token,
+        &for_carol.owner_fingerprint,
+    )
+    .unwrap();
+    assert_eq!(commands::pending_invites(&alice).unwrap(), Some(Vec::new()));
+
+    // Neither can be taken back now, and only the owner sees or takes back invites.
+    for invite in &waiting {
+        let error = commands::revoke_invite(&alice, invite.id).unwrap_err();
+        assert!(error.to_string().contains("isn't waiting"), "{error}");
+    }
+    assert!(commands::pending_invites(&carol).is_err());
+    assert!(commands::revoke_invite(&carol, waiting[0].id).is_err());
+}
+
+#[test]
 fn joining_checks_the_owner_fingerprint() {
     let fixture = Fixture::start();
     let alice = fixture.home("alice");

@@ -12,9 +12,9 @@ use keystead_core::api::{
     ApprovalRequest, ClaimDeviceTransferRequest, ClaimedAccountSecret, Conflict,
     CreateFolderRequest, CreateGroupRequest, DeletedItems, DeviceList, DeviceTransfer,
     DeviceTransferState, Directory, Enrolled, Exposures, GroupFolderKey, GroupMemberKey,
-    GroupRekeyRequest, GroupShare, Groups, Health, Invite, InviteRequest, ItemHistory,
-    JoinDeviceTransferRequest, KeyLink, Member, MemberKey, Members, PutItemRequest, RecoverRequest,
-    RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest,
+    GroupRekeyRequest, GroupShare, Groups, Health, Invite, InviteRequest, Invites, ItemHistory,
+    JoinDeviceTransferRequest, KeyLink, Member, MemberKey, Members, PendingInvite, PutItemRequest,
+    RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest,
     SendAccountSecretRequest, SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
@@ -71,6 +71,9 @@ const NEEDS_0_8: &str = "the server is older than Keystead 0.8.0 and can't add a
 /// Moving logins came with 0.12.0; an older server refuses any change of folder or owner.
 const NEEDS_0_12: &str = "the server is older than Keystead 0.12.0 and can't move logins; \
                           update it to 0.12.0 or later";
+/// Revoking invites came with 0.16.0.
+const NEEDS_0_16: &str = "the server is older than Keystead 0.16.0 and can't revoke invites; \
+                          update it to 0.16.0 or later";
 /// Deleting folders came with 0.13.0.
 const NEEDS_0_13: &str = "the server is older than Keystead 0.13.0 and can't delete folders; \
                           update it to 0.13.0 or later";
@@ -143,6 +146,9 @@ pub struct InviteInfo {
     pub server: String,
     pub token: String,
     pub owner_fingerprint: String,
+    /// When it stops working, in seconds since 1970, for one just made on a server that
+    /// says (0.16.0 and later); a line someone pasted doesn't carry it.
+    pub expires_at: Option<i64>,
 }
 
 impl InviteInfo {
@@ -178,6 +184,7 @@ impl InviteInfo {
                     server: (*server).to_owned(),
                     token: (*token).to_owned(),
                     owner_fingerprint,
+                    expires_at: None,
                 })
             }
             _ => bail!("an invite has a server address starting with http and a token"),
@@ -1027,7 +1034,35 @@ impl Vault {
             server: self.profile.server.clone(),
             token: invite.token,
             owner_fingerprint: self.profile.owner.fingerprint(),
+            expires_at: invite.expires_at,
         })
+    }
+
+    /// The invites nobody has used yet (owner only), oldest first, fetched fresh; `None`
+    /// if the server is older than 0.16.0, whose invites don't run out and aren't listed.
+    pub fn pending_invites(&mut self) -> Result<Option<Vec<PendingInvite>>> {
+        match self.call(|client| client.get::<Invites>("/v1/invites", &[]))? {
+            Ok(list) => Ok(Some(list.invites)),
+            Err(Failure::Status {
+                code: 404 | 405, ..
+            }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Revokes an invite nobody has used (owner only): its line stops working at once.
+    pub fn revoke_invite(&mut self, id: i64) -> Result<()> {
+        let path = format!("/v1/invites/{id}");
+        match self.call(|client| client.delete::<()>(&path))? {
+            Ok(()) => Ok(()),
+            Err(Failure::Status { code: 404, .. }) if self.pending_invites()?.is_some() => {
+                bail!("that invite isn't waiting any more: it was used, revoked, or ran out")
+            }
+            Err(Failure::Status {
+                code: 404 | 405, ..
+            }) => bail!(NEEDS_0_16),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Approves a user (owner only), but only if the fingerprint they read out matches. Only
@@ -3862,6 +3897,7 @@ mod tests {
             server: "https://keys.example.com".into(),
             token: "tok_123".into(),
             owner_fingerprint: "ab12cd34".into(),
+            expires_at: None,
         };
         assert_eq!(InviteInfo::parse(&invite.command()).unwrap(), invite);
         // Wrapped by a mail client, without the command name, with stray spaces.

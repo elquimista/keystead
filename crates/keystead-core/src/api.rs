@@ -127,6 +127,27 @@ pub struct InviteRequest {
 pub struct Invite {
     /// Single-use secret for the invitee.
     pub token: String,
+    /// When it stops working, in seconds since 1970 (0.16.0 and later: seven days after
+    /// it's made; servers before that don't say, and their invites don't expire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+/// `GET /v1/invites` (owner only, 0.16.0 and later): the invites nobody has used yet, that
+/// still work, oldest first. `DELETE /v1/invites/{id}` takes one back.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Invites {
+    pub invites: Vec<PendingInvite>,
+}
+
+/// An invite that hasn't been used: who it was made for, and until when it works. Its
+/// token isn't kept anywhere, only a hash of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingInvite {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 /// `POST /v1/invites/accept`: the invitee registers their keys and first device.

@@ -15,7 +15,7 @@ use keystead_core::api::{
     RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest, Session, SetupRequest,
     SignInRequest, SyncEntry, SyncPage, UpdateGroupRequest, ViaGroup,
 };
-use keystead_core::api::{FolderEntryRequest, Health};
+use keystead_core::api::{FolderEntryRequest, Health, Invites};
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::folders::FolderEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries};
@@ -54,6 +54,14 @@ impl Server {
             path,
             setup_code,
         }
+    }
+
+    /// Changes the database directly, for what would otherwise take days to come about.
+    async fn sql(&self, sql: &str) {
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&self.path);
+        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+        sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        pool.close().await;
     }
 
     async fn call(
@@ -1301,7 +1309,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }
@@ -2656,4 +2664,93 @@ async fn a_groups_members_are_signed_once_an_entry_names_them() {
     );
     renamed.members = with_carol.members.clone();
     assert_eq!(update(&by_alice(renamed)).await, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn invites_run_out_and_can_be_taken_back() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let bob = invite(&server, &alice, "Bob").await;
+    let make = |name: &str| {
+        let request = json(&InviteRequest { name: name.into() });
+        let (token, server) = (alice.token().map(str::to_owned), &server);
+        async move {
+            let (status, body) = server
+                .call(Method::POST, "/v1/invites", token.as_deref(), request)
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            decode::<Invite>(body)
+        }
+    };
+    let accept = |token: String| {
+        let person = Person::new("Someone");
+        let request = json(&AcceptInviteRequest {
+            token,
+            keys: person.keys.public(),
+            device_id: person.device_id,
+            device_key: person.device.public(),
+            device_name: "Their Mac".into(),
+        });
+        let server = &server;
+        async move {
+            server
+                .call(Method::POST, "/v1/invites/accept", None, request)
+                .await
+                .0
+        }
+    };
+    let list = |who: &Person| {
+        let (token, server) = (who.token().map(str::to_owned), &server);
+        async move {
+            server
+                .call(Method::GET, "/v1/invites", token.as_deref(), None)
+                .await
+        }
+    };
+
+    // Only the owner sees them; one that was used isn't waiting any more.
+    let carol = make("Carol").await;
+    let dan = make("Dan").await;
+    assert!(carol.expires_at.is_some());
+    assert_eq!(list(&bob).await.0, StatusCode::FORBIDDEN);
+    let (status, body) = list(&alice).await;
+    assert_eq!(status, StatusCode::OK);
+    let waiting = decode::<Invites>(body).invites;
+    let names: Vec<&str> = waiting.iter().map(|invite| invite.name.as_str()).collect();
+    assert_eq!(names, ["Carol", "Dan"]);
+    assert_eq!(waiting[0].expires_at, carol.expires_at.unwrap());
+    assert_eq!(
+        waiting[0].expires_at - waiting[0].created_at,
+        7 * 24 * 60 * 60
+    );
+
+    // Taken back: its line stops working. Only the owner can, and only once.
+    let path = format!("/v1/invites/{}", waiting[0].id);
+    let (status, _) = bob.call(&server, Method::DELETE, &path, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = alice.call(&server, Method::DELETE, &path, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = alice.call(&server, Method::DELETE, &path, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(accept(carol.token).await, StatusCode::FORBIDDEN);
+
+    // More than seven days old: it doesn't work, and isn't listed.
+    server
+        .sql("UPDATE invites SET expires_at = CAST(strftime('%s', 'now') AS INTEGER) - 1 WHERE used = 0")
+        .await;
+    assert_eq!(accept(dan.token).await, StatusCode::FORBIDDEN);
+    assert!(decode::<Invites>(list(&alice).await.1).invites.is_empty());
+
+    // A new one works, once, and gets a number no other invite had.
+    let erin = make("Erin").await;
+    let listed = decode::<Invites>(list(&alice).await.1).invites;
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].id > waiting[1].id);
+    assert_eq!(accept(erin.token.clone()).await, StatusCode::OK);
+    assert_eq!(accept(erin.token).await, StatusCode::FORBIDDEN);
+    assert!(decode::<Invites>(list(&alice).await.1).invites.is_empty());
+    // A used invite is a person now; it can't be taken back as an invite.
+    let path = format!("/v1/invites/{}", listed[0].id);
+    let (status, _) = alice.call(&server, Method::DELETE, &path, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

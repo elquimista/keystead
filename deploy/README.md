@@ -132,9 +132,11 @@ stops working once it's used.
 ## 6. Invite your team
 
 In Keystead, open **People** and choose **Invite**. Send each person their invite line
-directly, for example in a private message; it works once. When they've joined, they show
-up under People: approve them after they read you the fingerprint their Keystead shows, in
-person or on a call. Then share folders, or single logins, with them.
+directly, for example in a private message; it works once, for seven days. Until they've
+used it, they show under People as invited, where you can revoke the invite if it went to
+the wrong place. When they've joined, approve them after they read you the fingerprint
+their Keystead shows, in person or on a call. Then share folders, or single logins, with
+them.
 
 ## Updating
 

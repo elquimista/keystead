@@ -34,6 +34,10 @@ account back on a new Mac with a Recovery Kit.
   the sidebar. New Folder Inside… (a folder's right-click menu) makes one that starts out
   shared like its parent, or private. After that each folder has its own access: sharing
   one never shares another, and the Access sheet says so.
+- **Invites:** an invite works once, for seven days. Until someone has used theirs, the
+  owner sees them under People as invited, and can revoke the invite there: its line
+  stops working at once. Needs a 0.16.0 server; an older one's invites work until used
+  and aren't listed.
 - **Roles and access:** folders and logins are shared to view, edit or manage. A folder's
   Access… (in its right-click menu or toolbar) lists its members; managers change roles
   and remove people, and anyone can leave. Actions someone's role doesn't allow are

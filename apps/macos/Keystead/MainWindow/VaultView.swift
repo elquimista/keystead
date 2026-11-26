@@ -30,7 +30,7 @@ struct VaultView: View {
             Group {
                 switch model.section ?? .allLogins {
                 case .people:
-                    PeopleList(model: model, selection: $model.selectedUserID)
+                    PeopleList(model: model)
                 case .groups:
                     GroupList(model: model, selection: $model.selectedGroupID)
                 case .recentlyDeleted:
@@ -46,6 +46,9 @@ struct VaultView: View {
             if model.section == .people {
                 if let user = model.users.first(where: { $0.id == model.selectedUserID }) {
                     PersonDetail(model: model, user: user)
+                } else if let invite = model.invites.first(where: { $0.id == model.selectedInviteID }) {
+                    InviteDetail(model: model, invite: invite)
+                        .id(invite.id)
                 } else {
                     NothingSelected {
                         Text("Select a person")
@@ -1119,17 +1122,47 @@ private struct DeletedDetail: View {
 
 // MARK: - People
 
+/// A row under People: someone on the team, or an invite nobody has used yet.
+private enum PeopleSelection: Hashable {
+    case user(User.ID)
+    case invite(PendingInvitation.ID)
+}
+
 private struct PeopleList: View {
     let model: AppModel
-    @Binding var selection: User.ID?
     @State private var search = ""
 
     private var shown: [User] {
         model.users.filter { matches(search, $0.name, status(of: $0)) }
     }
 
+    private var shownInvites: [PendingInvitation] {
+        model.invites.filter { matches(search, $0.name, "Invited") }
+    }
+
+    private var selection: Binding<PeopleSelection?> {
+        Binding(
+            get: {
+                model.selectedUserID.map(PeopleSelection.user)
+                    ?? model.selectedInviteID.map(PeopleSelection.invite)
+            },
+            set: { row in
+                switch row {
+                case .user(let id):
+                    model.selectedUserID = id
+                    model.selectedInviteID = nil
+                case .invite(let id):
+                    model.selectedUserID = nil
+                    model.selectedInviteID = id
+                case nil:
+                    model.selectedUserID = nil
+                    model.selectedInviteID = nil
+                }
+            })
+    }
+
     var body: some View {
-        List(selection: $selection) {
+        List(selection: selection) {
             ForEach(shown) { user in
                 HStack(spacing: 10) {
                     Avatar(name: user.name, size: 28)
@@ -1143,14 +1176,32 @@ private struct PeopleList: View {
                     }
                 }
                 .padding(.vertical, 3)
+                .tag(PeopleSelection.user(user.id))
+            }
+            ForEach(shownInvites) { invite in
+                HStack(spacing: 10) {
+                    Avatar(name: invite.name, size: 28)
+                        .opacity(0.5)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(invite.name)
+                            .lineLimit(1)
+                        Text("Invited · hasn't joined yet")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 3)
+                .tag(PeopleSelection.invite(invite.id))
             }
         }
         // Over the list, like an empty login list's: a bottom inset with wrapping text
         // breaks the split view's layout, blanking the sidebar too.
         .overlay {
-            if !search.trimmed.isEmpty && shown.isEmpty {
+            if !search.trimmed.isEmpty && shown.isEmpty && shownInvites.isEmpty {
                 ContentUnavailableView.search(text: search)
-            } else if model.isOwner && model.users.count <= 1 && search.trimmed.isEmpty {
+            } else if model.isOwner && model.users.count <= 1 && model.invites.isEmpty
+                && search.trimmed.isEmpty
+            {
                 ContentUnavailableView {
                     Label("Just you so far", systemImage: "person.circle")
                 } description: {
@@ -1227,6 +1278,59 @@ private struct PersonActions: ToolbarContent {
             }
             .help("Help Recover and Remove from Team")
             .disabled(!canManage)
+        }
+    }
+}
+
+/// An invite nobody has used yet: when it stops working, and the button to revoke it.
+private struct InviteDetail: View {
+    let model: AppModel
+    let invite: PendingInvitation
+    @State private var confirming = false
+    @State private var problem: String?
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Invited", value: date(invite.createdAt))
+                LabeledContent("Works until", value: date(invite.expiresAt))
+                ActionRow(title: "Stop this invite working", button: "Revoke Invite…", role: .destructive) {
+                    confirming = true
+                }
+                if let problem {
+                    Text(problem)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } header: {
+                PageHeader(title: invite.name, subtitle: "Invited · hasn't joined yet") {
+                    Avatar(name: invite.name, size: 52)
+                        .opacity(0.5)
+                }
+            } footer: {
+                Text("\(invite.name) joins by pasting the invite you sent into Keystead, then shows "
+                    + "up here for you to approve. Keystead doesn't keep the invite itself: if "
+                    + "it's lost or went to the wrong person, revoke it and invite them again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+            }
+        }
+        .formStyle(.grouped)
+        .toolbar { PersonActions(model: model, user: nil) }
+        .confirmationDialog("Revoke the invite for \(invite.name)?", isPresented: $confirming) {
+            Button("Revoke Invite", role: .destructive) {
+                Task {
+                    do {
+                        try await model.revokeInvite(invite)
+                    } catch {
+                        problem = describe(error)
+                    }
+                }
+            }
+        } message: {
+            Text("The invite you sent stops working at once. You can invite them again at any time.")
         }
     }
 }
@@ -1847,7 +1951,12 @@ func status(of user: User) -> String {
 
 /// "on Nov 24, 2026" from seconds since 1970.
 func day(_ seconds: Int64) -> String {
-    "on " + Date(timeIntervalSince1970: TimeInterval(seconds)).formatted(date: .abbreviated, time: .omitted)
+    "on " + date(seconds)
+}
+
+/// "Nov 24, 2026" from seconds since 1970.
+func date(_ seconds: Int64) -> String {
+    Date(timeIntervalSince1970: TimeInterval(seconds)).formatted(date: .abbreviated, time: .omitted)
 }
 
 /// A login's website as a link to open, if it's a web address. Anyone who can edit a shared

@@ -73,7 +73,8 @@ cargo build -p keystead-cli          # builds target/debug/keystead
 # Alice: claim the server and invite Bob
 export KEYSTEAD_HOME=/tmp/alice
 keystead setup http://127.0.0.1:8080 <setup code> --name Alice
-keystead invite Bob                  # prints the join command for Bob
+keystead invite Bob                  # prints the join command for Bob; it works once, for a week
+                                     # (`keystead invites` lists and revokes unused ones)
 
 # Bob, in another terminal
 export KEYSTEAD_HOME=/tmp/bob

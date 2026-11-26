@@ -39,6 +39,11 @@ enum DebugSnapshots {
         } else {
             steps += [
                 ("3-person-waiting", { model.selectedUserID = 3 }),
+                // Riley was invited and hasn't joined; the same toolbar, greyed out.
+                ("3a-invite-waiting", {
+                    model.selectedUserID = nil
+                    model.selectedInviteID = 7
+                }),
                 ("4-person-approved", { model.selectedUserID = 2 }),
                 // Pat was removed and could see two of Olivia's logins.
                 ("4a-person-removed", { model.selectedUserID = 4 }),

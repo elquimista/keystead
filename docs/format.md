@@ -566,6 +566,8 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/sign-in` | `SignInRequest` | `Session` | Any device |
 | `POST /v1/sign-in/renew` | | `Session` | A signed-in device |
 | `POST /v1/invites` | `InviteRequest` | `Invite` | Owner |
+| `GET /v1/invites` | | `Invites` | Owner |
+| `DELETE /v1/invites/{id}` | | 204 | Owner |
 | `POST /v1/invites/accept` | `AcceptInviteRequest` | `Enrolled` | Invitee, with the token |
 | `POST /v1/recover/challenge` | `RecoveryChallengeRequest` | `RecoveryChallenge` | A device with the account secret |
 | `POST /v1/recover` | `RecoverRequest` | `Enrolled` | A device with the account secret |
@@ -627,6 +629,16 @@ codes (400, 401, 403, 404, 409).
 format the server stores; servers older than 0.2.0 leave it out and store only format 1,
 so clients check it before saving. Servers with groups (0.4.0 and later) say 3, and with
 one-time codes (0.6.0 and later) 4.
+
+**Invites.** An invite's token works once, and (0.16.0 and later) for seven days:
+`Invite` is `{"token", "expires_at"}`. The server keeps only the token's SHA-256, so the
+owner can't be shown an invite's line again. `Invites` lists the ones nobody has used and
+that haven't run out, oldest first, each as `{"id", "name", "created_at", "expires_at"}`;
+ids are never used again. Deleting one revokes it: its token stops working at once.
+Accepting a token that was used, revoked or has run out answers 403. Invites made before
+0.16.0 run out seven days after the server is updated. Servers before 0.16.0 answer 404
+or 405 to listing and revoking, leave out `expires_at`, and their invites work until
+used; clients say to update the server instead of failing.
 
 When saving an item, the server checks that the path and body ids match, the session's
 user is the author and the version is `base_version + 1` (or 1 for a new item). The
