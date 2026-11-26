@@ -509,7 +509,7 @@ private struct LoginDetail: View {
                     Text(showsPassword ? details?.password ?? "" : "••••••••••••")
                         .font(.system(.body, design: .monospaced))
                 } accessory: { hovering in
-                    RevealButton(what: "password", shown: showsPassword, hovering: hovering) {
+                    RevealButton(what: "password", shown: showsPassword, emphasized: hovering) {
                         await reveal(\.showsPassword)
                     }
                 }
@@ -540,7 +540,7 @@ private struct LoginDetail: View {
                             .foregroundStyle(.secondary)
                     }
                 } accessory: { hovering in
-                    RevealButton(what: "notes", shown: showsNotes, hovering: hovering) {
+                    RevealButton(what: "notes", shown: showsNotes, emphasized: hovering) {
                         await reveal(\.showsNotes)
                     }
                 }
@@ -674,10 +674,11 @@ private struct LoginHeader: View {
     }
 }
 
-/// One field of a login: its label and value and, while the pointer is over it, a button
-/// that copies it, which turns into a check mark for a moment. Clicking the value copies it
-/// too, unless it's a link. `accessory` adds buttons of its own, told when the pointer is
-/// over the row.
+/// One field of a login: its label and value and a button that copies it, which turns into
+/// a check mark for a moment. Clicking the value copies it too, unless it's a link.
+/// `accessory` adds a button of its own (showing the field) between them, told when the
+/// pointer is over the row so it can stand out with the copy button. Each row ends flush
+/// right with whatever buttons it has.
 private struct FieldRow<Value: View, Accessory: View>: View {
     let label: String
     let copyHelp: String
@@ -721,12 +722,10 @@ private struct FieldRow<Value: View, Accessory: View>: View {
                     Button {
                         copied(copy)
                     } label: {
-                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            .contentTransition(.symbolEffect(.replace))
+                        FieldIcon(copied ? "checkmark" : "doc.on.doc", emphasized: hovering || copied)
                     }
                     .buttonStyle(.borderless)
                     .help(copyHelp)
-                    .opacity(hovering || copied ? 1 : 0)
                 }
             }
         }
@@ -755,23 +754,41 @@ extension FieldRow where Accessory == EmptyView {
     }
 }
 
-/// Shows or hides a field: there while the pointer is over its row, or while it's shown.
+/// Shows or hides a field.
 struct RevealButton: View {
     let what: String
     let shown: Bool
-    let hovering: Bool
+    /// Drawn in full, as while the pointer is over its row, rather than quietly.
+    var emphasized = false
     let toggle: () async -> Void
 
     var body: some View {
         Button {
             Task { await toggle() }
         } label: {
-            Image(systemName: shown ? "eye.slash" : "eye")
-                .contentTransition(.symbolEffect(.replace))
+            FieldIcon(shown ? "eye.slash" : "eye", emphasized: emphasized || shown)
         }
         .buttonStyle(.borderless)
         .help(shown ? "Hide \(what)" : "Show \(what)")
-        .opacity(hovering || shown ? 1 : 0)
+    }
+}
+
+/// A field button's symbol: always there so it's clear what can be copied or shown, quiet
+/// until it matters, and as wide whichever symbol it shows so the value beside it stays put.
+private struct FieldIcon: View {
+    let name: String
+    let emphasized: Bool
+
+    init(_ name: String, emphasized: Bool) {
+        self.name = name
+        self.emphasized = emphasized
+    }
+
+    var body: some View {
+        Image(systemName: name)
+            .contentTransition(.symbolEffect(.replace))
+            .foregroundStyle(emphasized ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            .frame(width: 18)
     }
 }
 

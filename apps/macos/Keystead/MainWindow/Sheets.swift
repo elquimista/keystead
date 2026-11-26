@@ -718,7 +718,7 @@ private struct HistorySheet: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         RevealButton(what: "this version's password", shown: shown[entry.version] != nil,
-                                     hovering: true) { await reveal(entry) }
+                                     emphasized: true) { await reveal(entry) }
                         Button {
                             Task { await model.copyHistoryPassword(of: item, version: entry.version) }
                         } label: {
