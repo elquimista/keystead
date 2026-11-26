@@ -452,6 +452,9 @@ private struct LoginList: View {
             ContentUnavailableView(
                 "Nothing shared with you", systemImage: "shared.with.you",
                 description: Text("Logins people share with you one by one show up here."))
+        } else if model.items.isEmpty && model.folders.isEmpty && !model.hasSynced {
+            // On a new Mac, until the first sync brings them.
+            ProgressView("Getting your logins\u{2026}")
         } else if model.items.isEmpty && model.folders.isEmpty {
             ContentUnavailableView {
                 Label("No logins yet", systemImage: "key")

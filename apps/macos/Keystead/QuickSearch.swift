@@ -275,7 +275,9 @@ struct QuickSearchView: View {
         case .unlocked:
             let results = state.results
             if results.isEmpty {
-                Text(state.query.trimmed.isEmpty ? "No logins yet." : "No logins match.")
+                Text(state.query.trimmed.isEmpty
+                    ? state.model.hasSynced ? "No logins yet." : "Getting your logins\u{2026}"
+                    : "No logins match.")
                     .foregroundStyle(.secondary)
             } else {
                 ScrollViewReader { proxy in

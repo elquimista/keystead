@@ -151,7 +151,9 @@ struct PanelView: View {
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             if model.filteredItems.isEmpty {
-                Text(model.items.isEmpty ? "Nothing has been shared with you yet." : "No matches.")
+                Text(model.items.isEmpty
+                    ? model.hasSynced ? "Nothing has been shared with you yet." : "Getting your logins\u{2026}"
+                    : "No matches.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 60)

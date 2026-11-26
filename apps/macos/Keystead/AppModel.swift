@@ -134,6 +134,9 @@ final class AppModel {
     private(set) var identity: Identity?
     /// A sync is under way.
     private(set) var isSyncing = false
+    /// A sync has finished since unlocking, so an empty list really is empty rather than
+    /// not fetched yet (on a new Mac, before the first sync).
+    private(set) var hasSynced = false
     /// Another sync was asked for during this one; it runs right after.
     @ObservationIgnored private var syncAgain = false
     @ObservationIgnored private var lastSync: ContinuousClock.Instant?
@@ -798,6 +801,7 @@ final class AppModel {
         recentlyDeleted = []
         devices = []
         devicesProblem = nil
+        hasSynced = false
         search = ""
         sheet = nil
         section = .allLogins
@@ -820,6 +824,10 @@ final class AppModel {
     private func finishUnlocking(_ vault: Vault) async throws {
         self.vault = vault
         identity = try vault.identity()
+        // The window opens with the copy on this Mac, then syncs: the server may be slow
+        // or out of reach, and an empty list meanwhile looks like the logins are gone.
+        update(\.users, to: try await perform { try $0.knownUsers() })
+        await reloadLocal()
         phase = .unlocked
         startAutoSync()
         await refresh()
@@ -868,6 +876,7 @@ final class AppModel {
         } while syncAgain
         isSyncing = false
         lastSync = .now
+        if !hasSynced { hasSynced = true }
     }
 
     private func syncOnce() async {
@@ -1580,6 +1589,7 @@ extension AppModel {
         let model = AppModel()
         model.isDemo = true
         model.phase = .unlocked
+        model.hasSynced = true
         model.identity = Identity(
             name: "Olivia", userId: 1, fingerprint: "ab12-cd34-ef56-7890-abcd",
             server: "https://keys.example.com", isOwner: true,
