@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{Exposure, GroupInfo, KeyLink, Role, Roles, ViaGroup};
 use keystead_core::directory::{DirectoryEntry, SignedBefore};
-use keystead_core::encoding::Bytes;
+use keystead_core::encoding::{Bytes, Key32};
 use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries_with};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, FolderInfo, Sealed};
@@ -37,6 +37,32 @@ pub struct FolderRecord {
 }
 
 impl FolderRecord {
+    /// The folder's key of an earlier `generation`, opened through the chain from the
+    /// current one.
+    pub fn key_at(
+        &self,
+        keys: &AccountKeys,
+        groups: &GroupKeyring,
+        folder_id: FolderId,
+        generation: u32,
+    ) -> Result<FolderKey> {
+        let mut key = self.open_key(keys, groups, folder_id)?;
+        let mut at = self.generation;
+        while at > generation {
+            let link = self
+                .chain
+                .iter()
+                .find(|link| link.generation == at)
+                .context("the folder's key chain is missing a link")?;
+            key = key.open_previous(&link.previous, folder_id, at)?;
+            at -= 1;
+        }
+        if at != generation {
+            bail!("the folder hasn't had that key yet");
+        }
+        Ok(key)
+    }
+
     /// The folder's current key, through this account or the group it came through.
     pub fn open_key(
         &self,
@@ -106,6 +132,12 @@ pub struct Profile {
     /// the recovery, checked against the owner when fetched. Retired keys verify only that.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed_before: Vec<SignedBefore>,
+    /// For each folder this device has had, the fingerprint of its first key
+    /// ([`FolderKey::pin`]), which every later key's chain leads back to. Kept after
+    /// leaving, so a folder can't change, or come back, with a key that isn't one of its
+    /// own: anyone can wrap a key for an account, the server included.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub folder_pins: BTreeMap<FolderId, Key32>,
 }
 
 impl Profile {
@@ -133,6 +165,7 @@ impl Profile {
             key_revisions: BTreeMap::new(),
             recovered_personal_keys: Vec::new(),
             signed_before: Vec::new(),
+            folder_pins: BTreeMap::new(),
         }
     }
 

@@ -1111,6 +1111,7 @@ impl Vault {
         };
         let () = self.call(|client| client.post("/v1/folders", &request))??;
         self.profile.folders.insert(folder_id, record);
+        self.pin_folder(folder_id);
         self.save()?;
         Ok(folder_id)
     }
@@ -1851,6 +1852,8 @@ impl Vault {
     fn forget_folder(&mut self, folder_id: FolderId) {
         // Keep the folder's items that were also shared with us, or a group of ours, directly.
         let me = self.profile.user_id;
+        // Its first key's fingerprint stays, to recognise the folder if it comes back.
+        self.pin_folder(folder_id);
         self.profile.folders.remove(&folder_id);
         let groups = &self.groups;
         self.profile.items.retain(|_, item| {
@@ -2429,7 +2432,7 @@ impl Vault {
         };
         let path = format!("/v1/items/{id}");
         let saved: EncryptedItem = self.call(|client| client.put(&path, &request))??;
-        self.profile.items.insert(saved.id, saved);
+        self.profile.items.insert(id, kept(&request.item, saved)?);
         Ok(id)
     }
 
@@ -3023,6 +3026,7 @@ impl Vault {
         Ok(
             match self.call(|client| client.put::<_, EncryptedItem>(&path, &request))? {
                 Ok(saved) => {
+                    let saved = kept(&request.item, saved)?;
                     let version = saved.version;
                     // The server forgets who could have seen the old password too.
                     if password_changed || saved.deleted {
@@ -3035,6 +3039,11 @@ impl Vault {
                 }
                 Err(Failure::Status { code: 409, body }) => {
                     let theirs = serde_json::from_value::<Conflict>(body)?.current;
+                    // Another version of this login, by someone approved: not whatever
+                    // the server would like kept in its place.
+                    if theirs.id != current.id {
+                        bail!("the server answered with a different login");
+                    }
                     if !self.profile.signed_by_author(&theirs) {
                         bail!("the newer version isn't signed by an approved author");
                     }
@@ -3048,6 +3057,54 @@ impl Vault {
                 Err(error) => return Err(error.into()),
             },
         )
+    }
+
+    /// Whether a folder's record from the server may be kept: its key opens, and it's one
+    /// of the folder's own keys. Anyone can wrap a key for an account, the server
+    /// included, so for a folder this device has had, opening isn't enough: the record
+    /// mustn't go back a generation, and its chain must lead to the folder's first key.
+    /// A made-up key can't, as each link is sealed with keys only members hold.
+    fn accepts_folder(&mut self, folder_id: FolderId, record: &FolderRecord) -> bool {
+        if record
+            .open_key(&self.keys, &self.groups, folder_id)
+            .is_err()
+        {
+            return false;
+        }
+        self.pin_folder(folder_id);
+        let held = self.profile.folders.get(&folder_id);
+        if held.is_some_and(|held| record.generation < held.generation) {
+            return false;
+        }
+        let first = record
+            .key_at(&self.keys, &self.groups, folder_id, 0)
+            .map(|key| key.pin(folder_id));
+        match (self.profile.folder_pins.get(&folder_id), first) {
+            (Some(pin), first) => first.is_ok_and(|first| first == *pin),
+            (None, Ok(first)) => {
+                self.profile.folder_pins.insert(folder_id, first);
+                true
+            }
+            // Nothing to compare with, here or there: as before pins.
+            (None, Err(_)) => true,
+        }
+    }
+
+    /// Remembers the first key of a folder that's here, for `accepts_folder`.
+    fn pin_folder(&mut self, folder_id: FolderId) {
+        if self.profile.folder_pins.contains_key(&folder_id) {
+            return;
+        }
+        let first = self
+            .profile
+            .folders
+            .get(&folder_id)
+            .and_then(|record| record.key_at(&self.keys, &self.groups, folder_id, 0).ok());
+        if let Some(first) = first {
+            self.profile
+                .folder_pins
+                .insert(folder_id, first.pin(folder_id));
+        }
     }
 
     fn live_item(&self, item_id: ItemId) -> Result<&EncryptedItem> {
@@ -3135,10 +3192,7 @@ impl Vault {
                     chain,
                     via_group,
                 };
-                if record
-                    .open_key(&self.keys, &self.groups, folder_id)
-                    .is_err()
-                {
+                if !self.accepts_folder(folder_id, &record) {
                     summary.rejected += items.len();
                     return;
                 }
@@ -3156,12 +3210,8 @@ impl Vault {
                 via_group,
                 ..
             } => {
-                // Only a key that opens, from a folder already here; a newer one wins.
-                let newer = self
-                    .profile
-                    .folders
-                    .get(&folder_id)
-                    .is_some_and(|record| record.generation <= generation);
+                // Only for a folder already here, and only one of its own keys, not older
+                // than the one here.
                 let record = FolderRecord {
                     info,
                     wrapped_key,
@@ -3169,7 +3219,9 @@ impl Vault {
                     chain,
                     via_group,
                 };
-                if newer && record.open_key(&self.keys, &self.groups, folder_id).is_ok() {
+                if self.profile.folders.contains_key(&folder_id)
+                    && self.accepts_folder(folder_id, &record)
+                {
                     self.profile.folders.insert(folder_id, record);
                 }
             }
@@ -3299,6 +3351,16 @@ impl Vault {
     }
 }
 
+/// What the server answers a save with, if it's the version just sealed here; that's the
+/// only thing a save puts in the local copy. A server can't slip another login, or
+/// another version of this one, in with its answer.
+fn kept(sent: &EncryptedItem, saved: EncryptedItem) -> Result<EncryptedItem> {
+    if saved != *sent {
+        bail!("the server answered the save with something else than what was saved");
+    }
+    Ok(saved)
+}
+
 /// How a save changes who has a login directly.
 enum People<'a> {
     Same,
@@ -3368,7 +3430,211 @@ fn normalize(fingerprint: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use keystead_core::keys::{AccountSecret, SoftwareDeviceKey};
+
     use super::*;
+
+    /// A vault that has never talked to a server, to feed entries a server might send.
+    fn offline_vault() -> Vault {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        // A folder of its own: saving a profile makes its folder private.
+        let folder = std::env::temp_dir().join(format!(
+            "keystead-vault-unit-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = folder.join("profile.json");
+        let keys = AccountKeys::derive(&AccountSecret::generate());
+        let profile = Profile::new(
+            "http://127.0.0.1:9",
+            "Olivia",
+            OWNER,
+            DeviceId::random(),
+            keys.public(),
+        );
+        let vault = Vault::create(
+            &path,
+            profile,
+            keys,
+            Arc::new(SoftwareDeviceKey::generate()),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&folder).unwrap();
+        vault
+    }
+
+    /// A folder's record as the server sends it: `keys` oldest first, the last one current
+    /// and wrapped for the vault's account.
+    fn folder_record(vault: &Vault, folder_id: FolderId, keys: &[&FolderKey]) -> FolderRecord {
+        let current = keys.last().unwrap();
+        FolderRecord {
+            info: FolderInfo {
+                name: "Production".into(),
+            }
+            .seal(folder_id, current)
+            .unwrap(),
+            wrapped_key: vault
+                .keys
+                .public()
+                .wrap_folder_key(current, folder_id)
+                .unwrap(),
+            generation: keys.len() as u32 - 1,
+            chain: keys
+                .windows(2)
+                .zip(1..)
+                .map(|(pair, generation)| KeyLink {
+                    generation,
+                    previous: pair[1].seal_previous(pair[0], folder_id, generation),
+                })
+                .collect(),
+            via_group: None,
+        }
+    }
+
+    fn joined(folder_id: FolderId, record: FolderRecord) -> SyncEntry {
+        SyncEntry::Joined {
+            seq: 1,
+            folder_id,
+            info: record.info,
+            wrapped_key: record.wrapped_key,
+            generation: record.generation,
+            chain: record.chain,
+            via_group: None,
+            items: Vec::new(),
+        }
+    }
+
+    fn rekeyed(folder_id: FolderId, record: FolderRecord) -> SyncEntry {
+        SyncEntry::Rekeyed {
+            seq: 1,
+            folder_id,
+            info: record.info,
+            wrapped_key: record.wrapped_key,
+            generation: record.generation,
+            chain: record.chain,
+            via_group: None,
+        }
+    }
+
+    /// The generation of the folder's key here, and whether it's `key`.
+    fn holds(vault: &Vault, folder_id: FolderId, key: &FolderKey) -> Option<u32> {
+        let record = vault.profile.folders.get(&folder_id)?;
+        let held = record
+            .open_key(&vault.keys, &vault.groups, folder_id)
+            .unwrap();
+        (held.pin(folder_id) == key.pin(folder_id)).then_some(record.generation)
+    }
+
+    #[test]
+    fn a_known_folder_only_takes_keys_of_its_own() {
+        let mut vault = offline_vault();
+        let mut summary = SyncSummary::default();
+        let folder_id = FolderId::random();
+        let (first, second, third) = (
+            FolderKey::generate(),
+            FolderKey::generate(),
+            FolderKey::generate(),
+        );
+        // What a server can make without any member's help: a key of its own, wrapped for
+        // the account, alone or on top of a chain that doesn't open to the real keys.
+        let made_up = FolderKey::generate();
+
+        let record = folder_record(&vault, folder_id, &[&first]);
+        vault.apply_entry(joined(folder_id, record), &mut summary);
+        assert_eq!(holds(&vault, folder_id, &first), Some(0));
+
+        // The folder again, or a new key for it, with a made-up key: ignored.
+        let record = folder_record(&vault, folder_id, &[&made_up]);
+        vault.apply_entry(joined(folder_id, record), &mut summary);
+        let record = folder_record(&vault, folder_id, &[&made_up]);
+        vault.apply_entry(rekeyed(folder_id, record), &mut summary);
+        let record = folder_record(&vault, folder_id, &[&FolderKey::generate(), &made_up]);
+        vault.apply_entry(rekeyed(folder_id, record), &mut summary);
+        assert_eq!(holds(&vault, folder_id, &first), Some(0));
+
+        // A real new key, whose chain leads back to the first: taken.
+        let record = folder_record(&vault, folder_id, &[&first, &second]);
+        vault.apply_entry(rekeyed(folder_id, record), &mut summary);
+        assert_eq!(holds(&vault, folder_id, &second), Some(1));
+        // The older key again: ignored.
+        let record = folder_record(&vault, folder_id, &[&first]);
+        vault.apply_entry(rekeyed(folder_id, record), &mut summary);
+        assert_eq!(holds(&vault, folder_id, &second), Some(1));
+
+        // Leaving doesn't forget which folder it was: it can't come back with a made-up
+        // key, and does come back with a real one.
+        vault.apply_entry(SyncEntry::Left { seq: 2, folder_id }, &mut summary);
+        assert!(!vault.profile.folders.contains_key(&folder_id));
+        let record = folder_record(&vault, folder_id, &[&made_up]);
+        vault.apply_entry(joined(folder_id, record), &mut summary);
+        assert!(!vault.profile.folders.contains_key(&folder_id));
+        let record = folder_record(&vault, folder_id, &[&first, &second, &third]);
+        vault.apply_entry(joined(folder_id, record), &mut summary);
+        assert_eq!(holds(&vault, folder_id, &third), Some(2));
+
+        // The fingerprints survive a save and a load.
+        let saved = serde_json::to_string(&vault.profile).unwrap();
+        let loaded: Profile = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            loaded.folder_pins.get(&folder_id),
+            Some(&first.pin(folder_id))
+        );
+    }
+
+    #[test]
+    fn a_profile_from_before_fingerprints_gets_them_from_the_folders_it_has() {
+        let mut vault = offline_vault();
+        let mut summary = SyncSummary::default();
+        let folder_id = FolderId::random();
+        let (first, second) = (FolderKey::generate(), FolderKey::generate());
+        let record = folder_record(&vault, folder_id, &[&first, &second]);
+        vault.profile.folders.insert(folder_id, record);
+        assert!(vault.profile.folder_pins.is_empty());
+
+        let record = folder_record(&vault, folder_id, &[&FolderKey::generate()]);
+        vault.apply_entry(joined(folder_id, record), &mut summary);
+        let made_up = FolderKey::generate();
+        let record = folder_record(&vault, folder_id, &[&first, &second, &made_up]);
+        vault.apply_entry(rekeyed(folder_id, record), &mut summary);
+        // That last one is a real chain, so it's taken; the one before it wasn't.
+        assert_eq!(holds(&vault, folder_id, &made_up), Some(2));
+        assert_eq!(
+            vault.profile.folder_pins.get(&folder_id),
+            Some(&first.pin(folder_id))
+        );
+    }
+
+    #[test]
+    fn a_save_keeps_only_the_version_it_sealed() {
+        let keys = AccountKeys::derive(&AccountSecret::generate());
+        let seal = |name: &str| {
+            let id = ItemId::random();
+            let key = ItemKey::generate();
+            let item_keys = ItemKeys {
+                owner: Some(key.seal_for_owner(id, OWNER, &keys)),
+                ..ItemKeys::default()
+            };
+            let at = ItemVersion {
+                id,
+                folder_id: None,
+                owner: Some(OWNER),
+                version: 1,
+                author: OWNER,
+            };
+            let overview = Overview {
+                name: name.into(),
+                ..Overview::default()
+            };
+            EncryptedItem::seal(at, &key, item_keys, &keys, &overview, &Details::default()).unwrap()
+        };
+        let sent = seal("Bank");
+        assert_eq!(kept(&sent, sent.clone()).unwrap(), sent);
+        // Another login, even one validly signed by this account, isn't what was saved.
+        assert!(kept(&sent, seal("Planted")).is_err());
+        let mut altered = sent.clone();
+        altered.version = 2;
+        assert!(kept(&sent, altered).is_err());
+    }
 
     #[test]
     fn a_session_is_renewed_halfway_and_signed_in_again_near_its_end() {

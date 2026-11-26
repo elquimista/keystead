@@ -555,6 +555,19 @@ impl FolderKey {
         Self(bytes)
     }
 
+    /// A fingerprint of this key as `folder`'s: enough to recognise the key later, not to
+    /// open anything. A device keeps it, also after leaving the folder, to tell the
+    /// folder's real keys from one the server made up.
+    pub fn pin(&self, folder: FolderId) -> Key32 {
+        Key32(
+            Sha256::digest(transcript(
+                "keystead/folder-key-pin/v1",
+                &[folder.as_bytes(), &self.0],
+            ))
+            .into(),
+        )
+    }
+
     pub(crate) fn cipher(&self) -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new(Key::from_slice(&self.0))
     }

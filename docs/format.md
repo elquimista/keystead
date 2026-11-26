@@ -610,7 +610,9 @@ group's current generation, and no copy may name a generation the group hasn't r
 of groups new to `groups`, and `password_changed` (left out when false) that its password
 differs from the previous version's (see Passwords to change). A live version may follow a
 deletion marker, which brings the item back (see Recently deleted). If another version was
-saved first, it answers 409 with that version. A first version under an id already in use
+saved first, it answers 409 with that version. A client keeps the answer to a save only
+if it's the version it sent, and a 409's version only if it's of the same item and signed
+by an approved author. A first version under an id already in use
 gets the item there back the same way only if the caller can open it; anyone else gets a
 409 with just an error, so an id kept by someone who lost access shows them nothing.
 
@@ -747,6 +749,14 @@ consistent snapshot:
 - `left`: drop a folder, keeping its items that were also shared with the user directly.
 - `rekeyed`: a folder the user can open has a new key: the new one wrapped for them or
   their group (`via_group`), its generation, the whole chain and the info sealed with it.
+  A client takes a `joined` or `rekeyed` for a folder it has had only if it's one of the
+  folder's own keys: it opens, isn't of an earlier generation than the one the client
+  has, and its chain leads back to the folder's first key. The client remembers that
+  key's fingerprint, SHA-256 of `transcript("keystead/folder-key-pin/v1", folder id,
+  key)`, for every folder it has had, also after leaving, and keeps it on the device.
+  Anyone can wrap a key for an account, the server included; a made-up key has no chain to
+  the first one. A folder the client has never had is taken on its key opening alone
+  (see Not in this format yet).
 - `left_item`: the user lost direct access to an item; with `"moved": true`, it moved to a
   folder they can't open, so drop it whatever folder the local copy names.
 - `group`: the user joined a group, or one they're in changed: its `entries`, its current
