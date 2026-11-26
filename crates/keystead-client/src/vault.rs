@@ -969,17 +969,24 @@ impl Vault {
             Err(Failure::Status { code: 404, .. }) => self.profile.exposures.clear(),
             Err(error) => return Err(error.into()),
         }
+        // Where the last page stopped inside a folder too big for one page.
+        let mut resume: Option<String> = None;
         let rekey_needed = loop {
-            let query = [
+            // A server on 0.17.0 or later sends a big folder in parts when asked; an
+            // older one ignores this and sends it whole.
+            let mut query = vec![
                 ("cursor", self.profile.cursor.to_string()),
                 ("limit", PAGE_SIZE.to_string()),
+                ("parts", "true".to_owned()),
             ];
+            query.extend(resume.take().map(|resume| ("resume", resume)));
             let page: SyncPage = self.call(|client| client.get("/v1/sync", &query))??;
             summary.received += page.entries.len();
             for entry in page.entries {
                 self.apply_entry(entry, summary);
             }
             self.profile.cursor = page.cursor;
+            resume = page.resume;
             if !page.more {
                 if page.roles.is_some() {
                     self.profile.roles = page.roles;

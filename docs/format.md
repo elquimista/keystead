@@ -813,7 +813,8 @@ consistent snapshot:
   item reached through a group joined after its latest version, at the join's number.
 - `joined`: the folder key wrapped for the user, or for a group they're in
   (`via_group`: `{"group_id", "generation"}`), with its `generation` and `chain`, plus the
-  folder's info, items and signed `entries` (see Signed members).
+  folder's info, items and signed `entries` (see Signed members). A folder too big for a
+  page comes in parts (see below).
 - `left`: drop a folder, keeping its items that were also shared with the user directly.
 - `rekeyed`: a folder the user can open has a new key: the new one wrapped for them or
   their group (`via_group`), its generation, the whole chain and the info sealed with it.
@@ -831,6 +832,26 @@ consistent snapshot:
   secret wrapped for them with its `generation`, and the `chain` to older ones. It comes
   before anything that needs the group's keys.
 - `left_group`: forget a group's keys.
+
+**Pages.** A page holds up to `limit` entries (500 unless asked, 1,000 at most) and, from
+0.17.0, about 4 MB of items: it ends before the entry that would take it over, though it
+always takes one. `more` says to ask again from `cursor`. So an answer stays under the
+10 MB that apps before 0.17.0 can read, with one exception, next.
+
+**A big folder, in parts** (0.17.0 and later). A folder with more than a page of items
+when someone joins it comes first on a page, alone. A client that asks with `parts=true`
+gets the `joined` entry with the first of the folder's items, then pages of `item` entries
+with the rest, oldest change first. Until the last part the page's `cursor` is the one
+asked with, `more` is true, and `resume` says where the part ended: the client asks again
+with the same cursor and `resume` set to it. A `resume` that isn't of the join now first
+is ignored, so a client that stopped halfway starts the folder again. The last part has
+no `resume` and moves the cursor to the join. Only items from before the join are in the
+parts; whatever changed in the folder since follows the join, like any change.
+
+A client that doesn't ask for parts gets all those items on the `joined` entry at once,
+as before 0.17.0, however big that is. Servers before 0.17.0 ignore `parts` and send
+every joined folder whole, with what changed since; a client reads such an answer up to
+256 MB.
 
 The last page also carries the user's `roles` (in each folder, and on each item shared
 with them or their groups directly, the highest of the ways in), and every page
@@ -916,4 +937,3 @@ word, as before; once a client has seen a server keep signed members, it doesn't
   roles are kept and enforced by the server: a server that lied could let someone save
   who shouldn't, though every version stays signed by its author.
 - Groups inside groups (on purpose: no loops, and access stays easy to follow).
-- Paginating a large folder that arrives with a join.

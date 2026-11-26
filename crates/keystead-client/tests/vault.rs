@@ -2847,3 +2847,86 @@ mod erased {
         }
     }
 }
+
+/// A folder too big for one answer: each login has long notes, 12 MB in all.
+fn big_folder(alice: &mut Vault, name: &str) -> usize {
+    alice.create_folder(name).unwrap();
+    let count = 7;
+    for index in 0..count {
+        let (overview, mut details) = login(&format!("Login {index}"), "pw");
+        details.notes = "n".repeat(1_300_000);
+        alice.add(Some(name), overview, details).unwrap();
+    }
+    count
+}
+
+#[test]
+fn a_folder_of_any_size_reaches_someone_it_is_shared_with_and_a_new_device() {
+    use keystead_core::api::{SyncEntry, SyncPage};
+
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        alice_secret,
+        bob_secret,
+        ..
+    } = team(&fixture);
+    let count = big_folder(&mut alice, "Archive");
+    let bob_id = bob.whoami().user_id;
+    alice.share_folder("Archive", bob_id, Role::View).unwrap();
+    let all_there = |vault: &Vault| {
+        assert_eq!(vault.list().unwrap().len(), count);
+        let last = vault.find_item("Login 6", Some("Archive")).unwrap();
+        assert_eq!(vault.open_item(last).unwrap().1.notes.len(), 1_300_000);
+    };
+
+    // Shared with Bob, it arrives in parts, and all of it is there.
+    bob.sync().unwrap();
+    all_there(&bob);
+
+    // A new device of Alice's, who made the folder and then filled it, gets its logins as
+    // changes, in pages no bigger than the folder's parts.
+    let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
+    let mut alice_new = recover(
+        &fixture.profile("alice-new"),
+        new_device(&fixture, &alice_secret, DeviceId::random(), signer),
+        None,
+    )
+    .unwrap();
+    alice_new.sync().unwrap();
+    all_there(&alice_new);
+
+    // A new device of Bob's starts from nothing. An app from before 0.17.0 doesn't ask
+    // for parts and is sent the folder whole, as a server from before 0.17.0 sends it to
+    // anyone: more than those apps could read, and read here.
+    let device_id = DeviceId::random();
+    let signer: Arc<dyn DeviceSigner> = Arc::new(SoftwareDeviceKey::generate());
+    let mut bob_new = recover(
+        &fixture.profile("bob-new"),
+        new_device(&fixture, &bob_secret, device_id, signer.clone()),
+        Some(&alice.whoami().fingerprint),
+    )
+    .unwrap();
+    let mut client = Client::new(&fixture.url);
+    client.sign_in(device_id, signer.as_ref()).unwrap();
+    let mut cursor = 0;
+    let mut whole = 0;
+    loop {
+        let query = [("cursor", cursor.to_string())];
+        let page: SyncPage = client.get("/v1/sync", &query).unwrap();
+        assert_eq!(page.resume, None);
+        for entry in &page.entries {
+            if let SyncEntry::Joined { items, .. } = entry {
+                whole = whole.max(items.len());
+            }
+        }
+        cursor = page.cursor;
+        if !page.more {
+            break;
+        }
+    }
+    assert_eq!(whole, count);
+    bob_new.sync().unwrap();
+    all_there(&bob_new);
+}

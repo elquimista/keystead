@@ -2936,3 +2936,184 @@ async fn the_setup_code_runs_out_and_a_restart_makes_a_new_one() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
+
+/// A page of the feed for an app that takes big folders in parts, and its size as sent.
+async fn sync_in_parts(
+    server: &Server,
+    person: &Person,
+    cursor: i64,
+    resume: Option<&str>,
+) -> (SyncPage, usize) {
+    let resume = resume.map(|resume| format!("&resume={resume}"));
+    let uri = format!(
+        "/v1/sync?cursor={cursor}&parts=true{}",
+        resume.unwrap_or_default()
+    );
+    let (status, body) = server.call(Method::GET, &uri, person.token(), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let size = body.to_string().len();
+    (decode(body), size)
+}
+
+/// No answer to a sync is bigger than a few megabytes, however much there is to send: a
+/// folder someone just joined comes in parts, and changes in pages cut by size.
+#[tokio::test]
+async fn a_big_folder_arrives_in_parts_and_pages_stay_small() {
+    const SMALL: usize = 7 * 1024 * 1024;
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    let (folder_id, key) = create_folder(&server, &alice, "Archive").await;
+    // Twelve logins of about 800 KB each as stored: more than apps before 0.17.0 can
+    // read in one answer.
+    let long = "p".repeat(600_000);
+    let mut items = Vec::new();
+    for n in 0..12 {
+        let at = ItemVersion {
+            id: ItemId::random(),
+            folder_id: Some(folder_id),
+            owner: None,
+            version: 1,
+            author: alice.user_id,
+        };
+        let item = seal(&alice, &key, at, &format!("item {n}"), &long);
+        let (status, body) = alice.put(&server, &item, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        items.push(item);
+    }
+    for person in [&bob, &carol] {
+        let (status, body) =
+            add_to_folder(&server, &alice, (folder_id, &key), person, Role::View, 0).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+    let second_version = |item: &EncryptedItem| {
+        let at = ItemVersion {
+            id: item.id,
+            folder_id: Some(folder_id),
+            owner: None,
+            version: 2,
+            author: alice.user_id,
+        };
+        seal(&alice, &key, at, "changed", "pw")
+    };
+
+    // The first part is the join, with the folder's key and the first of its logins.
+    // The cursor stays, and `resume` says where the next part starts.
+    let (first, size) = sync_in_parts(&server, &bob, 0, None).await;
+    assert!(size < SMALL, "{size}");
+    assert_eq!((first.cursor, first.more), (0, true));
+    let [SyncEntry::Joined { items: sent, .. }] = &first.entries[..] else {
+        panic!("{:?}", first.entries);
+    };
+    let mut got: Vec<(ItemId, u64)> = sent.iter().map(|item| (item.id, item.version)).collect();
+    assert!((1..12).contains(&got.len()), "{}", got.len());
+    assert_eq!(got[0].0, items[0].id);
+
+    // Meanwhile a login already sent changes, and so does one still to come. Neither
+    // change is in a part: both follow the join, like any change.
+    for item in [&items[0], &items[11]] {
+        let (status, body) = alice.put(&server, &second_version(item), Some(1)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let mut page = first;
+    let mut parts = 1;
+    while let Some(resume) = page.resume.clone() {
+        let cursor = page.cursor;
+        (page, _) = sync_in_parts(&server, &bob, cursor, Some(&resume)).await;
+        parts += 1;
+        assert!(page.more);
+        assert!(
+            page.entries
+                .iter()
+                .all(|entry| matches!(entry, SyncEntry::Item { .. }))
+        );
+        got.extend(item_entries(&page));
+    }
+    assert!(parts >= 3, "{parts}");
+    assert!(page.cursor > 0);
+    assert_eq!(got.len(), 11);
+    assert!(got.iter().all(|(_, version)| *version == 1));
+    loop {
+        let size;
+        (page, size) = sync_in_parts(&server, &bob, page.cursor, None).await;
+        assert!(size < SMALL, "{size}");
+        assert_eq!(page.resume, None);
+        got.extend(item_entries(&page));
+        if !page.more {
+            break;
+        }
+    }
+    let mut expected: Vec<(ItemId, u64)> = items.iter().map(|item| (item.id, 1)).collect();
+    expected[11].1 = 2;
+    expected.push((items[0].id, 2));
+    got.sort();
+    expected.sort();
+    assert_eq!(got, expected);
+
+    // Someone removed from the folder halfway gets no more of it, only that they left.
+    // A `resume` that isn't of this join starts the folder from its beginning.
+    let (first, _) = sync_in_parts(&server, &carol, 0, Some("999.5")).await;
+    assert!(matches!(first.entries[..], [SyncEntry::Joined { .. }]));
+    let resume = first.resume.clone().unwrap();
+    let (status, body) = alice
+        .call(
+            &server,
+            Method::DELETE,
+            &format!("/v1/folders/{folder_id}/members/{}", carol.user_id.0),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let mut cursor = first.cursor;
+    let mut resume = Some(resume);
+    let mut left = false;
+    loop {
+        let (page, _) = sync_in_parts(&server, &carol, cursor, resume.as_deref()).await;
+        assert!(item_entries(&page).is_empty());
+        left |= has(&page, |entry| matches!(entry, SyncEntry::Left { .. }));
+        cursor = page.cursor;
+        resume = page.resume;
+        if !page.more {
+            break;
+        }
+    }
+    assert!(left);
+
+    // An app from before 0.17.0 doesn't ask for parts, and gets the folder as it was when
+    // Bob joined in one answer, then the two changes since.
+    let whole = bob.sync(&server, 0, 500).await;
+    assert_eq!((whole.resume.as_ref(), whole.more), (None, true));
+    assert!(has(&whole, |entry| matches!(
+        entry,
+        SyncEntry::Joined { items, .. } if items.len() == 10
+    )));
+    let after = bob.sync(&server, whole.cursor, 500).await;
+    assert_eq!(item_entries(&after).len(), 2);
+    assert!(!after.more);
+
+    // Alice made the folder and then filled it, so a new device of hers gets the logins
+    // as changes: in pages cut by size, with or without asking for parts.
+    let mut cursor = 0;
+    let mut pages = 0;
+    let mut seen = Vec::new();
+    loop {
+        let (status, body) = alice
+            .call(
+                &server,
+                Method::GET,
+                &format!("/v1/sync?cursor={cursor}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.to_string().len() < SMALL);
+        let page: SyncPage = decode(body);
+        pages += 1;
+        seen.extend(item_entries(&page));
+        cursor = page.cursor;
+        if !page.more {
+            break;
+        }
+    }
+    assert!(pages >= 3, "{pages}");
+    assert_eq!(seen.len(), 12);
+}

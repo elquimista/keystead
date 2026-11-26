@@ -37,6 +37,11 @@ use crate::{ApiError, AppState, next_seq, user_entry};
 
 const DEFAULT_PAGE: i64 = 500;
 const MAX_PAGE: i64 = 1_000;
+/// How much of items a sync page holds, in bytes of their stored form. A page takes one
+/// entry whatever its size, and an item is at most 2 MB, so an answer stays well under
+/// the 10 MB that apps before 0.17.0 can read. The one exception is a folder bigger than
+/// this as someone joined it, for those same apps (see `folder_part`).
+const PAGE_BYTES: usize = 4 * 1024 * 1024;
 
 /// One ordered stream: the latest version of each item in the user's folders, then of
 /// each item they reach directly (owned, or shared with them or a group of theirs) outside
@@ -1498,6 +1503,11 @@ pub(crate) struct SyncParams {
     #[serde(default)]
     cursor: i64,
     limit: Option<i64>,
+    /// The client takes a folder too big for a page in parts (0.17.0 and later).
+    #[serde(default)]
+    parts: bool,
+    /// Where the last part ended, from that page's `resume`.
+    resume: Option<String>,
 }
 
 /// `GET /v1/sync`: feed entries after the cursor, all read from one snapshot.
@@ -1521,8 +1531,50 @@ pub(crate) async fn sync(
         .fetch_one(&mut *tx)
         .await?;
 
-    let more = rows.len() as i64 > limit;
-    let rows: Vec<FeedRow> = rows.into_iter().take(limit as usize).collect();
+    let mut more = rows.len() as i64 > limit;
+    let mut rows: Vec<FeedRow> = rows.into_iter().take(limit as usize).collect();
+
+    // The page ends before the entry that would take it over `PAGE_BYTES`. A join counts
+    // as the folder's items, which come with it.
+    let mut bytes = 0;
+    let mut fits = 0;
+    let mut in_parts = None;
+    for (seq, kind, body, target, was_join) in &rows {
+        let size = match (kind.as_str(), body, target) {
+            ("item", Some(body), _) => body.len(),
+            ("membership", _, Some(folder_id)) if *was_join == Some(true) => {
+                let size = joined_bytes(&mut tx, auth.user_id, folder_id, *seq).await?;
+                if fits == 0 && size > PAGE_BYTES {
+                    in_parts = Some((*seq, parse_folder(folder_id)?));
+                    break;
+                }
+                size
+            }
+            _ => 0,
+        };
+        if fits > 0 && bytes + size > PAGE_BYTES {
+            break;
+        }
+        bytes += size;
+        fits += 1;
+    }
+    if let Some((seq, folder_id)) = in_parts {
+        // Too big for a page: it comes first on one, alone.
+        let resume = params.resume.as_deref().filter(|_| params.parts);
+        let part = (auth.user_id, folder_id, seq, cursor, resume);
+        let (entries, next_cursor, resume) = folder_part(&mut tx, part, params.parts).await?;
+        let page = SyncPage {
+            entries,
+            cursor: next_cursor,
+            more: true,
+            resume,
+            ..page_without_entries(&mut tx, auth.user_id, true).await?
+        };
+        tx.commit().await?;
+        return Ok(Json(page));
+    }
+    more |= fits < rows.len();
+    rows.truncate(fits);
     let next_cursor = match (more, rows.last()) {
         (true, Some(last)) => last.0,
         _ => high_water.max(cursor),
@@ -1642,6 +1694,23 @@ pub(crate) async fn sync(
         }
     }
 
+    let page = SyncPage {
+        entries,
+        cursor: next_cursor,
+        more,
+        ..page_without_entries(&mut tx, auth.user_id, more).await?
+    };
+    tx.commit().await?;
+    Ok(Json(page))
+}
+
+/// What a sync page carries besides its entries: what this user should do, and on the
+/// last page their roles.
+async fn page_without_entries(
+    conn: &mut SqliteConnection,
+    user: UserId,
+    more: bool,
+) -> Result<SyncPage, ApiError> {
     // Folders wait for the groups they're shared with to get their new keys first.
     let rekey_needed: Vec<String> = sqlx::query_scalar(
         "SELECT a.folder_id FROM access a JOIN folders f ON f.id = a.folder_id
@@ -1650,24 +1719,24 @@ pub(crate) async fn sync(
                            WHERE fg.folder_id = f.id AND g.needs_rekey = 1)
          ORDER BY a.folder_id",
     )
-    .bind(user)
-    .fetch_all(&mut *tx)
+    .bind(user.0)
+    .fetch_all(&mut *conn)
     .await?;
     let mut folders = Vec::new();
     for folder_id in rekey_needed {
         let folder_id = parse_folder(&folder_id)?;
-        if folder_role(&mut tx, auth.user_id, folder_id).await? == Some(Role::Manage) {
+        if folder_role(&mut *conn, user, folder_id).await? == Some(Role::Manage) {
             folders.push(folder_id);
         }
     }
-    let group_rekey_needed = crate::groups::rekey_needed(&mut tx, auth.user_id).await?;
-    let restore = restore_needed(&mut tx, auth.user_id).await?;
+    let group_rekey_needed = crate::groups::rekey_needed(&mut *conn, user).await?;
+    let restore = restore_needed(&mut *conn, user).await?;
     let (recovered_key, escrow_needed): (Option<String>, bool) = sqlx::query_as(
         "SELECT recovered_key, escrow_on AND (escrow IS NULL OR escrow_revision < revision)
          FROM users WHERE id = ?",
     )
-    .bind(user)
-    .fetch_one(&mut *tx)
+    .bind(user.0)
+    .fetch_one(&mut *conn)
     .await?;
     // Folders only this user can open, with no copy of their current key in escrow.
     let escrow_folders: Vec<String> = sqlx::query_scalar(
@@ -1682,20 +1751,19 @@ pub(crate) async fn sync(
                              AND e.generation = f.generation)
          ORDER BY m.folder_id",
     )
-    .bind(user)
-    .fetch_all(&mut *tx)
+    .bind(user.0)
+    .fetch_all(&mut *conn)
     .await?;
     let roles = if more {
         None
     } else {
-        Some(user_roles(&mut tx, auth.user_id).await?)
+        Some(user_roles(&mut *conn, user).await?)
     };
-    tx.commit().await?;
-
-    Ok(Json(SyncPage {
-        entries,
-        cursor: next_cursor,
+    Ok(SyncPage {
+        entries: Vec::new(),
+        cursor: 0,
         more,
+        resume: None,
         rekey_needed: folders,
         roles,
         group_rekey_needed,
@@ -1709,7 +1777,106 @@ pub(crate) async fn sync(
             .iter()
             .map(|folder_id| parse_folder(folder_id))
             .collect::<Result<_, _>>()?,
-    }))
+    })
+}
+
+/// The most bytes of items a join entry at `seq` would carry: all the folder's, if that
+/// join is how `user` has the folder now, and nothing for a join since undone, which is
+/// skipped.
+async fn joined_bytes(
+    conn: &mut SqliteConnection,
+    user: UserId,
+    folder_id: &str,
+    seq: i64,
+) -> Result<usize, ApiError> {
+    let bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM items
+         WHERE folder_id = ?2
+           AND EXISTS (SELECT 1 FROM access
+                       WHERE user_id = ?1 AND folder_id = ?2 AND joined_seq = ?3)",
+    )
+    .bind(user.0)
+    .bind(folder_id)
+    .bind(seq)
+    .fetch_one(conn)
+    .await?;
+    Ok(bytes as usize)
+}
+
+/// A folder too big for a page, on a page of its own: the join with its items from
+/// before the join, oldest change first. The cursor ends at the join, so what changed in
+/// the folder since comes after it like any change, in pages.
+///
+/// A client that takes it in parts (`in_parts`) gets the join with the first of those
+/// items, then more of them as item entries. Until the last part the cursor stays where
+/// it was and `resume` says where this part ended, so a client that stops halfway starts
+/// the folder again. Any other client gets them all at once, as apps before 0.17.0
+/// expect; that answer is as big as the folder was when they joined.
+async fn folder_part(
+    conn: &mut SqliteConnection,
+    (user, folder_id, join_seq, cursor, resume): (UserId, FolderId, i64, i64, Option<&str>),
+    in_parts: bool,
+) -> Result<(Vec<SyncEntry>, i64, Option<String>), ApiError> {
+    // A `resume` from another join, or none, starts this one from its first item.
+    let after = resume
+        .and_then(|resume| resume.split_once('.'))
+        .filter(|(join, _)| join.parse() == Ok(join_seq))
+        .and_then(|(_, item_seq)| item_seq.parse::<i64>().ok())
+        .filter(|item_seq| *item_seq > 0);
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT seq, body FROM items WHERE folder_id = ? AND seq > ? AND seq <= ?
+         ORDER BY seq LIMIT ?",
+    )
+    .bind(folder_id.to_string())
+    .bind(after.unwrap_or(0))
+    .bind(join_seq)
+    .bind(if in_parts { MAX_PAGE + 1 } else { -1 })
+    .fetch_all(&mut *conn)
+    .await?;
+    let most = if in_parts {
+        MAX_PAGE as usize
+    } else {
+        rows.len()
+    };
+    let mut bytes = 0;
+    let mut items = Vec::new();
+    for (seq, body) in rows.iter().take(most) {
+        if in_parts && !items.is_empty() && bytes + body.len() > PAGE_BYTES {
+            break;
+        }
+        bytes += body.len();
+        items.push((*seq, serde_json::from_str::<EncryptedItem>(body)?));
+    }
+    let position = match items.last() {
+        Some((last, _)) if items.len() < rows.len() => Some(format!("{join_seq}.{last}")),
+        _ => None,
+    };
+    let entries = match after {
+        Some(_) => items
+            .into_iter()
+            .map(|(seq, item)| SyncEntry::Item { seq, item })
+            .collect(),
+        None => match current_key(conn, user, folder_id).await? {
+            Some(key) => vec![SyncEntry::Joined {
+                seq: join_seq,
+                folder_id,
+                info: key.info,
+                wrapped_key: key.wrapped_key,
+                generation: key.generation,
+                chain: key.chain,
+                via_group: key.via_group,
+                items: items.into_iter().map(|(_, item)| item).collect(),
+                entries: key.entries,
+            }],
+            // Its copy of the key is still to come, after a recovery: skipped, as on a
+            // page of its own.
+            None => return Ok((Vec::new(), join_seq, None)),
+        },
+    };
+    match position {
+        Some(position) => Ok((entries, cursor, Some(position))),
+        None => Ok((entries, join_seq, None)),
+    }
 }
 
 /// Copies people who recovered are waiting for, that `user` can make them: of the key of

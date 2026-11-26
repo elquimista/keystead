@@ -721,6 +721,10 @@ pub struct SyncPage {
     pub cursor: i64,
     /// More entries are waiting; sync again right away.
     pub more: bool,
+    /// This page is part of a folder too big for one, and the cursor hasn't moved: pass
+    /// this back as `resume` for the next part (0.17.0 and later).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
     /// Folders this user manages that need a new key, because someone lost access.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rekey_needed: Vec<FolderId>,
