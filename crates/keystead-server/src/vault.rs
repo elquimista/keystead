@@ -1278,46 +1278,14 @@ pub(crate) async fn set_item_group_role(
 /// Checks what the server can see of an item: its format, that it has a folder or an
 /// owner and the matching key copy, and that nobody and no group is listed twice.
 fn check_shape(item: &EncryptedItem) -> Result<(), ApiError> {
-    let bad = |message: &str| Err(ApiError::BadRequest(message.into()));
-    match item.format {
-        1 => {
-            if item.folder_id.is_none() || item.owner.is_some() || !item.keys.is_empty() {
-                return bad("a format 1 item is in a folder and has no key copies");
-            }
-        }
-        2..=4 => {
-            let keys = &item.keys;
-            // Format 4 (a one-time code in the details) may have group copies or not.
-            if item.format < 4 && (item.format == 3) == keys.groups.is_empty() {
-                return bad("format 3 items, and only they, have copies for groups");
-            }
-            let mut groups = HashSet::new();
-            if !keys.groups.iter().all(|copy| groups.insert(copy.group_id)) {
-                return bad("each group gets one copy of an item's key");
-            }
-            let in_folder = item.folder_id.is_some();
-            let owned = item.owner.is_some();
-            if in_folder == owned
-                || keys.folder.is_some() != in_folder
-                || keys.owner.is_some() != owned
-            {
-                return bad("an item has either a folder or an owner, with its key copy");
-            }
-            let mut seen = Vec::new();
-            for person in &keys.people {
-                if Some(person.user_id) == item.owner || seen.contains(&person.user_id) {
-                    return bad("each person gets one copy of an item's key");
-                }
-                seen.push(person.user_id);
-            }
-        }
-        other => {
-            return Err(ApiError::BadRequest(format!(
-                "this server stores item formats up to {ITEM_FORMAT}, not {other}"
-            )));
-        }
+    if item.format == 0 || item.format > ITEM_FORMAT {
+        return Err(ApiError::BadRequest(format!(
+            "this server stores item formats up to {ITEM_FORMAT}, not {}",
+            item.format
+        )));
     }
-    Ok(())
+    item.check_shape()
+        .map_err(|reason| ApiError::BadRequest(reason.into()))
 }
 
 // MARK: - Sync

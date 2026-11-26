@@ -350,10 +350,58 @@ impl EncryptedItem {
         Bytes(Sha256::digest(self.signature.as_slice()).to_vec())
     }
 
-    /// Checks the author's signature. Callers must also check that the author was allowed
-    /// to edit the item.
+    /// Checks the author's signature, and that the item has the shape of its format, so
+    /// that every field that says where it is or who can open it is one the signature
+    /// covers. Callers must also check that the author was allowed to edit the item.
     pub fn verify(&self, author_keys: &AccountPublicKeys) -> Result<(), Error> {
+        self.check_shape().map_err(Error::InvalidItem)?;
         author_keys.verify(&self.signed_message(), self.signature.as_slice())
+    }
+
+    /// Whether the item's fields fit its format: what servers store and clients accept.
+    /// Each format's signature covers only the fields that format has, so one that came
+    /// with more (a format 1 item with an owner or key copies, a format 2 item with copies
+    /// for groups) would carry them unsigned. Formats newer than this build knows pass:
+    /// their shape is theirs to say.
+    pub fn check_shape(&self) -> Result<(), &'static str> {
+        match self.format {
+            1 => {
+                if self.folder_id.is_none() || self.owner.is_some() || !self.keys.is_empty() {
+                    return Err("a format 1 item is in a folder and has no key copies");
+                }
+            }
+            2..=ITEM_FORMAT => {
+                let keys = &self.keys;
+                // Format 4 (a one-time code in the details) may have group copies or not.
+                if self.format < 4 && (self.format == 3) == keys.groups.is_empty() {
+                    return Err("format 3 items, and only they, have copies for groups");
+                }
+                let mut groups = Vec::new();
+                for copy in &keys.groups {
+                    if groups.contains(&copy.group_id) {
+                        return Err("each group gets one copy of an item's key");
+                    }
+                    groups.push(copy.group_id);
+                }
+                let in_folder = self.folder_id.is_some();
+                let owned = self.owner.is_some();
+                if in_folder == owned
+                    || keys.folder.is_some() != in_folder
+                    || keys.owner.is_some() != owned
+                {
+                    return Err("an item has either a folder or an owner, with its key copy");
+                }
+                let mut people = Vec::new();
+                for person in &keys.people {
+                    if Some(person.user_id) == self.owner || people.contains(&person.user_id) {
+                        return Err("each person gets one copy of an item's key");
+                    }
+                    people.push(person.user_id);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// The key that opens this item, through whatever access `me` has: the item's folder
@@ -833,6 +881,57 @@ mod tests {
 
         item.details.ciphertext.0[0] ^= 1;
         assert!(item.verify(&f.alice.public()).is_err());
+    }
+
+    #[test]
+    fn fields_a_format_doesnt_sign_make_an_item_invalid() {
+        let f = fixture();
+        let stranger = AccountKeys::derive(&AccountSecret::generate());
+        let invalid = |item: &EncryptedItem| {
+            matches!(item.verify(&f.alice.public()), Err(Error::InvalidItem(_)))
+        };
+
+        // Format 2 doesn't sign copies for groups, so it can't have any: one slipped in
+        // would be shared with on the next save.
+        let (item, key) = seal(&f, true, true);
+        assert_eq!(item.format, 2);
+        assert!(item.verify(&f.alice.public()).is_ok());
+        let mut with_group = item.clone();
+        with_group.keys.groups.push(GroupKeyCopy {
+            group_id: GroupId::random(),
+            generation: 1,
+            wrapped_key: stranger.public().wrap_item_key(&key, item.id).unwrap(),
+        });
+        assert!(invalid(&with_group));
+
+        // Format 1 signs neither an owner nor key copies.
+        let at = ItemVersion {
+            id: ItemId::random(),
+            folder_id: Some(f.folder_id),
+            owner: None,
+            version: 1,
+            author: ALICE,
+        };
+        let first =
+            EncryptedItem::seal_format_1(at, &f.folder_key, &f.alice, &f.overview, &f.details)
+                .unwrap();
+        let mut owned = first.clone();
+        owned.owner = Some(BOB);
+        assert!(invalid(&owned));
+        let mut copied = first.clone();
+        copied.keys.people.push(PersonKey {
+            user_id: BOB,
+            wrapped_key: stranger.public().wrap_item_key(&key, first.id).unwrap(),
+        });
+        assert!(invalid(&copied));
+
+        // An item is in a folder or has an owner, with that copy, and each person once.
+        let mut both = item.clone();
+        both.owner = Some(ALICE);
+        assert!(invalid(&both));
+        let mut twice = item.clone();
+        twice.keys.people.push(twice.keys.people[0].clone());
+        assert!(invalid(&twice));
     }
 
     #[test]

@@ -696,6 +696,20 @@ pub fn recover(
     if me.keys != keys.public() {
         bail!("the server lists different keys for this account. Don't trust this server.");
     }
+    // The owner vouches for every account but their own. Without that, the secret this
+    // device was given proves nothing: a server can register keys from a secret it made
+    // up under anyone's name, and would then read what the device saves as its own. The
+    // device comes off the account again, so nothing half-added is left behind.
+    if me.user_id != owner.user_id && me.verify(&owner.keys).is_err() {
+        let _ = client.post_empty::<()>("/v1/sign-out");
+        if me.approval.is_none() {
+            bail!(
+                "the owner hasn't approved this account yet. Ask them to approve you, then \
+                 add this device again."
+            );
+        }
+        bail!("the owner's approval of this account doesn't check out. Don't trust this server.");
+    }
     let mut profile = Profile::new(
         account.server,
         &me.name,

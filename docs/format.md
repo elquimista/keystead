@@ -162,7 +162,10 @@ existing device:
    signing key, so only the account secret can add a device this way.
 4. The device signs in as usual and checks the directory: the owner's keys must still match
    the kit's fingerprint (or the derived keys), and the account's own entry must carry the
-   keys it derived.
+   keys it derived and, unless it's the owner's, the owner's approval. Without that the
+   device signs itself out again and keeps nothing: an account the owner hasn't approved
+   yet takes no second device, by kit or from another device, until they have. A server
+   can register keys of its own under anyone's name, but can't make the owner's approval.
 
 **Adding a device from another** (0.8.0 and later) lets a device the account already has
 hand the account secret to a new one, without the recovery kit:
@@ -357,12 +360,18 @@ and `keys.folder`. Absent fields are left out.
   copies, so everyone who could open the item hears about it.
 - Clients must verify the signature against the author's approved directory entry,
   and that the author could open the item.
+- A version must have the shape of its format, and clients and servers refuse one that
+  doesn't, whatever its signature: either a folder with the folder's copy or an owner with
+  the owner's, each person and each group once and never the owner among the people, and
+  copies for groups only from format 3 on (always in format 3, optionally in format 4).
+  A format's signature covers only the fields that format has, so one of them added to an
+  older format's version would ride along unsigned.
 - Saving gives every group its copy at the group's current generation (see Groups).
 
 ### Format 1
 
 Items saved by Keystead 0.1 have no `format` field, no `owner` and no `keys`: they are
-format 1. Their parts are encrypted with the **folder key itself**, with associated data
+format 1, and one that has an owner or key copies is refused. Their parts are encrypted with the **folder key itself**, with associated data
 `transcript("keystead/item/v1", item id, folder id, version, part)`, and signed as
 `transcript("keystead/item-signature/v1", item id, folder id, version, author, deleted,
 overview nonce, overview ciphertext, details nonce, details ciphertext)`. Clients still
@@ -684,8 +693,9 @@ each for a new key) and every item shared with them. Their directory entry stays
 true`, so what they signed still verifies; nobody can share with them again, and their
 account can't be recovered: recovery challenges given out before the removal stop working
 with it. Removing someone already removed answers 404, and removes any device the account
-still has. A folder left without a manager gets one: whoever has been
-in it longest. Clients drop removed people's copies from items as they save them.
+still has. A folder left without a manager, a person or a group, gets one: whoever has
+been in it longest. An item outside folders left without one is managed by everyone it
+was shared with. Clients drop removed people's copies from items as they save them.
 
 **History** (0.7.0 and later). When a version replaces another, the server keeps the one
 replaced, as stored, with when it was saved (`saved_at`, seconds since 1970, set by the

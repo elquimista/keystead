@@ -2369,3 +2369,61 @@ async fn someone_the_owner_has_not_approved_cannot_share() {
     let (status, body) = mallory.put(&server, &shared, Some(1)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+#[tokio::test]
+async fn a_group_that_manages_keeps_viewers_as_viewers_when_a_manager_is_removed() {
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    // Bob's folder: Carol views it, and the Ops group (Alice) manages it.
+    let (folder_id, key) = create_folder(&server, &bob, "Bob's team").await;
+    let (status, _) = add_to_folder(&server, &bob, (folder_id, &key), &carol, Role::View, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let group_id = GroupId::random();
+    let secret = GroupSecret::generate();
+    let group_keys = GroupKeys::derive(&secret);
+    let mut first = GroupEntry::first(group_id, "Ops", &group_keys, vec![alice.user_id]);
+    first.sign(alice.user_id, &alice.keys);
+    let request = CreateGroupRequest {
+        entry: first,
+        members: vec![group_copy(&alice, &secret, group_id, 1)],
+    };
+    let (status, body) = server
+        .call(Method::POST, "/v1/groups", alice.token(), json(&request))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let share = AddFolderGroupRequest {
+        group_id,
+        wrapped_key: group_keys
+            .public()
+            .wrap_folder_key(&key, folder_id)
+            .unwrap(),
+        group_generation: 1,
+        role: Role::Manage,
+        generation: 0,
+    };
+    let (status, body) = server
+        .call(
+            Method::POST,
+            &format!("/v1/folders/{folder_id}/groups"),
+            bob.token(),
+            json(&share),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Bob, its only manager in person, is removed from the team. The group still manages
+    // the folder, so Carol isn't made a manager to fill the gap.
+    let (status, _) = alice
+        .call(
+            &server,
+            Method::DELETE,
+            &format!("/v1/users/{}", bob.user_id),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        folder_members(&server, &alice, folder_id).await,
+        [(carol.user_id, Role::View)]
+    );
+}

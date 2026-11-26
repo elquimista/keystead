@@ -307,7 +307,7 @@ fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
         device_name,
         signer: enclave(),
     };
-    join(
+    let mut first = join(
         &fixture.profile("bob"),
         bob_account("Bob's Mac"),
         &invite.token,
@@ -326,6 +326,25 @@ fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
         "{error:#}"
     );
     assert!(!fixture.profile("bob-new").exists());
+    // Nor before the owner has approved him: until then, nothing says the account behind
+    // a secret is his and not one the server made up. The device comes off again.
+    let error = recover(
+        &fixture.profile("bob-new"),
+        bob_account("Bob's new Mac"),
+        Some(&owner_fingerprint),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        format!("{error:#}").contains("hasn't approved this account yet"),
+        "{error:#}"
+    );
+    assert!(!fixture.profile("bob-new").exists());
+    assert_eq!(first.devices().unwrap().len(), 1);
+    let identity = first.whoami();
+    alice
+        .approve(identity.user_id, &identity.fingerprint)
+        .unwrap();
     let mut bob = recover(
         &fixture.profile("bob-new"),
         bob_account("Bob's new Mac"),

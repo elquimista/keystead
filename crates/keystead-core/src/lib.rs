@@ -29,6 +29,8 @@ pub enum Error {
     UnsupportedScheme(keys::WrapScheme),
     /// An item in a format this build doesn't know; a newer Keystead wrote it.
     UnsupportedFormat(u8),
+    /// An item whose fields don't fit its format, and how.
+    InvalidItem(&'static str),
     /// Plaintext inside a ciphertext wasn't valid.
     Encoding(serde_json::Error),
     /// Recovery kit words that don't make up an account secret, and why.
@@ -50,6 +52,7 @@ impl fmt::Display for Error {
                 f,
                 "this item is in format {format}, from a newer Keystead; update to open it"
             ),
+            Self::InvalidItem(reason) => f.write_str(reason),
             Self::Encoding(error) => write!(f, "invalid plaintext: {error}"),
             Self::RecoveryWords(reason) => f.write_str(reason),
             Self::InvalidGroup(reason) => write!(f, "this group can't be trusted: {reason}"),

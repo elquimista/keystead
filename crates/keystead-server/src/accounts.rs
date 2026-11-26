@@ -606,12 +606,14 @@ pub(crate) async fn remove_user(
     for folder_id in folders {
         leave(&mut tx, user, parse_folder(&folder_id)?).await?;
         // A folder left without a manager who can open it gets one: whoever has been in it
-        // longest and can open it.
+        // longest and can open it. A group that manages it is a manager.
         sqlx::query(
             "UPDATE members SET role = 'manage'
              WHERE folder_id = ?1 AND NOT pending
                AND NOT EXISTS (SELECT 1 FROM members
                                WHERE folder_id = ?1 AND role = 'manage' AND NOT pending)
+               AND NOT EXISTS (SELECT 1 FROM folder_groups
+                               WHERE folder_id = ?1 AND role = 'manage')
                AND joined_seq = (SELECT MIN(joined_seq) FROM members
                                  WHERE folder_id = ?1 AND NOT pending)",
         )
@@ -627,11 +629,12 @@ pub(crate) async fn remove_user(
     for item_id in items {
         leave_item(&mut tx, user, &item_id).await?;
         // A login outside folders that has lost its owner is managed by everyone it was
-        // shared with.
+        // shared with, unless a group it's shared with manages it.
         sqlx::query(
             "UPDATE item_access SET role = 'manage'
              WHERE item_id = ?1
                AND NOT EXISTS (SELECT 1 FROM item_access WHERE item_id = ?1 AND role = 'manage')
+               AND NOT EXISTS (SELECT 1 FROM item_groups WHERE item_id = ?1 AND role = 'manage')
                AND (SELECT folder_id FROM items WHERE id = ?1) IS NULL",
         )
         .bind(&item_id)
