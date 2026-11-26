@@ -198,10 +198,12 @@ private struct Sidebar: View {
                 .foregroundStyle(.secondary)
             }
             Section("Team") {
-                Label("People", systemImage: "person.2")
+                // Circled, so both fit the sidebar's icon column: person.2 and person.3 are wider
+                // than it and crowd their text.
+                Label("People", systemImage: "person.circle")
                     .badge(model.isOwner ? model.users.filter { !$0.approved }.count : 0)
                     .tag(AppModel.Section.people)
-                Label("Groups", systemImage: "person.3")
+                Label("Groups", systemImage: "person.2.circle")
                     .tag(AppModel.Section.groups)
             }
         }
@@ -1126,7 +1128,7 @@ private struct PeopleList: View {
         .overlay {
             if model.isOwner && model.users.count <= 1 {
                 ContentUnavailableView {
-                    Label("Just you so far", systemImage: "person.2")
+                    Label("Just you so far", systemImage: "person.circle")
                 } description: {
                     Text("Invite your team; they'll show up here once they've joined, ready "
                         + "for you to approve.")
@@ -1455,7 +1457,7 @@ private struct GroupList: View {
         .overlay {
             if model.groups.isEmpty {
                 ContentUnavailableView {
-                    Label("No groups yet", systemImage: "person.3")
+                    Label("No groups yet", systemImage: "person.2.circle")
                 } description: {
                     Text(model.isOwner
                         ? "Make a group for a team or a role, like Engineering or Support, then "
