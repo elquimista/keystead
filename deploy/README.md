@@ -273,6 +273,23 @@ asking for Touch ID or the password out of the blue, and unlocking signs in. Wit
 older than 0.14.0 that happens every 15 minutes, and the lock screen says to update it, so
 update such a server first.
 
+**Updating to 0.15.0.** Update the server and every app and CLI, the server first; take a
+backup before, as the database gets new tables. This release fixes security problems, on
+the server and in the apps, so don't leave either on an older version.
+
+Who is in each folder and each group is now signed by its members, and apps hand a
+folder's or a group's key only to the people those signatures name, not to whoever the
+server lists. For the folders and groups you already have, nothing needs doing by hand:
+the first time a folder's manager opens a 0.15.0 app, it signs for who is in the folder
+then, and the owner's app, or a manager's, does the same for each group. Until a folder
+has been signed for, people on 0.15.0 can open it but can't add logins to it, so have the
+owner and the folders' managers update and open the app first.
+
+Apps from before 0.15.0 keep reading and saving, but can't share or re-key a folder or
+change a group once it has been signed for; the server tells them to update. Someone the
+owner hasn't approved yet can no longer share anything or add a second device until they
+are, and signing out of the Mac app now asks for Touch ID or the password.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
