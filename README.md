@@ -334,7 +334,7 @@ servers can pull it without logging in.
 ### Publishing the Mac app
 
 The macOS workflow signs the app it attaches with the owner's Apple Development
-certificate, from repository secrets, with a secure timestamp. Every version is then
+certificate, from the secrets of the `release` environment, with a secure timestamp. Every version is then
 recognised as the same app, so macOS lets an update into the data the last one left, and
 the signature stays valid after the certificate expires. Without the secrets, the Mac
 app's job stops with an error and nothing is attached; the server image is unaffected.
@@ -350,16 +350,19 @@ Once, and again whenever the certificate is renewed (it lasts a year):
    base64 -i ~/Desktop/Certificates.p12 | pbcopy
    ```
 
-3. On GitHub, in the repository's **Settings** › **Secrets and variables** › **Actions**,
-   add two repository secrets: `MACOS_CERTIFICATE_P12` (the text you copied) and
+3. On GitHub, in the repository's **Settings** › **Environments** › **release**, add two
+   environment secrets: `MACOS_CERTIFICATE_P12` (the text you copied) and
    `MACOS_CERTIFICATE_PASSWORD` (the export password). The team comes from the
    certificate.
 4. Delete the `.p12`.
 
+The `release` environment is set, under **Deployment branches and tags**, to tags matching
+`v*` only, so the certificate exists just for release runs: a workflow on any other branch
+can't read it, whoever wrote it. Keep the two secrets there and not among the repository's
+own secrets, which any workflow can read.
+
 The workflow puts the certificate in a keychain of its own, with a random password, and
-deletes it when the job ends. Secrets aren't given to pull requests from forks, but anyone
-who can push to the repository could write a workflow that reads them; moving them into a
-protected environment that only version tags can use would close that.
+deletes it when the job ends.
 
 The workflows run other people's actions with that certificate and the right to publish.
 Each is pinned to an exact commit (`uses: owner/action@<commit> # v1.2.3`), not to a label

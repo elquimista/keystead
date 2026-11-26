@@ -5,8 +5,9 @@ name: macOS app
 #
 # Releases don't wait for it to publish the server image: GitHub's macOS runners are
 # sometimes short of capacity, and a job queued there once held back a server image. On a
-# release it signs the app with the owner's Apple Development certificate, from repository
-# secrets, so every version is recognised as the same app, and zips it for the release
+# release it signs the app with the owner's Apple Development certificate, from the secrets
+# of the `release` environment, so every version is recognised as the same app, and zips it
+# for the release
 # workflow, which attaches it to the tag's GitHub release once CI has passed. Other builds
 # are signed ad hoc.
 on:
@@ -23,6 +24,10 @@ jobs:
   macos-app:
     runs-on: macos-15
     timeout-minutes: 60
+    # The signing certificate is kept in the `release` environment, which only version
+    # tags may use, so no workflow on another branch can read it. Other builds are signed
+    # ad hoc and use no environment.
+    environment: ${{ inputs.publish && 'release' || '' }}
     defaults:
       run:
         working-directory: apps/macos
@@ -48,7 +53,7 @@ jobs:
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           if [ -z "$CERTIFICATE" ] || [ -z "$CERTIFICATE_PASSWORD" ]; then
-            echo "::error::Set the MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD repository secrets to sign the app; see Publishing the Mac app in README.md."
+            echo "::error::Set the MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD secrets of the release environment to sign the app; see Publishing the Mac app in README.md."
             exit 1
           fi
           # A keychain of its own, with a random password, deleted at the end.

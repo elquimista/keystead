@@ -49,7 +49,9 @@ jobs:
     uses: ./.github/workflows/macos.yml
     with:
       publish: true
-    # The signing certificate: MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD.
+    # The signing certificate, MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD, comes
+    # from the `release` environment its job names. `inherit` passes repository secrets of
+    # the same names, which the environment's take the place of, for as long as they exist.
     secrets: inherit
 
   # Attaches the Mac app and its checksum to the tag's GitHub release once CI has passed,
