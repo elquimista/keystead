@@ -80,6 +80,18 @@ impl Fixture {
         }
     }
 
+    /// Changes the server's database behind its back, as a server that lies would have
+    /// its lists say something its members never agreed to.
+    fn lie(&self, sql: &str) {
+        let path = self.root.join("server.sqlite");
+        self._runtime.block_on(async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
+            let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+            pool.close().await;
+        });
+    }
+
     fn profile(&self, who: &str) -> PathBuf {
         self.root.join(who).join("profile.json")
     }
@@ -2565,4 +2577,211 @@ fn a_session_renews_without_the_device_key() {
     let devices: keystead_core::api::DeviceList = client.get("/v1/devices", &[]).unwrap();
     assert_eq!(devices.devices.len(), 1);
     assert_eq!(signer.signed.load(Ordering::Relaxed), signed);
+}
+
+#[test]
+fn folders_and_groups_keep_signed_lists_of_who_is_in_them() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        carol,
+        ..
+    } = team(&fixture);
+    let (alice_id, bob_id) = (alice.whoami().user_id, bob.whoami().user_id);
+    let carol_identity = carol.whoami();
+    let carol_id = carol_identity.user_id;
+    alice
+        .approve(carol_id, &carol_identity.fingerprint)
+        .unwrap();
+
+    // A folder starts with its maker; sharing it and giving it a new key each sign the
+    // next entry.
+    let folder = alice.create_folder("Production").unwrap();
+    let latest = |vault: &Vault| vault.profile().folders[&folder].entries.last().cloned();
+    assert_eq!(latest(&alice).unwrap().members, [alice_id]);
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    alice
+        .share_folder("Production", carol_id, Role::View)
+        .unwrap();
+    bob.sync().unwrap();
+    let entry = latest(&bob).unwrap();
+    assert_eq!((entry.revision, entry.generation), (3, 0));
+    assert_eq!(entry.members, [alice_id, bob_id, carol_id]);
+    alice.remove_from_folder("Production", carol_id).unwrap();
+    alice.sync().unwrap();
+    bob.sync().unwrap();
+    let entry = latest(&bob).unwrap();
+    assert_eq!((entry.revision, entry.generation), (4, 1));
+    assert_eq!(entry.members, [alice_id, bob_id]);
+
+    // A group's entries name its members too.
+    alice.create_group("Ops", &[bob_id]).unwrap();
+    let members = |vault: &Vault| {
+        let (_, latest) = vault
+            .profile()
+            .team_group(vault.profile().find_group("Ops").unwrap())
+            .unwrap();
+        latest.members.clone().unwrap()
+    };
+    assert_eq!(members(&alice), [alice_id, bob_id]);
+    alice.add_to_group("Ops", carol_id).unwrap();
+    alice.sync().unwrap();
+    assert_eq!(members(&alice), [alice_id, bob_id, carol_id]);
+    alice.remove_from_group("Ops", carol_id).unwrap();
+    bob.sync().unwrap();
+    assert_eq!(members(&bob), [alice_id, bob_id]);
+
+    // Someone in a group the folder is shared with can share it on, and it still checks
+    // out for everyone, also once the group is gone.
+    alice
+        .share_folder_with_group("Production", "Ops", Role::Manage)
+        .unwrap();
+    alice.remove_from_folder("Production", bob_id).unwrap();
+    alice.sync().unwrap();
+    bob.sync().unwrap();
+    bob.share_folder("Production", carol_id, Role::View)
+        .unwrap();
+    alice.sync().unwrap();
+    let summary = alice.delete_group("Ops").unwrap();
+    assert!(
+        summary.rekey_problems.is_empty(),
+        "{:?}",
+        summary.rekey_problems
+    );
+    let summary = alice.sync().unwrap();
+    assert!(
+        summary.rekey_problems.is_empty(),
+        "{:?}",
+        summary.rekey_problems
+    );
+    let mut carol = carol;
+    carol.sync().unwrap();
+    assert_eq!(latest(&carol).unwrap().members, [alice_id, carol_id]);
+    assert!(latest(&carol).unwrap().groups.is_empty());
+}
+
+#[test]
+fn a_lying_server_cant_get_a_folders_key_handed_to_someone_outside_it() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let carol_identity = carol.whoami();
+    let carol_id = carol_identity.user_id;
+    // Carol is approved, like anyone on the team, but nobody shared this folder with her.
+    alice
+        .approve(carol_id, &carol_identity.fingerprint)
+        .unwrap();
+    let folder = alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    let (overview, details) = login("Database", "hunter2");
+    alice.add(Some("Production"), overview, details).unwrap();
+
+    // The server lists her as a member who recovered and waits for her copy of the key.
+    fixture.lie(&format!(
+        "INSERT INTO members (user_id, folder_id, joined_seq, wrapped_key, role, pending)
+         SELECT {carol_id}, folder_id, joined_seq, wrapped_key, role, 1 FROM members
+         WHERE user_id = {bob_id} AND folder_id = '{folder}'"
+    ));
+    let summary = alice.sync().unwrap();
+    assert_eq!(summary.restored, 0);
+    assert!(
+        summary
+            .rekey_problems
+            .iter()
+            .any(|problem| problem.contains("aren't among this folder's signed members")),
+        "{:?}",
+        summary.rekey_problems
+    );
+
+    // Then as an ordinary member of a folder that needs a new key.
+    fixture.lie(&format!(
+        "UPDATE members SET pending = 0 WHERE user_id = {carol_id};
+         UPDATE folders SET needs_rekey = 1 WHERE id = '{folder}'"
+    ));
+    let summary = alice.sync().unwrap();
+    assert_eq!(summary.rekeyed, 0);
+    assert!(
+        summary
+            .rekey_problems
+            .iter()
+            .any(|problem| problem.contains("Don't trust this server")),
+        "{:?}",
+        summary.rekey_problems
+    );
+    assert_eq!(alice.profile().folders[&folder].generation, 0);
+
+    // Either way, nothing was made for her.
+    let _ = carol.sync();
+    assert!(carol.list().unwrap().is_empty());
+}
+
+#[test]
+fn a_folder_from_before_signed_members_gets_them_from_a_manager() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        bob,
+        alice_secret,
+        bob_secret,
+        ..
+    } = team(&fixture);
+    let (alice_id, bob_id) = (alice.whoami().user_id, bob.whoami().user_id);
+    let owner_fingerprint = alice.whoami().fingerprint;
+    let folder = alice.create_folder("Old").unwrap();
+    alice.share_folder("Old", bob_id, Role::Edit).unwrap();
+    // As a server that has just been updated holds it: nobody has signed for it.
+    fixture.lie("DELETE FROM folder_entries");
+
+    let device = |secret, name| NewAccount {
+        server: &fixture.url,
+        secret,
+        device_id: DeviceId::random(),
+        device_name: name,
+        signer: Arc::new(SoftwareDeviceKey::generate()),
+    };
+    // Bob can open it, but until it's signed for, nothing new goes into it: a folder
+    // that only its key vouches for could be anyone's.
+    let mut bob = recover(
+        &fixture.profile("bob-2"),
+        device(&bob_secret, "Bob's new Mac"),
+        Some(&owner_fingerprint),
+    )
+    .unwrap();
+    bob.sync().unwrap();
+    assert!(bob.profile().folders[&folder].entries.is_empty());
+    let (overview, details) = login("Database", "hunter2");
+    let error = bob
+        .add(Some("Old"), overview.clone(), details.clone())
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("nobody has signed for this folder's members yet"),
+        "{error:#}"
+    );
+
+    // Alice manages it: her next sync signs for who's in it, once.
+    let mut alice = recover(
+        &fixture.profile("alice-2"),
+        device(&alice_secret, "Alice's new Mac"),
+        None,
+    )
+    .unwrap();
+    alice.sync().unwrap();
+    let entries = alice.profile().folders[&folder].entries.clone();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].members, [alice_id, bob_id]);
+    alice.sync().unwrap();
+    assert_eq!(alice.profile().folders[&folder].entries, entries);
+    bob.add(Some("Old"), overview, details).unwrap();
+    assert_eq!(bob.profile().folders[&folder].entries, entries);
 }

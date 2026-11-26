@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use keystead_core::api::{Exposure, GroupInfo, KeyLink, Role, Roles, ViaGroup};
 use keystead_core::directory::{DirectoryEntry, SignedBefore};
 use keystead_core::encoding::{Bytes, Key32};
+use keystead_core::folders::{FolderEntry, verify_folder_entries};
 use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries_with};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, FolderInfo, Sealed};
@@ -34,6 +35,10 @@ pub struct FolderRecord {
     /// Set when `wrapped_key` is wrapped for a group's key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via_group: Option<ViaGroup>,
+    /// Who is in the folder, as its members signed it, oldest entry first and checked.
+    /// Empty for a folder nobody has signed for yet (made before 0.15.0).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<FolderEntry>,
 }
 
 impl FolderRecord {
@@ -138,6 +143,14 @@ pub struct Profile {
     /// own: anyone can wrap a key for an account, the server included.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub folder_pins: BTreeMap<FolderId, Key32>,
+    /// The server keeps folders' and groups' signed members (0.15.0 and later). Once seen
+    /// it stays: a server can't go back to having its own word taken for who they are.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub membership: bool,
+    /// The signed entries of groups since deleted, from the last sync: folder entries
+    /// their members signed are still checked against them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_groups: Vec<Vec<GroupEntry>>,
 }
 
 impl Profile {
@@ -166,6 +179,8 @@ impl Profile {
             recovered_personal_keys: Vec::new(),
             signed_before: Vec::new(),
             folder_pins: BTreeMap::new(),
+            membership: false,
+            former_groups: Vec::new(),
         }
     }
 
@@ -402,6 +417,54 @@ impl Profile {
                 entry.verify(keys).is_ok()
             })
         })?)
+    }
+
+    /// Whether `user` is in a group by the group's own signed entries: in its latest one
+    /// if `current`, else in any of them, for a folder entry signed when the group's
+    /// members may have been others. A group since deleted counts by the entries it had.
+    pub fn in_group(&self, group_id: GroupId, user: UserId, current: bool) -> bool {
+        let live = self
+            .team_groups
+            .iter()
+            .map(|info| &info.entries)
+            .find(|entries| entries.first().is_some_and(|e| e.group_id == group_id));
+        let former = self
+            .former_groups
+            .iter()
+            .find(|entries| entries.first().is_some_and(|e| e.group_id == group_id));
+        if current {
+            // A deleted group's last entry is who was in it to the end.
+            return live
+                .or(former)
+                .and_then(|entries| self.verify_group(entries).ok())
+                .is_some_and(|latest| latest.has_member(user));
+        }
+        live.or(former).is_some_and(|entries| {
+            self.verify_group(entries).is_ok() && entries.iter().any(|e| e.has_member(user))
+        })
+    }
+
+    /// Checks a folder's signed entries, oldest first, and returns the latest: each is
+    /// signed by an approved person who was in the folder, or in a group it was shared
+    /// with, by the entry before. `known` is how many of them this device has checked
+    /// before; a newer last one counts only if its signer is in the folder or one of its
+    /// groups now.
+    pub fn verify_folder<'a>(
+        &self,
+        entries: &'a [FolderEntry],
+        known: usize,
+    ) -> Result<&'a FolderEntry> {
+        Ok(verify_folder_entries(
+            entries,
+            |entry| {
+                self.signed_by(entry.signer, &entry.signature_digest(), |keys| {
+                    entry.verify(keys).is_ok()
+                })
+            },
+            |group, user, latest| {
+                self.in_group(group, user, latest && known > 0 && entries.len() > known)
+            },
+        )?)
     }
 
     /// A group on the team, checked, with its latest entry.

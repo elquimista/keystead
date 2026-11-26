@@ -12,6 +12,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub struct Bytes(pub Vec<u8>);
 
 impl Bytes {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }

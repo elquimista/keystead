@@ -23,6 +23,7 @@ zxcvbn.workspace = true
 keystead-server.workspace = true
 axum.workspace = true
 p256.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 
 [lints]

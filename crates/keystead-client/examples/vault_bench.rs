@@ -44,6 +44,7 @@ fn main() -> anyhow::Result<()> {
     profile.folders.insert(
         folder_id,
         FolderRecord {
+            entries: Vec::new(),
             info: FolderInfo {
                 name: "Production".into(),
             }

@@ -19,11 +19,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use keystead_core::api::{
     AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, DeletedItem, DeletedItems,
-    EscrowedFolder, Exposure, Exposures, FolderEscrowRequest, FolderMember, FolderRole,
-    GroupMember, GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members, PasswordAge,
-    PasswordAges, PutItemRequest, RekeyRequest, Restore, RestoreFolderKeyRequest, Role,
-    RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage, ViaGroup,
+    EscrowedFolder, Exposure, Exposures, FolderEntryRequest, FolderEscrowRequest, FolderMember,
+    FolderRole, GroupMember, GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members,
+    PasswordAge, PasswordAges, PutItemRequest, RekeyRequest, Restore, RestoreFolderKeyRequest,
+    Role, RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage, ViaGroup,
 };
+use keystead_core::folders::{FolderEntry, verify_folder_step};
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
 use keystead_core::keys::WrappedKey;
@@ -102,6 +103,14 @@ pub(crate) async fn create_folder(
         Role::Manage,
     )
     .await?;
+    if let Some(entry) = &request.entry {
+        let change = Membership {
+            generation: 0,
+            members: HashSet::from([auth.user_id]),
+            groups: HashSet::new(),
+        };
+        add_folder_entry(&mut tx, request.folder_id, auth.user_id, entry, &change).await?;
+    }
     tx.commit().await?;
     Ok(StatusCode::CREATED)
 }
@@ -133,6 +142,7 @@ pub(crate) async fn add_member(
             "the folder's key changed; sync and try again".into(),
         ));
     }
+    let before = signed_membership(&mut tx, folder_id).await?;
     join(
         &mut tx,
         request.user_id,
@@ -141,6 +151,11 @@ pub(crate) async fn add_member(
         request.role,
     )
     .await?;
+    if let Some(mut change) = entry_needed(before, request.entry.as_ref())? {
+        change.members.insert(request.user_id);
+        let entry = request.entry.as_ref().expect("checked by entry_needed");
+        add_folder_entry(&mut tx, folder_id, auth.user_id, entry, &change).await?;
+    }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -161,6 +176,7 @@ pub(crate) async fn members(
     Ok(Json(Members {
         members: folder_members(&mut conn, folder_id).await?,
         groups: folder_groups(&mut conn, folder_id).await?,
+        entries: folder_entries(&mut conn, folder_id).await?,
     }))
 }
 
@@ -274,6 +290,17 @@ pub(crate) async fn rekey(
                 "a group's key changed; sync and try again".into(),
             ));
         }
+    }
+    if let Some(mut change) = entry_needed(
+        signed_membership(&mut tx, folder_id).await?,
+        request.entry.as_ref(),
+    )? {
+        // The new key is for exactly who's in the folder now.
+        change.generation = request.generation;
+        change.members = members;
+        change.groups = groups;
+        let entry = request.entry.as_ref().expect("checked by entry_needed");
+        add_folder_entry(&mut tx, folder_id, auth.user_id, entry, &change).await?;
     }
     sqlx::query("INSERT INTO folder_keys (folder_id, generation, previous) VALUES (?, ?, ?)")
         .bind(folder_id.to_string())
@@ -562,7 +589,13 @@ pub(crate) async fn delete_folder(
         .execute(&mut *tx)
         .await?;
     }
-    for table in ["items", "members", "folder_groups", "folder_keys"] {
+    for table in [
+        "items",
+        "members",
+        "folder_groups",
+        "folder_keys",
+        "folder_entries",
+    ] {
         sqlx::query(&format!("DELETE FROM {table} WHERE folder_id = ?"))
             .bind(&folder)
             .execute(&mut *tx)
@@ -625,11 +658,177 @@ pub(crate) async fn add_folder_group(
     .bind(serde_json::to_string(&request.wrapped_key)?)
     .execute(&mut *tx)
     .await?;
+    if let Some(mut change) = entry_needed(
+        signed_membership(&mut tx, folder_id).await?,
+        request.entry.as_ref(),
+    )? {
+        change.groups.insert(request.group_id);
+        let entry = request.entry.as_ref().expect("checked by entry_needed");
+        add_folder_entry(&mut tx, folder_id, auth.user_id, entry, &change).await?;
+    }
     for member in group_member_ids(&mut tx, request.group_id).await? {
         reconcile(&mut tx, member).await?;
     }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /v1/folders/{folder_id}/entries` (managers): the first signed entry of a folder
+/// that has none, one made before 0.15.0. It names exactly who the folder is shared with
+/// now, for its current key; from then on every change to them comes with the next entry.
+pub(crate) async fn put_first_folder_entry(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(folder_id): Path<FolderId>,
+    Json(request): Json<FolderEntryRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.writer.begin().await?;
+    require(
+        folder_role(&mut tx, auth.user_id, folder_id).await?,
+        Role::Manage,
+        "sign for this folder's members",
+    )?;
+    if signed_membership(&mut tx, folder_id).await?.is_some() {
+        return Err(ApiError::Conflict(
+            "this folder's members are signed already; sync and try again".into(),
+        ));
+    }
+    let change = Membership {
+        generation: generation(&mut tx, folder_id).await?,
+        members: folder_members(&mut tx, folder_id)
+            .await?
+            .into_iter()
+            .map(|member| member.user_id)
+            .collect(),
+        groups: folder_groups(&mut tx, folder_id)
+            .await?
+            .into_iter()
+            .map(|share| share.group_id)
+            .collect(),
+    };
+    add_folder_entry(&mut tx, folder_id, auth.user_id, &request.entry, &change).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Who a folder's next entry must name, and for which key.
+struct Membership {
+    generation: u32,
+    members: HashSet<UserId>,
+    groups: HashSet<GroupId>,
+}
+
+/// A folder's entries, oldest first; none for a folder from before 0.15.0 that nobody has
+/// signed for yet.
+async fn folder_entries(
+    conn: &mut SqliteConnection,
+    folder_id: FolderId,
+) -> Result<Vec<FolderEntry>, ApiError> {
+    let bodies: Vec<String> =
+        sqlx::query_scalar("SELECT body FROM folder_entries WHERE folder_id = ? ORDER BY revision")
+            .bind(folder_id.to_string())
+            .fetch_all(conn)
+            .await?;
+    bodies
+        .iter()
+        .map(|body| Ok(serde_json::from_str(body)?))
+        .collect()
+}
+
+/// What a folder's latest entry says, if it has entries.
+async fn signed_membership(
+    conn: &mut SqliteConnection,
+    folder_id: FolderId,
+) -> Result<Option<Membership>, ApiError> {
+    Ok(folder_entries(conn, folder_id)
+        .await?
+        .pop()
+        .map(|latest| Membership {
+            generation: latest.generation,
+            members: latest.members.into_iter().collect(),
+            groups: latest.groups.into_iter().collect(),
+        }))
+}
+
+/// Whether a change to who a folder is shared with needs its next entry: it does once
+/// the folder has entries, and can't have one before (its first comes on its own, naming
+/// everyone). Returns what the latest entry says, to build on.
+fn entry_needed(
+    signed: Option<Membership>,
+    entry: Option<&FolderEntry>,
+) -> Result<Option<Membership>, ApiError> {
+    match (signed, entry) {
+        (Some(signed), Some(_)) => Ok(Some(signed)),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(ApiError::Conflict(
+            "this folder's members are signed, and this change isn't; update Keystead".into(),
+        )),
+        (None, Some(_)) => Err(ApiError::Conflict(
+            "nobody has signed for this folder's members yet; sync and try again".into(),
+        )),
+    }
+}
+
+/// Checks a folder's next entry and stores it. It must be the caller's own, follow the
+/// latest one, and say exactly `expected`. The server keeps who's in a folder either way;
+/// it checks entries so that what clients verify matches what it stores.
+async fn add_folder_entry(
+    conn: &mut SqliteConnection,
+    folder_id: FolderId,
+    signer: UserId,
+    entry: &FolderEntry,
+    expected: &Membership,
+) -> Result<(), ApiError> {
+    let bad = |message: &str| Err(ApiError::BadRequest(message.into()));
+    let entries = folder_entries(conn, folder_id).await?;
+    let latest = entries.last();
+    let revision = latest.map_or(1, |latest| latest.revision + 1);
+    if entry.revision != revision {
+        return Err(ApiError::Conflict(format!(
+            "the folder's members are at revision {}; sync and try again",
+            revision - 1
+        )));
+    }
+    if entry.folder_id != folder_id || entry.signer != signer {
+        return bad("you can only send entries you signed, for this folder");
+    }
+    let members: HashSet<UserId> = entry.members.iter().copied().collect();
+    let groups: HashSet<GroupId> = entry.groups.iter().copied().collect();
+    if entry.generation != expected.generation
+        || members != expected.members
+        || groups != expected.groups
+    {
+        return Err(ApiError::Conflict(
+            "the folder's members or key changed; sync and try again".into(),
+        ));
+    }
+    // As clients check it: the caller's place in the folder or one of its groups, the
+    // order of the change, and their signature. Earlier entries were checked as they came.
+    let named = latest.map_or(&entry.groups, |latest| &latest.groups);
+    let mut in_groups = HashSet::new();
+    for &group in named {
+        if group_member_ids(conn, group).await?.contains(&signer) {
+            in_groups.insert(group);
+        }
+    }
+    verify_folder_step(latest, entry, |group, user| {
+        user == signer && in_groups.contains(&group)
+    })
+    .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let keys = user_entry(conn, signer)
+        .await?
+        .ok_or(ApiError::Unauthorized)?
+        .keys;
+    entry
+        .verify(&keys)
+        .map_err(|_| ApiError::BadRequest("folder entry signature does not verify".into()))?;
+    sqlx::query("INSERT INTO folder_entries (folder_id, revision, body) VALUES (?, ?, ?)")
+        .bind(folder_id.to_string())
+        .bind(entry.revision)
+        .bind(serde_json::to_string(entry)?)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// `PUT /v1/folders/{folder_id}/groups/{group_id}`: a manager changes a group's role.
@@ -1208,7 +1407,11 @@ pub(crate) async fn item_people(
             })
         })
         .collect::<Result<_, ApiError>>()?;
-    Ok(Json(Members { members, groups }))
+    Ok(Json(Members {
+        members,
+        groups,
+        entries: Vec::new(),
+    }))
 }
 
 /// `PUT /v1/items/{item_id}/people/{user_id}`: a manager changes the role of someone the
@@ -1362,6 +1565,7 @@ pub(crate) async fn sync(
                 chain: key.chain,
                 via_group: key.via_group,
                 items,
+                entries: key.entries,
             },
         );
     }
@@ -1394,6 +1598,7 @@ pub(crate) async fn sync(
                         generation: key.generation,
                         chain: key.chain,
                         via_group: key.via_group,
+                        entries: key.entries,
                     });
                 }
             }
@@ -1825,6 +2030,7 @@ struct MemberFolderKey {
     generation: u32,
     chain: Vec<KeyLink>,
     via_group: Option<ViaGroup>,
+    entries: Vec<FolderEntry>,
 }
 
 async fn current_key(
@@ -1889,6 +2095,7 @@ async fn current_key(
         generation,
         chain,
         via_group,
+        entries: folder_entries(conn, folder_id).await?,
     }))
 }
 

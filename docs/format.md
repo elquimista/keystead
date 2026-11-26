@@ -487,6 +487,28 @@ at the same generation, or a new one at the next generation. Each signer must be
 approved directory. A member also checks that the secret they were given derives the
 latest revision's key.
 
+**Members** (0.15.0 and later). An entry also names who is in the group: `"members"`, user
+ids in ascending order, and its signature then covers them, under its own domain:
+
+```
+transcript("keystead/group-entry/v2", group id, revision, name, generation, encryption
+           public key, number of managers, each manager, number of members (4 bytes),
+           then each member's user id, signer)
+```
+
+An entry without `members` is from before, and signs as above. Once an entry names them,
+every later one does. With the same key people are only added, since whoever holds the
+secret keeps it; an entry for a new key names those who stay, and nobody new. So someone
+who left stays on the list until the group's next key, which they don't get. Adding
+someone comes with the next entry, naming them too. The first entry to name a group's
+members, for a group from before, names exactly who the server lists: the owner's app, or
+a manager's in it, signs it at its next sync.
+
+Clients give a group's secret only to whom its latest entry names: when the group gets a
+new one, to those of them the server still lists, and refusing if the server lists anyone
+else; and to someone who recovered, only if they're named (see Recovering with the owner's
+help). The server's list is only ever taken as who has left.
+
 The owner makes groups, and is the first member and manager of each one they make.
 Managers add people, but only managers who are in the group, since that hands over its
 secret; the owner and managers in the group remove people, rename it and change its
@@ -498,7 +520,8 @@ it). Everyone in it loses what only the group gave them, as if each had left: th
 get `left_group` and the `left` and `left_item` entries that follow, folders they lost are
 marked for new keys, those who keep a folder another way get its key again (`rekeyed`),
 and what they could see goes on the passwords to change. The server forgets the group's
-entries and keys. It refuses while the group is the only manager of a folder. Items keep
+keys, and keeps its entries on record (`Groups.former`, 0.15.0 and later), as folder
+entries its members signed are checked against them. It refuses while the group is the only manager of a folder. Items keep
 their copy for the deleted group until next saved; clients then drop it, and anyone who
 can save may (as for people removed from the team).
 
@@ -517,8 +540,8 @@ sync tells a group's managers in it when it needs a new secret (`group_rekey_nee
 
 Sharing a folder with a group names both the folder key's generation and the group's,
 and both must be current. `Groups` (from `GET /v1/groups`) lists every group with its
-`entries`, its `members` and whether it `needs_rekey`; for an account the owner hasn't
-approved, the list is empty. `Members` also lists the `groups` a folder or item is shared
+`entries`, its `members` and whether it `needs_rekey`, and in `former` the entries of
+each group since deleted; for an account the owner hasn't approved, both are empty. `Members` also lists the `groups` a folder or item is shared
 with, with their roles.
 
 ## API
@@ -568,6 +591,7 @@ codes (400, 401, 403, 404, 409).
 | `PUT /v1/folders/{id}/members/{user}/key` | `RestoreFolderKeyRequest` | 204 | Folder members, for someone who recovered; themselves, from escrow |
 | `DELETE /v1/folders/{id}?logins=N` | | 204 | Folder managers |
 | `POST /v1/folders/{id}/rekey` | `RekeyRequest` | 204 | Folder managers |
+| `PUT /v1/folders/{id}/entries` | `FolderEntryRequest` | 204 | Folder managers, once (0.15.0) |
 | `POST /v1/folders/{id}/groups` | `AddFolderGroupRequest` | 204 | Folder managers |
 | `PUT /v1/folders/{id}/groups/{group}` | `RoleRequest` | 204 | Folder managers |
 | `DELETE /v1/folders/{id}/groups/{group}` | | 204 | Folder managers |
@@ -755,7 +779,7 @@ consistent snapshot:
   item reached through a group joined after its latest version, at the join's number.
 - `joined`: the folder key wrapped for the user, or for a group they're in
   (`via_group`: `{"group_id", "generation"}`), with its `generation` and `chain`, plus the
-  folder's info and items.
+  folder's info, items and signed `entries` (see Signed members).
 - `left`: drop a folder, keeping its items that were also shared with the user directly.
 - `rekeyed`: a folder the user can open has a new key: the new one wrapped for them or
   their group (`via_group`), its generation, the whole chain and the info sealed with it.
@@ -780,10 +804,82 @@ with them or their groups directly, the highest of the ways in), and every page
 `escrow_needed` and `escrow_folders` (see Recovering with the owner's help). The prototype in
 `prototypes/change-feed` shows why each item arrives exactly once.
 
+### Signed members
+
+(0.15.0 and later; `"membership": 1` in `GET /v1/health`.) The server keeps who is in each
+folder, but clients hand a folder's key on: to everyone in it when it gets a new key, and
+to someone who recovered. A server that could say who the members are could get the key
+handed to anyone the owner approved. So who is in a folder is signed, in entries with
+numbered revisions like a group's:
+
+```json
+{
+  "folder_id": "…", "revision": 3, "generation": 1, "key": "…",
+  "members": [1, 2], "groups": ["…"], "previous": "…", "signer": 1, "signature": "…"
+}
+```
+
+`members` are the user ids the folder is shared with directly, and `groups` the groups,
+both in ascending order. `key` is a fingerprint of the folder key of `generation`:
+SHA-256 of `transcript("keystead/folder-key-pin/v1", folder id, key)`. `previous` is
+SHA-256 of the previous entry's signature, left out in the first. The signer's account
+signing key signs:
+
+```
+transcript("keystead/folder-entry/v1", folder id, revision (4 bytes), generation (4 bytes),
+           key fingerprint, number of members (4 bytes), each member's user id, number of
+           groups (4 bytes), each group's id, previous, signer)
+```
+
+Clients check every entry, oldest first:
+
+- Revision 1 is signed by someone it names, or someone in a group it names. Each later
+  one is the next number, names the one before it in `previous`, and is signed by someone
+  the one before it names, or someone in a group it names.
+- With the same key (same `generation` and `key`), people and groups are only added. An
+  entry for the next generation is for a new key, and names those who stay and nobody new.
+- Each signer must be in the approved directory, with the keys they had (see Directory).
+- Who is in a group comes from the group's own signed members: for an entry the client is
+  seeing for the first time on a folder it already has, the group's latest entry (or, for
+  a group since deleted, its last); for earlier entries, any of the group's entries, as its
+  members may have been others then.
+
+A folder's entries come with it (`joined`, `rekeyed`, and `Members.entries`). A client
+takes a folder only if its entries check out, continue the ones the client has, are for
+the folder's current key (the latest entry's `generation` and `key` match the key the
+client was given) and name the client's account or a group it's in. A folder that has had
+entries never goes back to having none.
+
+Every change to who a folder is shared with comes with its next entry, which the server
+checks says exactly that change: making a folder (its maker alone), sharing it with a
+person or a group (one more name), and giving it a new key (exactly who's in it now).
+Removing someone doesn't: they stay named until the folder's next key, which they don't
+get. A change without an entry, to a folder that has entries, is refused (409), so apps
+before 0.15.0 can't share or re-key such folders.
+
+Clients give a folder's key only to whom its latest entry names. A new key goes to those
+of them the server still lists, and a client refuses to make one if the server lists
+anyone the entry doesn't name. Someone who recovered gets their copy again only if they're
+named. The server's list is only ever taken as who has left.
+
+**Folders from before.** A folder made before 0.15.0 has no entries. One of its managers'
+apps signs its first at its next sync (`PUT /v1/folders/{id}/entries`), naming exactly who
+the server lists, for the folder's current key. That once, the server's list is taken at
+its word. Until then clients open the folder but put nothing new into it, since a folder
+only its key vouches for could be anyone's. A manager who has the folder only through a
+group signs once the group's own members are signed.
+
+**What this doesn't cover.** Roles stay the server's (anyone a folder names can sign its
+next entry, a viewer too). A removal is the server's word until the folder's next key. A
+device with no history of a folder, such as a new one, checks the entries it's given from
+the first, so a server can still show it an earlier state of the folder as the current
+one. And clients that only ever talk to a server from before 0.15.0 take its lists at its
+word, as before; once a client has seen a server keep signed members, it doesn't go back.
+
 ## Not in this format yet
 
-- Signed membership changes. Roles and memberships are enforced by the server; a
-  server that lied could let someone save who shouldn't, though every version stays
-  signed by its author. A group's managers and key are signed; who is in it isn't.
+- Signed roles. Who is in a folder or a group is signed (see Signed members), but their
+  roles are kept and enforced by the server: a server that lied could let someone save
+  who shouldn't, though every version stays signed by its author.
 - Groups inside groups (on purpose: no loops, and access stays easy to follow).
 - Paginating a large folder that arrives with a join.

@@ -627,6 +627,13 @@ impl Vault {
     }
 
     fn restore_folder(&mut self, folder_id: FolderId, user: UserId) -> Result<()> {
+        // The server says who's waiting; whether they get the key is the folder's say.
+        if !self.profile.folders.contains_key(&folder_id) {
+            bail!("this account doesn't have that folder");
+        }
+        if !self.folder_names(folder_id, user)? {
+            bail!("they aren't among this folder's signed members");
+        }
         let recipient = self
             .profile
             .trusted_keys(user)
@@ -637,6 +644,7 @@ impl Vault {
             .get(&folder_id)
             .context("this account doesn't have that folder")?;
         let generation = record.generation;
+
         let key = self
             .profile
             .folder_key(&self.keys, &self.groups, folder_id)?;
@@ -650,6 +658,12 @@ impl Vault {
     }
 
     fn restore_group(&mut self, group_id: GroupId, user: UserId) -> Result<()> {
+        if !self.profile.groups.contains_key(&group_id) {
+            bail!("this account isn't in that group");
+        }
+        if !self.group_names(group_id, user)? {
+            bail!("they aren't among this group's signed members");
+        }
         let recipient = self
             .profile
             .trusted_keys(user)
@@ -660,6 +674,7 @@ impl Vault {
             .get(&group_id)
             .context("this account isn't in that group")?;
         let generation = record.generation;
+
         let secret = self
             .keys
             .unwrap_group_secret(&record.wrapped_secret, group_id, generation)?;

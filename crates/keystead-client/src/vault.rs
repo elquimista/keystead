@@ -18,6 +18,7 @@ use keystead_core::api::{
     SendAccountSecretRequest, SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
+use keystead_core::folders::FolderEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{
@@ -39,6 +40,7 @@ use crate::import::ImportedLogin;
 use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile};
 
 mod health;
+mod membership;
 mod recovery;
 
 pub use health::{HealthRow, OLD_AFTER_SECONDS, PasswordHealth};
@@ -789,6 +791,8 @@ pub struct Vault {
     server_renews: bool,
     /// The server stores this build's item format; checked before the first save.
     server_takes_items: bool,
+    /// Whether the server keeps signed members, once asked this session.
+    server_membership: Option<bool>,
     /// The keys of the groups this account is in, from the profile.
     groups: GroupKeyring,
     /// Login histories fetched this session, by login, newest first; kept encrypted.
@@ -818,6 +822,7 @@ impl Vault {
             session: None,
             server_renews: true,
             server_takes_items: false,
+            server_membership: None,
             history: HashMap::new(),
             adding_device: None,
             deleted: HashMap::new(),
@@ -843,6 +848,7 @@ impl Vault {
             session: None,
             server_renews: true,
             server_takes_items: false,
+            server_membership: None,
             history: HashMap::new(),
             adding_device: None,
             deleted: HashMap::new(),
@@ -886,6 +892,7 @@ impl Vault {
     pub fn sync(&mut self) -> Result<SyncSummary> {
         let mut summary = SyncSummary::default();
         let (mut folders, groups, mut duties) = self.pull(&mut summary)?;
+        self.sign_members_from_before();
         // Someone left these groups: give each a new key first, as folders shared with them
         // wait for it.
         if !groups.is_empty() {
@@ -942,7 +949,10 @@ impl Vault {
         self.fetch_signed_before()?;
         // Servers before 0.4.0 have no groups.
         match self.call(|client| client.get::<Groups>("/v1/groups", &[]))? {
-            Ok(groups) => self.profile.team_groups = groups.groups,
+            Ok(groups) => {
+                self.profile.team_groups = groups.groups;
+                self.profile.former_groups = groups.former;
+            }
             Err(Failure::Status { code: 404, .. }) => self.profile.team_groups.clear(),
             Err(error) => return Err(error.into()),
         }
@@ -1117,11 +1127,20 @@ impl Vault {
             generation: 0,
             chain: Vec::new(),
             via_group: None,
+            entries: Vec::new(),
         };
+        let mut record = record;
+        if self.membership()? {
+            let me = self.profile.user_id;
+            let mut entry = FolderEntry::first(folder_id, 0, &key, vec![me], Vec::new());
+            entry.sign(me, &self.keys);
+            record.entries.push(entry);
+        }
         let request = CreateFolderRequest {
             folder_id,
             info: record.info.clone(),
             wrapped_key: record.wrapped_key.clone(),
+            entry: record.entries.first().cloned(),
         };
         let () = self.call(|client| client.post("/v1/folders", &request))??;
         self.profile.folders.insert(folder_id, record);
@@ -1295,14 +1314,20 @@ impl Vault {
         let key = self
             .profile
             .folder_key(&self.keys, &self.groups, folder_id)?;
+        let entry = self.next_folder_entry(folder_id, |entry| entry.members.push(user))?;
         let request = AddMemberRequest {
             user_id: user,
             wrapped_key: recipient.wrap_folder_key(&key, folder_id)?,
             role,
             generation: self.profile.folders[&folder_id].generation,
+            entry: entry.clone(),
         };
         let path = format!("/v1/folders/{folder_id}/members");
         let () = self.call(|client| client.post(&path, &request))??;
+        if let Some(entry) = entry {
+            self.keep_folder_entry(folder_id, entry);
+            self.save()?;
+        }
         Ok(self.profile.user_name(user))
     }
 
@@ -1367,9 +1392,44 @@ impl Vault {
         if let Some(name) = name {
             name.clone_into(&mut info.name);
         }
-        let path = format!("/v1/folders/{folder_id}/members");
-        let members: Members = self.call(|client| client.get(&path, &[]))??;
+        // Who gets the new key: those the folder's signed entries name, less whoever the
+        // server says has left. Its word only ever takes someone off the list; a name it
+        // adds is refused, as the key would go to them.
+        let signs = self.membership()?;
+        if signs && !self.sign_folder_members(folder_id)? {
+            bail!(
+                "nobody has signed for this folder's members yet, and this account can't: \
+                 it needs one of its managers"
+            );
+        }
+        let members: Members = if signs {
+            self.folder_members_now(folder_id)?
+        } else {
+            let path = format!("/v1/folders/{folder_id}/members");
+            self.call(|client| client.get(&path, &[]))??
+        };
+        let record = &self.profile.folders[&folder_id];
         let key = FolderKey::generate();
+        let entry = match record.entries.last() {
+            Some(latest) if signs => {
+                let users: Vec<UserId> = members.members.iter().map(|m| m.user_id).collect();
+                let groups: Vec<GroupId> = members.groups.iter().map(|g| g.group_id).collect();
+                if !users.iter().all(|user| latest.members.contains(user))
+                    || !groups.iter().all(|group| latest.groups.contains(group))
+                {
+                    bail!(
+                        "the server lists someone in this folder whom its signed members \
+                         don't. Don't trust this server"
+                    );
+                }
+                let mut entry = latest.next_generation(&key);
+                entry.members = users;
+                entry.groups = groups;
+                entry.sign(self.profile.user_id, &self.keys);
+                Some(entry)
+            }
+            _ => None,
+        };
         let mut wrapped_keys = Vec::new();
         for member in &members.members {
             let recipient = self.profile.trusted_keys(member.user_id).with_context(|| {
@@ -1398,6 +1458,7 @@ impl Vault {
             group_keys,
             previous: key.seal_previous(&old, folder_id, generation),
             info: info.seal(folder_id, &key)?,
+            entry,
         };
         let path = format!("/v1/folders/{folder_id}/rekey");
         let () = self.call(|client| client.post(&path, &request))??;
@@ -1438,6 +1499,7 @@ impl Vault {
         record.info = request.info;
         record.wrapped_key = wrapped_key;
         record.via_group = via_group;
+        record.entries.extend(request.entry);
         self.save()
     }
 
@@ -1507,6 +1569,11 @@ impl Vault {
         let group_id = GroupId::random();
         let secret = GroupSecret::generate();
         let mut entry = GroupEntry::first(group_id, name, &GroupKeys::derive(&secret), vec![me]);
+        if self.membership()? {
+            let mut everyone = members.to_vec();
+            everyone.push(me);
+            entry = entry.with_members(everyone);
+        }
         entry.sign(me, &self.keys);
         let mut copies = vec![GroupMemberKey {
             user_id: me,
@@ -1546,13 +1613,36 @@ impl Vault {
         let secret =
             self.keys
                 .unwrap_group_secret(&record.wrapped_secret, group_id, record.generation)?;
+        let generation = record.generation;
+        let wrapped_secret = recipient.wrap_group_secret(&secret, group_id, generation)?;
+        let entry = if self.membership()? {
+            if !self.sign_group_members(group_id)? {
+                bail!(
+                    "nobody has signed for this group's members yet. The owner or one of \
+                     its managers needs to open Keystead 0.15 or later first"
+                );
+            }
+            let (_, latest) = self.profile.team_group(group_id)?;
+            let mut members = latest.members.clone().unwrap_or_default();
+            members.push(user);
+            let mut entry = latest.next().with_members(members);
+            entry.sign(self.profile.user_id, &self.keys);
+            Some(entry)
+        } else {
+            None
+        };
         let request = AddGroupMemberRequest {
             user_id: user,
-            generation: record.generation,
-            wrapped_secret: recipient.wrap_group_secret(&secret, group_id, record.generation)?,
+            generation,
+            wrapped_secret,
+            entry: entry.clone(),
         };
         let path = format!("/v1/groups/{group_id}/members");
         let () = self.call(|client| client.post(&path, &request))??;
+        if let Some(entry) = entry {
+            self.keep_group_entry(group_id, entry);
+            self.save()?;
+        }
         Ok(self.profile.user_name(user))
     }
 
@@ -1648,6 +1738,7 @@ impl Vault {
         let old =
             self.keys
                 .unwrap_group_secret(&record.wrapped_secret, group_id, record.generation)?;
+        let signs = self.membership()?;
         let (members, entries) = {
             let (info, _) = self.profile.team_group(group_id)?;
             (info.members.clone(), info.entries.clone())
@@ -1660,6 +1751,19 @@ impl Vault {
         let group_keys = GroupKeys::derive(&secret);
         let mut entry = latest.next_generation(&group_keys);
         entry.managers.retain(|manager| members.contains(manager));
+        // Who gets the new secret: those the group's signed entries name, less whoever
+        // the server says has left. A name it adds is refused.
+        if signs {
+            if let Some(signed) = &latest.members
+                && !members.iter().all(|user| signed.contains(user))
+            {
+                bail!(
+                    "the server lists someone in this group whom its signed members don't. \
+                     Don't trust this server"
+                );
+            }
+            entry = entry.with_members(members.clone());
+        }
         entry.sign(self.profile.user_id, &self.keys);
         let generation = entry.generation;
         let mut copies = Vec::new();
@@ -1713,6 +1817,7 @@ impl Vault {
         let key = self
             .profile
             .folder_key(&self.keys, &self.groups, folder_id)?;
+        let signed = self.next_folder_entry(folder_id, |entry| entry.groups.push(group_id))?;
         let (_, entry) = self.profile.team_group(group_id)?;
         let request = AddFolderGroupRequest {
             group_id,
@@ -1720,10 +1825,15 @@ impl Vault {
             group_generation: entry.generation,
             role,
             generation: self.profile.folders[&folder_id].generation,
+            entry: signed.clone(),
         };
         let name = entry.name.clone();
         let path = format!("/v1/folders/{folder_id}/groups");
         let () = self.call(|client| client.post(&path, &request))??;
+        if let Some(signed) = signed {
+            self.keep_folder_entry(folder_id, signed);
+            self.save()?;
+        }
         Ok(name)
     }
 
@@ -2408,6 +2518,9 @@ impl Vault {
         overview: &Overview,
         details: &Details,
     ) -> Result<ItemId> {
+        if let Some(folder_id) = folder_id {
+            self.folder_ready(folder_id)?;
+        }
         let me = self.profile.user_id;
         let id = ItemId::random();
         let key = ItemKey::generate();
@@ -2728,6 +2841,9 @@ impl Vault {
         let old_key = self.item_key(&current)?;
         let overview = current.open_overview(&old_key)?;
         let details = current.open_details(&old_key)?;
+        if let Some(folder_id) = destination {
+            self.folder_ready(folder_id)?;
+        }
 
         let key = ItemKey::generate();
         let mut keys = ItemKeys::default();
@@ -3197,6 +3313,7 @@ impl Vault {
                 chain,
                 via_group,
                 items,
+                entries,
                 ..
             } => {
                 let record = FolderRecord {
@@ -3205,8 +3322,11 @@ impl Vault {
                     generation,
                     chain,
                     via_group,
+                    entries,
                 };
-                if !self.accepts_folder(folder_id, &record) {
+                if !self.accepts_members(folder_id, &record)
+                    || !self.accepts_folder(folder_id, &record)
+                {
                     summary.rejected += items.len();
                     return;
                 }
@@ -3222,18 +3342,21 @@ impl Vault {
                 generation,
                 chain,
                 via_group,
+                entries,
                 ..
             } => {
                 // Only for a folder already here, and only one of its own keys, not older
-                // than the one here.
+                // than the one here, with members that check out.
                 let record = FolderRecord {
                     info,
                     wrapped_key,
                     generation,
                     chain,
                     via_group,
+                    entries,
                 };
                 if self.profile.folders.contains_key(&folder_id)
+                    && self.accepts_members(folder_id, &record)
                     && self.accepts_folder(folder_id, &record)
                 {
                     self.profile.folders.insert(folder_id, record);
@@ -3502,6 +3625,7 @@ mod tests {
                 })
                 .collect(),
             via_group: None,
+            entries: Vec::new(),
         }
     }
 
@@ -3515,6 +3639,7 @@ mod tests {
             chain: record.chain,
             via_group: None,
             items: Vec::new(),
+            entries: record.entries,
         }
     }
 
@@ -3527,6 +3652,7 @@ mod tests {
             generation: record.generation,
             chain: record.chain,
             via_group: None,
+            entries: record.entries,
         }
     }
 
@@ -3593,6 +3719,63 @@ mod tests {
             loaded.folder_pins.get(&folder_id),
             Some(&first.pin(folder_id))
         );
+    }
+
+    #[test]
+    fn a_folders_members_must_be_signed_by_people_the_owner_approved() {
+        let mut vault = offline_vault();
+        let mut summary = SyncSummary::default();
+        let me = vault.profile.user_id;
+        let mut entry = DirectoryEntry::new(me, "Olivia", vault.keys.public());
+        entry.approve(&vault.keys);
+        vault.profile.set_directory(vec![entry]);
+        let stranger = AccountKeys::derive(&AccountSecret::generate());
+
+        let signed = |vault: &Vault, folder_id, key: &FolderKey, by: UserId, keys: &AccountKeys| {
+            let mut record = folder_record(vault, folder_id, &[key]);
+            let mut entry = FolderEntry::first(folder_id, 0, key, vec![me, by], Vec::new());
+            entry.sign(by, keys);
+            record.entries.push(entry);
+            record
+        };
+        // A folder whose members someone the owner never approved signed for: what a
+        // server, or anyone, can make up. Not taken.
+        let (made_up, key) = (FolderId::random(), FolderKey::generate());
+        let record = signed(&vault, made_up, &key, UserId(9), &stranger);
+        vault.apply_entry(joined(made_up, record), &mut summary);
+        assert!(!vault.profile.folders.contains_key(&made_up));
+
+        // One this account signed for is.
+        let (folder_id, key) = (FolderId::random(), FolderKey::generate());
+        let mut record = folder_record(&vault, folder_id, &[&key]);
+        let mut entry = FolderEntry::first(folder_id, 0, &key, vec![me], Vec::new());
+        let keys = &vault.keys;
+        entry.sign(me, keys);
+        record.entries.push(entry.clone());
+        vault.apply_entry(joined(folder_id, record), &mut summary);
+        assert_eq!(holds(&vault, folder_id, &key), Some(0));
+
+        // Not with entries for another key than the one that came with them.
+        let other = FolderId::random();
+        let mut record = folder_record(&vault, other, &[&FolderKey::generate()]);
+        let mut for_key = FolderEntry::first(other, 0, &key, vec![me], Vec::new());
+        for_key.sign(me, &vault.keys);
+        record.entries.push(for_key);
+        vault.apply_entry(joined(other, record), &mut summary);
+        assert!(!vault.profile.folders.contains_key(&other));
+
+        // And a folder that has had signed members doesn't go back to having none, or to
+        // others than the ones here.
+        let record = folder_record(&vault, folder_id, &[&key]);
+        vault.apply_entry(rekeyed(folder_id, record), &mut summary);
+        assert_eq!(vault.profile.folders[&folder_id].entries, [entry.clone()]);
+        let mut record = folder_record(&vault, folder_id, &[&key]);
+        let mut again = FolderEntry::first(folder_id, 0, &key, vec![me], Vec::new());
+        again.groups.push(GroupId::random());
+        again.sign(me, &vault.keys);
+        record.entries.push(again);
+        vault.apply_entry(rekeyed(folder_id, record), &mut summary);
+        assert_eq!(vault.profile.folders[&folder_id].entries, [entry]);
     }
 
     #[test]

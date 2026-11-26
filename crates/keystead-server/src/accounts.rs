@@ -18,6 +18,7 @@ use keystead_core::api::{
 };
 use keystead_core::directory::{DirectoryEntry, SignedBefore, verify_escrow_consent};
 use keystead_core::encoding::Bytes;
+use keystead_core::folders::FolderEntry;
 use keystead_core::groups::GroupEntry;
 use keystead_core::ids::{DeviceId, UserId};
 use keystead_core::items::EncryptedItem;
@@ -779,12 +780,23 @@ async fn signed_digests(conn: &mut SqliteConnection, user: UserId) -> Result<Vec
     .fetch_all(&mut *conn)
     .await?;
     let groups: Vec<String> = sqlx::query_scalar(
-        "SELECT body FROM group_entries WHERE json_extract(body, '$.signer') = ?",
+        "SELECT body FROM group_entries WHERE json_extract(body, '$.signer') = ?1
+         UNION ALL
+         SELECT body FROM former_group_entries WHERE json_extract(body, '$.signer') = ?1",
     )
     .bind(user.0)
     .fetch_all(&mut *conn)
     .await?;
-    let mut digests = Vec::with_capacity(items.len() + groups.len());
+    let folders: Vec<String> = sqlx::query_scalar(
+        "SELECT body FROM folder_entries WHERE json_extract(body, '$.signer') = ?",
+    )
+    .bind(user.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut digests = Vec::with_capacity(items.len() + groups.len() + folders.len());
+    for body in folders {
+        digests.push(serde_json::from_str::<FolderEntry>(&body)?.signature_digest());
+    }
     for body in items {
         digests.push(serde_json::from_str::<EncryptedItem>(&body)?.signature_digest());
     }

@@ -240,6 +240,21 @@ const MIGRATIONS: &[&str] = &[
     // before get the time they were last saved, which is no earlier.
     "ALTER TABLE items ADD COLUMN password_saved_at INTEGER;
      UPDATE items SET password_saved_at = saved_at;",
+    // 14 (0.15.0): each folder's members, signed by its members, one entry per change.
+    // Clients wrap a folder's key only for who its latest entry names. And the entries of
+    // groups since deleted, which folder entries their members signed are checked against.
+    "CREATE TABLE folder_entries (
+         folder_id TEXT NOT NULL REFERENCES folders (id),
+         revision INTEGER NOT NULL,
+         body TEXT NOT NULL,
+         PRIMARY KEY (folder_id, revision)
+     ) WITHOUT ROWID;
+     CREATE TABLE former_group_entries (
+         group_id TEXT NOT NULL,
+         revision INTEGER NOT NULL,
+         body TEXT NOT NULL,
+         PRIMARY KEY (group_id, revision)
+     ) WITHOUT ROWID;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -366,6 +381,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/folders/{folder_id}/rekey", post(vault::rekey))
         .route(
+            "/v1/folders/{folder_id}/entries",
+            put(vault::put_first_folder_entry),
+        )
+        .route(
             "/v1/folders/{folder_id}/escrow",
             put(vault::put_folder_escrow),
         )
@@ -423,6 +442,7 @@ async fn health() -> Json<Health> {
         status: "ok".into(),
         version: keystead_core::VERSION.into(),
         item_format: keystead_core::items::ITEM_FORMAT,
+        membership: 1,
     })
 }
 

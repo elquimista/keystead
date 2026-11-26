@@ -15,7 +15,9 @@ use keystead_core::api::{
     RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest, Session, SetupRequest,
     SignInRequest, SyncEntry, SyncPage, UpdateGroupRequest, ViaGroup,
 };
+use keystead_core::api::{FolderEntryRequest, Health};
 use keystead_core::directory::DirectoryEntry;
+use keystead_core::folders::FolderEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{
@@ -313,6 +315,7 @@ async fn create_folder(server: &Server, owner: &Person, name: &str) -> (FolderId
     let folder_id = FolderId::random();
     let key = FolderKey::generate();
     let request = CreateFolderRequest {
+        entry: None,
         folder_id,
         info: FolderInfo { name: name.into() }
             .seal(folder_id, &key)
@@ -440,6 +443,7 @@ async fn invite_share_sync_and_conflict_end_to_end() {
             &format!("/v1/folders/{folder_id}/members"),
             alice.token(),
             json(&AddMemberRequest {
+                entry: None,
                 user_id: bob.user_id,
                 wrapped_key: bob_keys.wrap_folder_key(&key, folder_id).unwrap(),
                 role: Role::Edit,
@@ -645,6 +649,7 @@ async fn access_rules_are_enforced() {
             &format!("/v1/folders/{folder_id}/members"),
             alice.token(),
             json(&AddMemberRequest {
+                entry: None,
                 user_id: bob.user_id,
                 wrapped_key: bob.keys.public().wrap_folder_key(&key, folder_id).unwrap(),
                 role: Role::Edit,
@@ -960,6 +965,7 @@ async fn an_item_in_a_folder_can_be_shared_with_someone_outside_it() {
             &format!("/v1/folders/{folder_id}/members"),
             alice.token(),
             json(&AddMemberRequest {
+                entry: None,
                 user_id: bob.user_id,
                 wrapped_key: bob
                     .keys
@@ -1295,7 +1301,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }
@@ -1315,6 +1321,7 @@ async fn add_to_folder(
         Method::POST,
         &format!("/v1/folders/{folder_id}/members"),
         json(&AddMemberRequest {
+            entry: None,
             user_id: person.user_id,
             wrapped_key: person
                 .keys
@@ -1506,6 +1513,7 @@ async fn removing_someone_from_a_folder_ends_their_access_and_changes_its_key() 
     };
     let rekey = |generation, people: &[&Person]| {
         json(&RekeyRequest {
+            entry: None,
             generation,
             wrapped_keys: wrapped(people),
             group_keys: Vec::new(),
@@ -1764,6 +1772,7 @@ async fn groups_share_folders_and_logins_and_lose_access_when_someone_leaves() {
     let (status, body) = alice.put(&server, &item, None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let share = AddFolderGroupRequest {
+        entry: None,
         group_id,
         wrapped_key: group_keys
             .public()
@@ -1880,6 +1889,7 @@ async fn groups_share_folders_and_logins_and_lose_access_when_someone_leaves() {
     // Only managers add people. Carol, added later, gets what the group already had.
     let carol_before = carol.sync(&server, 0, 100).await.cursor;
     let add = AddGroupMemberRequest {
+        entry: None,
         user_id: carol.user_id,
         generation: 1,
         wrapped_secret: carol
@@ -1981,6 +1991,7 @@ async fn groups_share_folders_and_logins_and_lose_access_when_someone_leaves() {
     assert!(page.rekey_needed.is_empty());
     let new_folder_key = FolderKey::generate();
     let folder_rekey = |group_generation: u32, keys: &GroupKeys| RekeyRequest {
+        entry: None,
         generation: 1,
         wrapped_keys: vec![MemberKey {
             user_id: alice.user_id,
@@ -2392,6 +2403,7 @@ async fn a_group_that_manages_keeps_viewers_as_viewers_when_a_manager_is_removed
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let share = AddFolderGroupRequest {
+        entry: None,
         group_id,
         wrapped_key: group_keys
             .public()
@@ -2426,4 +2438,222 @@ async fn a_group_that_manages_keeps_viewers_as_viewers_when_a_manager_is_removed
         folder_members(&server, &alice, folder_id).await,
         [(carol.user_id, Role::View)]
     );
+}
+
+/// Shares a folder as `add_to_folder` does, with the folder's next signed entry.
+async fn add_with_entry(
+    server: &Server,
+    by: &Person,
+    folder: (FolderId, &FolderKey),
+    person: &Person,
+    entry: Option<&FolderEntry>,
+) -> (StatusCode, Value) {
+    let (folder_id, key) = folder;
+    by.call(
+        server,
+        Method::POST,
+        &format!("/v1/folders/{folder_id}/members"),
+        json(&AddMemberRequest {
+            entry: entry.cloned(),
+            user_id: person.user_id,
+            wrapped_key: person
+                .keys
+                .public()
+                .wrap_folder_key(key, folder_id)
+                .unwrap(),
+            role: Role::Edit,
+            generation: 0,
+        }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_folders_members_are_signed_once_it_has_a_first_entry() {
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    let (_, body) = server.call(Method::GET, "/v1/health", None, None).await;
+    assert_eq!(decode::<Health>(body).membership, 1);
+
+    // A folder as apps before 0.15.0 make and share it: no entries.
+    let (folder_id, key) = create_folder(&server, &alice, "Old").await;
+    let (status, _) = add_with_entry(&server, &alice, (folder_id, &key), &bob, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let first_by = |who: &Person, members: Vec<UserId>| {
+        let mut entry = FolderEntry::first(folder_id, 0, &key, members, Vec::new());
+        entry.sign(who.user_id, &who.keys);
+        entry
+    };
+    let path = format!("/v1/folders/{folder_id}/entries");
+    let put = |who: &Person, entry: &FolderEntry| {
+        let request = json(&FolderEntryRequest {
+            entry: entry.clone(),
+        });
+        let (path, token) = (path.clone(), who.token().map(str::to_owned));
+        let server = &server;
+        async move {
+            server
+                .call(Method::PUT, &path, token.as_deref(), request)
+                .await
+                .0
+        }
+    };
+    // An entry can't come with a change before the folder has a first one.
+    let everyone = vec![alice.user_id, bob.user_id];
+    let early = first_by(&alice, vec![alice.user_id, bob.user_id, carol.user_id]);
+    let (status, _) =
+        add_with_entry(&server, &alice, (folder_id, &key), &carol, Some(&early)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // Its first entry is a manager's, naming exactly who's in it now.
+    assert_eq!(
+        put(&alice, &first_by(&alice, vec![alice.user_id])).await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        put(&bob, &first_by(&bob, everyone.clone())).await,
+        StatusCode::FORBIDDEN
+    );
+    let first = first_by(&alice, everyone.clone());
+    assert_eq!(put(&alice, &first).await, StatusCode::NO_CONTENT);
+    assert_eq!(put(&alice, &first).await, StatusCode::CONFLICT);
+
+    // From then on a change comes with the next entry, saying just that change.
+    let (status, _) = add_with_entry(&server, &alice, (folder_id, &key), &carol, None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let next_by = |who: &Person, change: &dyn Fn(&mut FolderEntry)| {
+        let mut entry = first.next();
+        change(&mut entry);
+        entry.sign(who.user_id, &who.keys);
+        entry
+    };
+    let unchanged = next_by(&alice, &|_| {});
+    let (status, _) =
+        add_with_entry(&server, &alice, (folder_id, &key), &carol, Some(&unchanged)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let signed_by_bob = next_by(&bob, &|entry| entry.members.push(carol.user_id));
+    let (status, _) = add_with_entry(
+        &server,
+        &alice,
+        (folder_id, &key),
+        &carol,
+        Some(&signed_by_bob),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let second = next_by(&alice, &|entry| entry.members.push(carol.user_id));
+    let (status, body) =
+        add_with_entry(&server, &alice, (folder_id, &key), &carol, Some(&second)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Everyone in the folder gets the entries with it.
+    let (status, body) = bob
+        .call(
+            &server,
+            Method::GET,
+            &format!("/v1/folders/{folder_id}/members"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        decode::<Members>(body).entries,
+        [first.clone(), second.clone()]
+    );
+    let page = carol.sync(&server, 0, 100).await;
+    assert!(page.entries.iter().any(|entry| matches!(
+        entry,
+        SyncEntry::Joined { entries, .. } if *entries == [first.clone(), second.clone()]
+    )));
+}
+
+#[tokio::test]
+async fn a_groups_members_are_signed_once_an_entry_names_them() {
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    // A group as apps before 0.15.0 make it: its entry doesn't name its members.
+    let group_id = GroupId::random();
+    let secret = GroupSecret::generate();
+    let group_keys = GroupKeys::derive(&secret);
+    let mut first = GroupEntry::first(group_id, "Ops", &group_keys, vec![alice.user_id]);
+    first.sign(alice.user_id, &alice.keys);
+    let request = CreateGroupRequest {
+        entry: first.clone(),
+        members: vec![group_copy(&alice, &secret, group_id, 1)],
+    };
+    let (status, body) = server
+        .call(Method::POST, "/v1/groups", alice.token(), json(&request))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let add = |person: &Person, entry: Option<&GroupEntry>| {
+        let request = json(&AddGroupMemberRequest {
+            entry: entry.cloned(),
+            user_id: person.user_id,
+            generation: 1,
+            wrapped_secret: person
+                .keys
+                .public()
+                .wrap_group_secret(&secret, group_id, 1)
+                .unwrap(),
+        });
+        let (path, token) = (
+            format!("/v1/groups/{group_id}/members"),
+            alice.token().map(str::to_owned),
+        );
+        let server = &server;
+        async move {
+            server
+                .call(Method::POST, &path, token.as_deref(), request)
+                .await
+                .0
+        }
+    };
+    assert_eq!(add(&bob, None).await, StatusCode::NO_CONTENT);
+
+    // The first entry to name them names exactly who's in it now.
+    let update = |entry: &GroupEntry| {
+        let request = json(&UpdateGroupRequest {
+            entry: entry.clone(),
+        });
+        let (path, token) = (
+            format!("/v1/groups/{group_id}"),
+            alice.token().map(str::to_owned),
+        );
+        let server = &server;
+        async move {
+            server
+                .call(Method::PUT, &path, token.as_deref(), request)
+                .await
+                .0
+        }
+    };
+    let by_alice = |mut entry: GroupEntry| {
+        entry.sign(alice.user_id, &alice.keys);
+        entry
+    };
+    let short = by_alice(first.next().with_members(vec![alice.user_id]));
+    assert_eq!(update(&short).await, StatusCode::CONFLICT);
+    let named = by_alice(first.next().with_members(vec![alice.user_id, bob.user_id]));
+    assert_eq!(update(&named).await, StatusCode::NO_CONTENT);
+
+    // From then on someone new comes with the next entry, naming them too.
+    assert_eq!(add(&carol, None).await, StatusCode::CONFLICT);
+    let same = by_alice(named.next());
+    assert_eq!(add(&carol, Some(&same)).await, StatusCode::CONFLICT);
+    let with_carol =
+        by_alice(
+            named
+                .next()
+                .with_members(vec![alice.user_id, bob.user_id, carol.user_id]),
+        );
+    assert_eq!(add(&carol, Some(&with_carol)).await, StatusCode::NO_CONTENT);
+    // A change that isn't to its members keeps them, and can't stop naming them.
+    let mut renamed = with_carol.next();
+    renamed.name = "Operations".into();
+    renamed.members = None;
+    assert_eq!(
+        update(&by_alice(renamed.clone())).await,
+        StatusCode::CONFLICT
+    );
+    renamed.members = with_carol.members.clone();
+    assert_eq!(update(&by_alice(renamed)).await, StatusCode::NO_CONTENT);
 }

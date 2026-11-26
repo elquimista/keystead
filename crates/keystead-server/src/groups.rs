@@ -56,7 +56,15 @@ pub(crate) async fn create_group(
             "whoever makes a group is its first member".into(),
         ));
     }
-    check_entry(&mut tx, &entry, None, auth.user_id, &members).await?;
+    check_entry(
+        &mut tx,
+        &entry,
+        None,
+        auth.user_id,
+        &members,
+        Signed::Current,
+    )
+    .await?;
     for &user in &members {
         require_shareable(&mut tx, user).await?;
     }
@@ -82,7 +90,10 @@ pub(crate) async fn groups(
 ) -> Result<Json<Groups>, ApiError> {
     let mut conn = state.readers.acquire().await?;
     if !is_approved(&mut conn, auth.user_id).await? {
-        return Ok(Json(Groups { groups: Vec::new() }));
+        return Ok(Json(Groups {
+            groups: Vec::new(),
+            former: Vec::new(),
+        }));
     }
     let rows: Vec<(String, bool)> =
         sqlx::query_as("SELECT id, needs_rekey FROM team_groups ORDER BY rowid")
@@ -97,7 +108,24 @@ pub(crate) async fn groups(
             needs_rekey,
         });
     }
-    Ok(Json(Groups { groups }))
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT group_id, body FROM former_group_entries ORDER BY group_id, revision",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut former: Vec<Vec<GroupEntry>> = Vec::new();
+    let mut last = None;
+    for (group_id, body) in rows {
+        if last.as_ref() != Some(&group_id) {
+            former.push(Vec::new());
+            last = Some(group_id);
+        }
+        former
+            .last_mut()
+            .expect("pushed above")
+            .push(serde_json::from_str(&body)?);
+    }
+    Ok(Json(Groups { groups, former }))
 }
 
 /// `POST /v1/groups/{group_id}/members`: a manager in the group adds someone, with the
@@ -127,6 +155,40 @@ pub(crate) async fn add_group_member(
         return Err(ApiError::Conflict(
             "the group's key changed; sync and try again".into(),
         ));
+    }
+    // Once the group's members are signed, a new one comes with the next entry, naming
+    // them; before that, with none.
+    match (&latest.members, &request.entry) {
+        (None, None) => {}
+        (Some(_), None) => {
+            return Err(ApiError::Conflict(
+                "this group's members are signed, and this change isn't; update Keystead".into(),
+            ));
+        }
+        (_, Some(entry)) => {
+            if entry.group_id != group_id
+                || entry.generation != latest.generation
+                || entry.encryption != latest.encryption
+                || entry.name != latest.name
+                || entry.managers != latest.managers
+            {
+                return Err(ApiError::BadRequest(
+                    "adding someone changes only who is in the group".into(),
+                ));
+            }
+            let mut after: HashSet<UserId> = members.iter().copied().collect();
+            after.insert(request.user_id);
+            check_entry(
+                &mut tx,
+                entry,
+                Some(&latest),
+                auth.user_id,
+                &after,
+                Signed::With(request.user_id),
+            )
+            .await?;
+            insert_entry(&mut tx, entry).await?;
+        }
     }
     let member = GroupMemberKey {
         user_id: request.user_id,
@@ -206,7 +268,15 @@ pub(crate) async fn update_group(
         ));
     }
     let members: HashSet<UserId> = members.into_iter().collect();
-    check_entry(&mut tx, &entry, Some(&latest), auth.user_id, &members).await?;
+    check_entry(
+        &mut tx,
+        &entry,
+        Some(&latest),
+        auth.user_id,
+        &members,
+        Signed::Kept,
+    )
+    .await?;
     insert_entry(&mut tx, &entry).await?;
     for member in members {
         log(&mut tx, member, group_id, true).await?;
@@ -252,6 +322,15 @@ pub(crate) async fn delete_group(
                 })?;
         }
     }
+    // Its signed entries stay on record: folder entries its members signed are checked
+    // against them for as long as those folders last.
+    sqlx::query(
+        "INSERT INTO former_group_entries (group_id, revision, body)
+         SELECT group_id, revision, body FROM group_entries WHERE group_id = ?",
+    )
+    .bind(group_id.to_string())
+    .execute(&mut *tx)
+    .await?;
     for table in [
         "folder_groups",
         "item_groups",
@@ -314,7 +393,15 @@ pub(crate) async fn rekey_group(
             "the group's members changed; sync and try again".into(),
         ));
     }
-    check_entry(&mut tx, &entry, Some(&latest), auth.user_id, &members).await?;
+    check_entry(
+        &mut tx,
+        &entry,
+        Some(&latest),
+        auth.user_id,
+        &members,
+        Signed::Current,
+    )
+    .await?;
 
     sqlx::query("INSERT INTO group_keys (group_id, generation, previous) VALUES (?, ?, ?)")
         .bind(group_id.to_string())
@@ -413,14 +500,56 @@ pub(crate) async fn restore_group_secret(
 
 /// Checks a new revision as apps will: its number, who signed it and that the signature
 /// verifies, its name, and that its managers are all in the group.
+/// `members` is who's in the group once the change is made. `signed` is who the entry
+/// must name as its members: exactly them for a new group, a new key or the first time
+/// they're signed, and whoever the entry before names otherwise, as people are only
+/// dropped from the signed list with a new key.
 async fn check_entry(
     conn: &mut SqliteConnection,
     entry: &GroupEntry,
     previous: Option<&GroupEntry>,
     signer: UserId,
     members: &HashSet<UserId>,
+    signed: Signed,
 ) -> Result<(), ApiError> {
     check_name(&entry.name)?;
+    let before: Option<HashSet<UserId>> = previous
+        .and_then(|previous| previous.members.as_ref())
+        .map(|members| members.iter().copied().collect());
+    let expected = match (signed, before) {
+        (Signed::Kept, Some(before)) => Some(before),
+        (Signed::With(user), Some(mut before)) => {
+            before.insert(user);
+            Some(before)
+        }
+        // Not signed before: this entry may start, naming everyone.
+        (Signed::Current | Signed::Kept, _) if entry.members.is_some() => Some(members.clone()),
+        (Signed::Current, Some(_)) => Some(members.clone()),
+        (Signed::With(_), None) if entry.members.is_some() => {
+            return Err(ApiError::Conflict(
+                "nobody has signed for this group's members yet; sync and try again".into(),
+            ));
+        }
+        _ => None,
+    };
+    let named: Option<HashSet<UserId>> = entry
+        .members
+        .as_ref()
+        .map(|members| members.iter().copied().collect());
+    if named != expected {
+        return Err(ApiError::Conflict(if named.is_none() {
+            "this group's members are signed, and this change isn't; update Keystead".into()
+        } else {
+            "the group's members changed; sync and try again".into()
+        }));
+    }
+    if entry
+        .members
+        .as_ref()
+        .is_some_and(|members| !members.is_sorted_by(|a, b| a < b))
+    {
+        return Err(ApiError::BadRequest("members must be sorted".into()));
+    }
     let expected = previous.map_or(1, |previous| previous.revision + 1);
     if entry.revision != expected {
         return Err(ApiError::Conflict(format!(
@@ -452,6 +581,16 @@ async fn check_entry(
     entry
         .verify(&keys)
         .map_err(|_| ApiError::BadRequest("group entry signature does not verify".into()))
+}
+
+/// Who a group's entry must name as members; see [`check_entry`].
+enum Signed {
+    /// Exactly who's in the group once the change is made.
+    Current,
+    /// Whoever the entry before names.
+    Kept,
+    /// Whoever the entry before names, and this person.
+    With(UserId),
 }
 
 fn member_set(members: &[GroupMemberKey]) -> Result<HashSet<UserId>, ApiError> {

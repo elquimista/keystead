@@ -6,8 +6,8 @@
 //! copy, and adding someone to the group is one copy of its secret.
 //!
 //! Whoever shares with a group needs its real public key: a server that swapped in its own
-//! could read whatever was shared. So a group's public facts (its name, current key and
-//! managers) form a signed entry with numbered revisions. The team owner signs the first;
+//! could read whatever was shared. So a group's public facts (its name, current key,
+//! managers and members) form a signed entry with numbered revisions. The team owner signs the first;
 //! each later one is signed by the owner or by a manager named in the revision before it.
 //! Apps check every revision before using the key.
 //!
@@ -40,6 +40,11 @@ pub struct GroupEntry {
     pub encryption: Key32,
     /// Who adds and removes members, besides the owner. Sorted.
     pub managers: Vec<UserId>,
+    /// Who is in the group, sorted: whom its secret is wrapped for when it gets a new one,
+    /// or when someone who recovered needs it again. `None` in entries from before 0.15.0,
+    /// which left that to the server; once an entry has it, every later one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<UserId>>,
     pub signer: UserId,
     pub signature: Bytes,
 }
@@ -54,12 +59,28 @@ impl GroupEntry {
             generation: 1,
             encryption: keys.public(),
             managers,
+            members: None,
             signer: UserId(0),
             signature: Bytes::default(),
         };
         entry.managers.sort();
         entry.managers.dedup();
         entry
+    }
+
+    /// With who is in the group, for this entry to sign.
+    pub fn with_members(mut self, mut members: Vec<UserId>) -> Self {
+        members.sort();
+        members.dedup();
+        self.members = Some(members);
+        self
+    }
+
+    /// Whether the group's signed members include `user`; false where they aren't signed.
+    pub fn has_member(&self, user: UserId) -> bool {
+        self.members
+            .as_ref()
+            .is_some_and(|members| members.contains(&user))
     }
 
     /// The next revision, unsigned, to change and then sign.
@@ -84,6 +105,10 @@ impl GroupEntry {
     pub fn sign(&mut self, signer: UserId, keys: &AccountKeys) {
         self.managers.sort();
         self.managers.dedup();
+        if let Some(members) = &mut self.members {
+            members.sort();
+            members.dedup();
+        }
         self.signer = signer;
         self.signature = keys.sign(&self.signed_message());
     }
@@ -114,9 +139,20 @@ impl GroupEntry {
             (self.managers.len() as u32).to_be_bytes().to_vec(),
         ];
         parts.extend(self.managers.iter().map(|user| user.to_be_bytes().to_vec()));
+        // An entry with members signs them, under its own domain: one from before, which
+        // has none, signs as it always did.
+        if let Some(members) = &self.members {
+            parts.push((members.len() as u32).to_be_bytes().to_vec());
+            parts.extend(members.iter().map(|user| user.to_be_bytes().to_vec()));
+        }
         parts.push(self.signer.to_be_bytes().to_vec());
         let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-        transcript("keystead/group-entry/v1", &parts)
+        let domain = if self.members.is_some() {
+            "keystead/group-entry/v2"
+        } else {
+            "keystead/group-entry/v1"
+        };
+        transcript(domain, &parts)
     }
 }
 
@@ -152,6 +188,11 @@ pub fn verify_entries_with(
         if !entry.managers.is_sorted_by(|a, b| a < b) {
             return bad("the managers aren't in order");
         }
+        if let Some(members) = &entry.members
+            && !members.is_sorted_by(|a, b| a < b)
+        {
+            return bad("the members aren't in order");
+        }
         match previous {
             None => {
                 if entry.revision != 1 || entry.generation != 1 || entry.signer != owner {
@@ -170,6 +211,22 @@ pub fn verify_entries_with(
                 let next_key = entry.generation == previous.generation + 1;
                 if !same_key && !next_key {
                     return bad("the group's key changed out of order");
+                }
+                // Once the members are signed they stay signed. With the same key people
+                // are only added: whoever holds the secret keeps it. A new key is for
+                // those who stay, and nobody new.
+                if let Some(before) = &previous.members {
+                    let Some(now) = &entry.members else {
+                        return bad("the group's members are no longer signed");
+                    };
+                    let (part, whole) = if same_key {
+                        (before, now)
+                    } else {
+                        (now, before)
+                    };
+                    if !part.iter().all(|user| whole.contains(user)) {
+                        return bad("the group's members changed out of order");
+                    }
                 }
             }
         }
@@ -333,6 +390,54 @@ mod tests {
                 .unwrap_group_secret(&wrapped, GroupId::random(), 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn signed_members_grow_with_the_same_key_and_shrink_with_a_new_one() {
+        let (owner, ana, bob, mallory) = (person(1), person(2), person(3), person(4));
+        let keys_of = directory(&[&owner, &ana, &bob, &mallory]);
+        let group = GroupId::random();
+        let keys = GroupKeys::derive(&GroupSecret::generate());
+        let check = |entries: &[GroupEntry]| verify_entries(entries, owner.id, &keys_of).is_ok();
+
+        // A group from before its members were signed; then an entry that names them.
+        let mut first = GroupEntry::first(group, "Engineering", &keys, vec![ana.id]);
+        first.sign(owner.id, &owner.keys);
+        assert!(!first.has_member(ana.id));
+        let mut named = first.next().with_members(vec![bob.id, ana.id]);
+        named.sign(ana.id, &ana.keys);
+        assert_eq!(named.members, Some(vec![ana.id, bob.id]));
+        assert!(named.has_member(bob.id) && !named.has_member(mallory.id));
+        assert!(check(&[first.clone(), named.clone()]));
+
+        // The members are part of what's signed.
+        let mut altered = named.clone();
+        altered.members = Some(vec![ana.id, bob.id, mallory.id]);
+        assert!(!check(&[first.clone(), altered]));
+        // Once signed they stay signed.
+        let mut unsigned = named.next();
+        unsigned.members = None;
+        unsigned.sign(ana.id, &ana.keys);
+        assert!(!check(&[first.clone(), named.clone(), unsigned]));
+
+        // With the same key people are added, not dropped.
+        let mut dropped = named.next().with_members(vec![ana.id]);
+        dropped.sign(ana.id, &ana.keys);
+        assert!(!check(&[first.clone(), named.clone(), dropped]));
+        let mut added = named.next().with_members(vec![ana.id, bob.id, mallory.id]);
+        added.sign(ana.id, &ana.keys);
+        assert!(check(&[first.clone(), named.clone(), added]));
+
+        // A new key is for those who stay, and nobody new.
+        let new_keys = GroupKeys::derive(&GroupSecret::generate());
+        let mut rekeyed = named.next_generation(&new_keys).with_members(vec![ana.id]);
+        rekeyed.sign(ana.id, &ana.keys);
+        assert!(check(&[first.clone(), named.clone(), rekeyed]));
+        let mut sneaked = named
+            .next_generation(&new_keys)
+            .with_members(vec![ana.id, mallory.id]);
+        sneaked.sign(ana.id, &ana.keys);
+        assert!(!check(&[first, named, sneaked]));
     }
 
     #[test]

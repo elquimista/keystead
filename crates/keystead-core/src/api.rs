@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::directory::{DirectoryEntry, SignedBefore};
 use crate::encoding::{Bytes, Key32};
+use crate::folders::FolderEntry;
 use crate::groups::GroupEntry;
 use crate::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use crate::items::{EncryptedItem, Sealed};
@@ -58,6 +59,10 @@ pub struct Health {
     /// and only store format 1.
     #[serde(default = "item_format_1")]
     pub item_format: u8,
+    /// 1 if the server keeps folders' and groups' signed members (0.15.0 and later); 0,
+    /// or left out, if it only keeps its own lists.
+    #[serde(default)]
+    pub membership: u8,
 }
 
 fn item_format_1() -> u8 {
@@ -346,6 +351,9 @@ pub struct CreateFolderRequest {
     pub info: Sealed,
     /// The folder key, wrapped for the creator.
     pub wrapped_key: WrappedKey,
+    /// The folder's first signed entry: the creator alone (0.15.0 and later).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<FolderEntry>,
 }
 
 /// `POST /v1/folders/{folder_id}/members` (managers).
@@ -359,6 +367,10 @@ pub struct AddMemberRequest {
     /// The generation of the folder key that was wrapped; it must still be the current one.
     #[serde(default)]
     pub generation: u32,
+    /// The folder's next signed entry, with the new member in it: needed once the folder
+    /// has entries (0.15.0 and later).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<FolderEntry>,
 }
 
 /// Someone who can open a folder or a login, and their role.
@@ -382,6 +394,17 @@ pub struct Members {
     /// Groups it's shared with. Servers before 0.4.0 don't have groups.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<GroupShare>,
+    /// A folder's signed entries, oldest first (0.15.0 and later); none for an item, or a
+    /// folder nobody has signed for yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<FolderEntry>,
+}
+
+/// `PUT /v1/folders/{folder_id}/entries` (managers): the first signed entry of a folder
+/// from before 0.15.0, naming exactly who it's shared with now.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FolderEntryRequest {
+    pub entry: FolderEntry,
 }
 
 /// `PUT /v1/folders/{folder_id}/members/{user_id}` and
@@ -430,6 +453,10 @@ pub struct RekeyRequest {
     pub previous: Sealed,
     /// The folder's info, sealed with the new key.
     pub info: Sealed,
+    /// The folder's next signed entry, for the new key and exactly who gets it: needed
+    /// once the folder has entries (0.15.0 and later).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<FolderEntry>,
 }
 
 /// `PUT /v1/items/{item_id}`: saves a new version. `base_version` is the version the
@@ -581,6 +608,10 @@ pub struct AddFolderGroupRequest {
     pub role: Role,
     /// The generation of the folder key that was wrapped.
     pub generation: u32,
+    /// The folder's next signed entry, with the group in it: needed once the folder has
+    /// entries (0.15.0 and later).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<FolderEntry>,
 }
 
 /// A group's secret wrapped for one of its members.
@@ -602,6 +633,10 @@ pub struct CreateGroupRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Groups {
     pub groups: Vec<GroupInfo>,
+    /// The signed entries of groups since deleted (0.15.0 and later): folder entries
+    /// their members signed are still checked against them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former: Vec<Vec<GroupEntry>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -621,6 +656,10 @@ pub struct AddGroupMemberRequest {
     pub user_id: UserId,
     pub generation: u32,
     pub wrapped_secret: WrappedKey,
+    /// The group's next signed entry, with the new member in it: needed once the group's
+    /// members are signed (0.15.0 and later).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<GroupEntry>,
 }
 
 /// `PUT /v1/groups/{group_id}` (owner and managers): the next revision of the group's
@@ -732,6 +771,9 @@ pub enum SyncEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via_group: Option<ViaGroup>,
         items: Vec<EncryptedItem>,
+        /// The folder's signed entries, oldest first (0.15.0 and later).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entries: Vec<FolderEntry>,
     },
     /// The user lost access to a folder; drop its local copy.
     Left { seq: i64, folder_id: FolderId },
@@ -746,6 +788,9 @@ pub enum SyncEntry {
         chain: Vec<KeyLink>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via_group: Option<ViaGroup>,
+        /// The folder's signed entries, oldest first (0.15.0 and later).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entries: Vec<FolderEntry>,
     },
     /// The user lost direct access to a login; drop it unless a folder still gives it. With
     /// `moved`, it went to a folder they can't open (or out of folders), so drop it even
