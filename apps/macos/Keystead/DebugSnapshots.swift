@@ -30,6 +30,7 @@ enum DebugSnapshots {
                 // The owner's only device: the strongest warning.
                 ("2c-sign-out", { model.sheet = .signOut }),
                 ("2d-closed", { model.sheet = nil }),
+                ("2e-no-groups", { model.section = .groups }),
             ]
         } else {
             steps += [

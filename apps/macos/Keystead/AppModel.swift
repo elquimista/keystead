@@ -931,6 +931,8 @@ final class AppModel {
                 message = nil
             }
         } catch {
+            // Locked meanwhile, as to sign in again: the lock screen says why.
+            guard phase == .unlocked else { return }
             message = "Couldn't sync (\(describe(error))). Showing the copy on this Mac."
         }
         await reloadLocal()
@@ -1862,9 +1864,9 @@ extension AppModel {
     }
 
     /// Locked to sign in again, with a server too old to renew sessions: the longest note.
-    /// The failed sync's message stays hidden behind it.
+    /// A message from before stays hidden behind it.
     func showDemoLockedToSignIn() {
-        message = "Couldn't sync (Keystead locked to sign in to your team's server again)."
+        message = "Couldn't sync (couldn't reach the server). Showing the copy on this Mac."
         lockNote = Self.signInAgainNote(serverRenews: false)
         phase = .locked
     }

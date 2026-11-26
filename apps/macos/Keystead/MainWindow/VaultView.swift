@@ -1110,17 +1110,19 @@ private struct PeopleList: View {
                 }
                 .padding(.vertical, 3)
             }
+        }
+        // Over the list, like an empty login list's: a bottom inset with wrapping text
+        // breaks the split view's layout, blanking the sidebar too.
+        .overlay {
             if model.isOwner && model.users.count <= 1 {
-                // An ordinary row, not a bottom inset: wrapping text in a List's inset
-                // breaks the split view's layout, blanking the sidebar too.
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("It's just you so far. Invite your team; they'll show up here once "
-                        + "they've joined, ready for you to approve.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                ContentUnavailableView {
+                    Label("Just you so far", systemImage: "person.2")
+                } description: {
+                    Text("Invite your team; they'll show up here once they've joined, ready "
+                        + "for you to approve.")
+                } actions: {
                     Button("Invite Someone…") { model.sheet = .invite }
                 }
-                .padding(.vertical, 8)
             }
         }
         .navigationTitle("People")
@@ -1438,21 +1440,23 @@ private struct GroupList: View {
                 }
                 .padding(.vertical, 3)
             }
+        }
+        // Over the list, as in People.
+        .overlay {
             if model.groups.isEmpty {
-                // An ordinary row, not a bottom inset, as in People.
-                VStack(alignment: .leading, spacing: 8) {
+                ContentUnavailableView {
+                    Label("No groups yet", systemImage: "person.3")
+                } description: {
                     Text(model.isOwner
                         ? "Make a group for a team or a role, like Engineering or Support, then "
                             + "share folders and logins with everyone in it at once. People added "
                             + "to the group later get them too."
-                        : "No groups yet. The owner makes them.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                        : "The owner makes them.")
+                } actions: {
                     if model.isOwner {
                         Button("New Group…") { model.sheet = .newGroup }
                     }
                 }
-                .padding(.vertical, 8)
             }
         }
         .navigationTitle("Groups")

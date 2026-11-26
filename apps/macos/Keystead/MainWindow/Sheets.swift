@@ -125,14 +125,12 @@ private struct LineRow: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
             CommandText(text: line)
-            Button {
+            // A standard text button, like every other button in a form: a small one keeps
+            // the form's full-size text, which crowds it.
+            Button(copied ? "Copied" : "Copy") {
                 copy()
                 copied = true
-            } label: {
-                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                    .contentTransition(.symbolEffect(.replace))
             }
-            .controlSize(.small)
             .help("Copy the line")
         }
         .task(id: copied) {
@@ -728,7 +726,6 @@ private struct HistorySheet: View {
                         .help("Copy this version's password (cleared after 30 seconds)")
                         Spacer(minLength: 8)
                         Button("Bring Back…") { restoring = entry }
-                            .controlSize(.small)
                     }
                     .padding(.top, 6)
                 }
@@ -1852,7 +1849,6 @@ private struct PeopleWithAccess: View {
                             .foregroundStyle(.secondary)
                         if person.isMe && canLeave {
                             Button(removeTitle(person)) { run(person) { try await remove(person) } }
-                                .controlSize(.small)
                         }
                     }
                 }
