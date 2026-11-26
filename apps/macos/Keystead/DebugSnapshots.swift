@@ -215,6 +215,16 @@ enum DebugSnapshots {
             NSApp.windows.first { $0.isVisible && titles.contains($0.title) }
         }
         var report = ""
+        // Each tab's first showing, clicked as a person would: SwiftUI makes a tab's views
+        // only then, and the window should glide to it all the same.
+        UserDefaults.standard.set(SettingsView.Tab.general.rawValue, forKey: SettingsView.tabKey)
+        menu.performActionForItem(at: index)
+        try? await Task.sleep(for: .seconds(1.5))
+        if let window = settingsWindow() {
+            for title in ["Account", "Updates", "Security"] {
+                report += "first " + (await probeResize(window, clicking: title))
+            }
+        }
         for tab in tabs {
             UserDefaults.standard.set(tab.rawValue, forKey: SettingsView.tabKey)
             if settingsWindow() == nil { menu.performActionForItem(at: index) }

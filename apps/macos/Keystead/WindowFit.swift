@@ -21,9 +21,11 @@ private struct WindowFollowsHeight: ViewModifier {
     /// so windows that size themselves to their content (like the menu bar panel's) stay
     /// put while the window animates, rather than jumping ahead to the new height.
     @State private var settled: CGFloat?
-    /// When the window turned up: changes while it's still appearing, like a sheet whose
-    /// content was already loaded, apply at once rather than animate.
-    @State private var foundAt = ContinuousClock.now
+    /// When the window turned up, if it was appearing then: changes while it's still
+    /// appearing, like a sheet whose content was already loaded, apply at once rather than
+    /// animate. None when this view came into a window already on screen, like a Settings
+    /// tab chosen for the first time, which should glide as it does on later visits.
+    @State private var appearedAt: ContinuousClock.Instant?
     /// Counts resizes, so only the last one to finish sets the resting height.
     @State private var generation = 0
 
@@ -41,12 +43,12 @@ private struct WindowFollowsHeight: ViewModifier {
             }
             // Any height is fine to SwiftUI, so the window's size is ours to animate.
             .frame(minHeight: 0, idealHeight: settled, maxHeight: .infinity, alignment: .top)
-            .background(WindowReader { found in
+            .background(WindowReader { found, wasShowing in
                 // SwiftUI keeps a tab's views while another tab shows and puts them back
                 // in the same window: that's not the window appearing.
                 guard window !== found else { return }
                 window = found
-                foundAt = .now
+                appearedAt = wasShowing ? nil : .now
                 fit()
             })
     }
@@ -66,7 +68,7 @@ private struct WindowFollowsHeight: ViewModifier {
         var frame = window.frame
         frame.origin.y = frame.maxY - target
         frame.size.height = target
-        let appearing = ContinuousClock.now - foundAt < .milliseconds(300)
+        let appearing = appearedAt.map { ContinuousClock.now - $0 < .milliseconds(300) } ?? false
         let animate = window.isVisible && !appearing
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let resize = generation
@@ -90,9 +92,10 @@ private struct NaturalHeight: PreferenceKey {
     }
 }
 
-/// Finds the window a view is in.
+/// Finds the window a view is in, and whether that window was already on screen when the
+/// view came into it.
 private struct WindowReader: NSViewRepresentable {
-    let found: (NSWindow) -> Void
+    let found: (NSWindow, Bool) -> Void
 
     func makeNSView(context: Context) -> ReaderView {
         ReaderView(found: found)
@@ -103,9 +106,9 @@ private struct WindowReader: NSViewRepresentable {
     }
 
     final class ReaderView: NSView {
-        var found: (NSWindow) -> Void
+        var found: (NSWindow, Bool) -> Void
 
-        init(found: @escaping (NSWindow) -> Void) {
+        init(found: @escaping (NSWindow, Bool) -> Void) {
             self.found = found
             super.init(frame: .zero)
         }
@@ -118,8 +121,10 @@ private struct WindowReader: NSViewRepresentable {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             guard let window else { return }
+            // Asked now: by the time the callback runs, a window being opened is showing.
+            let wasShowing = window.isVisible
             // Not during the layout that put this view in the window.
-            DispatchQueue.main.async { [found] in found(window) }
+            DispatchQueue.main.async { [found] in found(window, wasShowing) }
         }
     }
 }
