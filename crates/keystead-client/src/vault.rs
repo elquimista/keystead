@@ -102,6 +102,12 @@ impl SessionTimes {
         }
     }
 
+    /// The server won't renew this session any more (it renews for a while after signing
+    /// in with the key, then wants the key again): use it until it ends, then sign in.
+    fn stop_renewing(&mut self) {
+        self.renew_after = self.valid_until;
+    }
+
     fn step(&self, now: Instant) -> SessionStep {
         if now >= self.valid_until {
             SessionStep::SignIn
@@ -3258,8 +3264,10 @@ impl Vault {
     }
 
     /// Swaps a session half over for a fresh one, without the device key. If that fails,
-    /// the session still works until it ends, and the next request tries again; a server
-    /// too old to renew (404) isn't asked again, and its sessions are signed in afresh.
+    /// the session still works until it ends, and the next request tries again. A server
+    /// too old to renew (404) isn't asked again, and its sessions are signed in afresh; a
+    /// session the server won't renew any more (403, some hours after signing in) is used
+    /// until it ends, then the device signs in with its key.
     fn renew(&mut self) {
         let Some(client) = self.client.as_mut().filter(|_| self.server_renews) else {
             return;
@@ -3270,6 +3278,11 @@ impl Vault {
                 self.session = Some(SessionTimes::new(asked, session.expires_in_seconds));
             }
             Err(Failure::Status { code: 404, .. }) => self.server_renews = false,
+            Err(Failure::Status { code: 403, .. }) => {
+                if let Some(session) = &mut self.session {
+                    session.stop_renewing();
+                }
+            }
             Err(_) => {}
         }
     }
@@ -3363,6 +3376,14 @@ mod tests {
         // Shorter than the margin: signed in afresh each time, never used stale.
         let short = SessionTimes::new(asked, 30);
         assert_eq!(short.step(asked), SessionStep::SignIn);
+
+        // Once the server won't renew it, the session is used to its end.
+        let mut refused = session;
+        refused.stop_renewing();
+        let at = |seconds| refused.step(asked + Duration::from_secs(seconds));
+        assert_eq!(at(450), SessionStep::Use);
+        assert_eq!(at(839), SessionStep::Use);
+        assert_eq!(at(840), SessionStep::SignIn);
     }
 
     #[test]

@@ -35,6 +35,9 @@ use crate::{
 };
 
 const SESSION_LIFETIME: Duration = Duration::from_secs(15 * 60);
+/// How long after signing in with its key a device can keep renewing its session, so a
+/// copied session token can't be kept alive for good.
+const RENEWAL_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(60);
 const MAX_NAME_LENGTH: usize = 100;
 /// How long a line for recovering with the owner's help works.
@@ -45,6 +48,9 @@ pub(crate) struct SessionInfo {
     user_id: UserId,
     device_id: DeviceId,
     expires: Instant,
+    /// When renewing stops working: `RENEWAL_LIMIT` after the device signed in with its
+    /// key, carried over to each renewed session.
+    renewable_until: Instant,
 }
 
 pub(crate) struct PendingChallenge {
@@ -62,6 +68,7 @@ pub(crate) struct PendingRecovery {
 pub(crate) struct Auth {
     pub user_id: UserId,
     pub device_id: DeviceId,
+    pub renewable_until: Instant,
 }
 
 impl FromRequestParts<AppState> for Auth {
@@ -82,6 +89,7 @@ impl FromRequestParts<AppState> for Auth {
             Some(session) if session.expires > Instant::now() => Ok(Self {
                 user_id: session.user_id,
                 device_id: session.device_id,
+                renewable_until: session.renewable_until,
             }),
             _ => Err(ApiError::Unauthorized),
         }
@@ -188,22 +196,29 @@ pub(crate) async fn sign_in(
         request.signature.as_slice(),
     )
     .map_err(|_| ApiError::Unauthorized)?;
+    let renewable_until = Instant::now() + RENEWAL_LIMIT;
     Ok(Json(
-        start_session(&state, user_id, request.device_id).await?,
+        start_session(&state, user_id, request.device_id, renewable_until).await?,
     ))
 }
 
 /// `POST /v1/sign-in/renew`: a fresh session for the device making the request, without
 /// its key. A Mac's key needs Touch ID or the Mac's password for every use, so renewing
 /// this way lets it ask only when it unlocks. The current session still ends when it
-/// would have; signing out or removing the device ends both.
+/// would have; signing out or removing the device ends both. Sessions renew for up to
+/// `RENEWAL_LIMIT` after the device signed in with its key; then it signs in again.
 pub(crate) async fn renew(
     State(state): State<AppState>,
     auth: Auth,
     _body: axum::body::Bytes,
 ) -> Result<Json<Session>, ApiError> {
+    if Instant::now() >= auth.renewable_until {
+        return Err(ApiError::Forbidden(
+            "this session can't be renewed any more; sign in again".into(),
+        ));
+    }
     Ok(Json(
-        start_session(&state, auth.user_id, auth.device_id).await?,
+        start_session(&state, auth.user_id, auth.device_id, auth.renewable_until).await?,
     ))
 }
 
@@ -211,6 +226,7 @@ async fn start_session(
     state: &AppState,
     user_id: UserId,
     device_id: DeviceId,
+    renewable_until: Instant,
 ) -> Result<Session, ApiError> {
     let mut token = [0u8; 32];
     OsRng.fill_bytes(&mut token);
@@ -224,6 +240,7 @@ async fn start_session(
                 user_id,
                 device_id,
                 expires: now + SESSION_LIFETIME,
+                renewable_until,
             },
         );
     }
@@ -1173,4 +1190,91 @@ pub(crate) fn check_name(name: &str) -> Result<(), ApiError> {
 
 pub(crate) fn hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use keystead_core::keys::SoftwareDeviceKey;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn renew(app: &Router, token: &str) -> (StatusCode, Option<Session>) {
+        let request = Request::post("/v1/sign-in/renew")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).ok())
+    }
+
+    fn session<'a>(
+        sessions: &'a mut std::collections::HashMap<[u8; 32], SessionInfo>,
+        token: &str,
+    ) -> &'a mut SessionInfo {
+        let bytes = URL_SAFE_NO_PAD.decode(token).unwrap();
+        sessions.get_mut(&hash(&bytes)).unwrap()
+    }
+
+    /// Each renewed session keeps the limit set when the device signed in with its key,
+    /// so renewing stops then, however often it happened; the session itself still works.
+    #[tokio::test]
+    async fn sessions_renew_only_until_the_limit_set_at_sign_in() {
+        let path = std::env::temp_dir().join(format!(
+            "keystead-renewal-limit-{}.sqlite",
+            std::process::id()
+        ));
+        let state = AppState::open(&path).await.unwrap();
+        let device_id = DeviceId::random();
+        let key = serde_json::to_string(&SoftwareDeviceKey::generate().public()).unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, name, encryption_key, signing_key) VALUES (1, 'Alice', x'', x'')",
+        )
+        .execute(&state.writer)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO devices (id, user_id, public_key) VALUES (?, 1, ?)")
+            .bind(device_id.to_string())
+            .bind(key)
+            .execute(&state.writer)
+            .await
+            .unwrap();
+        let app = crate::router(state.clone());
+
+        let limit = Instant::now() + RENEWAL_LIMIT;
+        let signed_in = start_session(&state, UserId(1), device_id, limit)
+            .await
+            .unwrap();
+        let (status, renewed) = renew(&app, &signed_in.token).await;
+        assert_eq!(status, StatusCode::OK);
+        let renewed = renewed.unwrap();
+        let (status, again) = renew(&app, &renewed.token).await;
+        assert_eq!(status, StatusCode::OK);
+        let again = again.unwrap();
+        {
+            let mut sessions = state.sessions.lock().unwrap();
+            assert_eq!(session(&mut sessions, &again.token).renewable_until, limit);
+            // As if a day had passed since signing in.
+            session(&mut sessions, &again.token).renewable_until = Instant::now();
+        }
+        let (status, _) = renew(&app, &again.token).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let request = Request::get("/v1/devices")
+            .header(AUTHORIZATION, format!("Bearer {}", again.token))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
 }

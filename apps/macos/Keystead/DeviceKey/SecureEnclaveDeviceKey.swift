@@ -106,8 +106,9 @@ enum DeviceAuthentication {
             }
         }
         // macOS may ask again before a later use of a key: signing in afresh when the
-        // server has forgotten the session, as after a restart, or when it's too old to
-        // renew one. Say why instead of "needs to authenticate to continue".
+        // server has forgotten the session (as after a restart), 24 hours after the last
+        // sign-in, or each time with a server too old to renew sessions. Say why instead
+        // of "needs to authenticate to continue".
         context.localizedReason = "sign in to your team's server again"
         return context
     }

@@ -132,8 +132,11 @@ Before a session ends, the device can swap it for a fresh one without its key
 (`POST /v1/sign-in/renew`). A Mac's key needs Touch ID or the Mac's password for every
 use, so renewing lets it ask only when it unlocks. Clients renew once half the session
 has passed, and sign in again only when it has ended or the server has forgotten it
-(after a restart). The old session still ends when it would have. Older servers answer
-404, and the device signs in each time instead.
+(after a restart). The old session still ends when it would have. Sessions renew for up
+to 24 hours after the device signed in with its key, so a copied token can't be kept
+alive for good; after that the server answers 403, and the device uses the session until
+it ends, then signs in with its key. Older servers answer 404, and the device signs in
+each time instead.
 
 An account can have several devices. Each has an optional name, like "Ana's MacBook Pro",
 and the time it was added. A signed-in device can list the account's devices and remove the
