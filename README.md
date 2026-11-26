@@ -361,6 +361,12 @@ deletes it when the job ends. Secrets aren't given to pull requests from forks, 
 who can push to the repository could write a workflow that reads them; moving them into a
 protected environment that only version tags can use would close that.
 
+The workflows run other people's actions with that certificate and the right to publish.
+Each is pinned to an exact commit (`uses: owner/action@<commit> # v1.2.3`), not to a label
+like `@v4` that its owner could move to other code. To update one, change the commit and
+the version in its comment together, after a look at what changed. A release builds the
+Mac app without the build cache, so what's signed comes from the tagged commit alone.
+
 The app still isn't notarized, so macOS asks people to choose **Open Anyway** in System
 Settings › Privacy & Security for each new version, and Apple means Apple Development
 certificates for development rather than for handing apps out. That's fine for a few

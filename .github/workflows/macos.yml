@@ -29,8 +29,11 @@ jobs:
     env:
       APP: build/DerivedData/Build/Products/Release/Keystead.app
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Not for a release: the app that's signed and published is built from the tagged
+      # commit alone, not from anything an earlier run left in the cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: ${{ !inputs.publish }}
       - name: Add the Intel target for a universal build
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build the Rust core
@@ -134,7 +137,7 @@ jobs:
           cat "Keystead-$VERSION.zip.sha256"
       - name: Keep it for the release workflow
         if: inputs.publish
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mac-app
           path: apps/macos/build/publish/
