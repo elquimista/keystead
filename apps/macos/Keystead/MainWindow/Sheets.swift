@@ -1526,13 +1526,13 @@ private struct DeleteLoginSheet: View {
                 ? "everyone it's shared with"
                 : ListFormatter.localizedString(byJoining: others)) + " as well as for you"
         } else if sharedWith.isEmpty {
-            return model.keepsDeleted
+            return model.keepsDeleted == true
                 ? "Only you have this login. Recently Deleted can bring it back for 30 days."
                 : "Only you have this login. Once deleted, it can't be brought back."
         } else {
             whoLoses = "you and for \(people)"
         }
-        return model.keepsDeleted
+        return model.keepsDeleted == true
             ? "It's deleted for \(whoLoses). Recently Deleted can bring it back for 30 days."
             : "It's deleted for \(whoLoses), and can't be brought back."
     }

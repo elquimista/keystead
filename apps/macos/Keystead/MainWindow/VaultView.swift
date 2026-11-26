@@ -100,16 +100,6 @@ struct VaultView: View {
                 model.section = .allLogins
             }
         }
-        .onChange(of: model.hasSharedWithMe) {
-            if !model.hasSharedWithMe && model.section == .sharedWithMe {
-                model.section = .allLogins
-            }
-        }
-        .onChange(of: model.recentlyDeleted.isEmpty) {
-            if model.recentlyDeleted.isEmpty && model.section == .recentlyDeleted {
-                model.section = .allLogins
-            }
-        }
         .onChange(of: model.section) {
             if model.section == .health {
                 Task {
@@ -119,12 +109,6 @@ struct VaultView: View {
                 }
             } else {
                 keepSelectionIfListed()
-            }
-        }
-        .onChange(of: model.toChange.isEmpty) {
-            // The last one was changed or dismissed; the login stays selected.
-            if model.toChange.isEmpty && model.section == .toChange {
-                model.section = .allLogins
             }
         }
     }
@@ -166,23 +150,19 @@ private struct Sidebar: View {
 
     var body: some View {
         List(selection: $selection) {
+            // Every row always, empty or not, so none moves and each keeps its place (and
+            // its ⌘ number); an empty one says so in its list.
             Label("All Logins", systemImage: "key")
                 .tag(AppModel.Section.allLogins)
-            if model.hasSharedWithMe {
-                Label("Shared with Me", systemImage: "shared.with.you")
-                    .tag(AppModel.Section.sharedWithMe)
-            }
-            if !model.toChange.isEmpty {
-                Label("To Change", systemImage: "exclamationmark.triangle")
-                    .badge(model.toChangeCount)
-                    .tag(AppModel.Section.toChange)
-                    .help("Passwords that people who lost access may still know")
-            }
-            if !model.recentlyDeleted.isEmpty {
-                Label("Recently Deleted", systemImage: "trash")
-                    .tag(AppModel.Section.recentlyDeleted)
-                    .help("Logins deleted in the last 30 days, which can be brought back")
-            }
+            Label("Shared with Me", systemImage: "shared.with.you")
+                .tag(AppModel.Section.sharedWithMe)
+            Label("To Change", systemImage: "exclamationmark.triangle")
+                .badge(model.toChangeCount)
+                .tag(AppModel.Section.toChange)
+                .help("Passwords that people who lost access may still know")
+            Label("Recently Deleted", systemImage: "trash")
+                .tag(AppModel.Section.recentlyDeleted)
+                .help("Logins deleted in the last 30 days, which can be brought back")
             Label("Password Health", systemImage: "heart.text.square")
                 .badge(model.health?.logins.count ?? 0)
                 .tag(AppModel.Section.health)
@@ -509,27 +489,38 @@ private struct LoginList: View {
         return parts.joined(separator: " · ")
     }
 
+    /// What Password Health checked, when it found nothing.
+    private static func checked(_ count: UInt32) -> String {
+        switch count {
+        case 0: "You have no logins you can change yet."
+        case 1: "Checked the login you can change: its password isn't weak, reused or old."
+        default:
+            "Checked the \(count) logins you can change: none has a weak, reused or old "
+                + "password."
+        }
+    }
+
     @ViewBuilder
     private var emptyState: some View {
         if !search.trimmed.isEmpty {
             ContentUnavailableView.search(text: search)
+        // Titles short enough for one line in the list's 260 points.
         } else if section == .toChange {
             ContentUnavailableView(
-                "Nothing to change", systemImage: "checkmark.shield",
+                "All clear", systemImage: "checkmark.shield",
                 description: Text("When someone loses access, the passwords they could see show "
                     + "up here."))
         } else if section == .health {
             if let health = model.health {
-                let logins = health.checked == 1 ? "1 login" : "\(health.checked) logins"
                 ContentUnavailableView(
-                    "No weak, reused or old passwords", systemImage: "checkmark.shield",
-                    description: Text("Checked \(logins) you can change."))
+                    "All healthy", systemImage: "checkmark.shield",
+                    description: Text(Self.checked(health.checked)))
             } else {
                 ProgressView("Checking passwords…")
             }
         } else if section == .sharedWithMe {
             ContentUnavailableView(
-                "Nothing shared with you", systemImage: "shared.with.you",
+                "Nothing shared", systemImage: "shared.with.you",
                 description: Text("Logins people share with you one by one show up here."))
         } else if model.items.isEmpty && model.folders.isEmpty && !model.hasSynced {
             // On a new Mac, until the first sync brings them.
@@ -955,9 +946,16 @@ private struct DeletedList: View {
     @Binding var selection: DeletedLogin.ID?
     @State private var confirmingPurgeAll = false
     @State private var busy = false
+    @State private var search = ""
+
+    private var shown: [DeletedLogin] {
+        model.recentlyDeleted.filter {
+            matches(search, $0.name, $0.username, $0.folder ?? "", $0.deletedBy)
+        }
+    }
 
     var body: some View {
-        List(model.recentlyDeleted, selection: $selection) { login in
+        List(shown, selection: $selection) { login in
             HStack(spacing: 10) {
                 LoginTile(name: login.name, url: "", size: 28, muted: true)
                 VStack(alignment: .leading, spacing: 1) {
@@ -973,7 +971,26 @@ private struct DeletedList: View {
             }
             .padding(.vertical, 3)
         }
+        .overlay {
+            if !search.trimmed.isEmpty && shown.isEmpty {
+                ContentUnavailableView.search(text: search)
+            } else if model.recentlyDeleted.isEmpty {
+                if model.keepsDeleted == false {
+                    ContentUnavailableView(
+                        "Server too old", systemImage: "trash",
+                        description: Text("Your server keeps no deleted logins. Once it's on "
+                            + "0.9.0 or later, logins deleted from then on stay here for 30 "
+                            + "days, ready to bring back."))
+                } else {
+                    ContentUnavailableView(
+                        "Nothing deleted", systemImage: "trash",
+                        description: Text("Logins deleted in the last 30 days show up here, "
+                            + "ready to bring back."))
+                }
+            }
+        }
         .navigationTitle("Recently Deleted")
+        .searchable(text: $search, prompt: "Search deleted logins")
         .toolbar {
             ToolbarItem {
                 Button {
@@ -1105,10 +1122,15 @@ private struct DeletedDetail: View {
 private struct PeopleList: View {
     let model: AppModel
     @Binding var selection: User.ID?
+    @State private var search = ""
+
+    private var shown: [User] {
+        model.users.filter { matches(search, $0.name, status(of: $0)) }
+    }
 
     var body: some View {
         List(selection: $selection) {
-            ForEach(model.users) { user in
+            ForEach(shown) { user in
                 HStack(spacing: 10) {
                     Avatar(name: user.name, size: 28)
                         .opacity(user.removed ? 0.5 : 1)
@@ -1126,7 +1148,9 @@ private struct PeopleList: View {
         // Over the list, like an empty login list's: a bottom inset with wrapping text
         // breaks the split view's layout, blanking the sidebar too.
         .overlay {
-            if model.isOwner && model.users.count <= 1 {
+            if !search.trimmed.isEmpty && shown.isEmpty {
+                ContentUnavailableView.search(text: search)
+            } else if model.isOwner && model.users.count <= 1 && search.trimmed.isEmpty {
                 ContentUnavailableView {
                     Label("Just you so far", systemImage: "person.circle")
                 } description: {
@@ -1138,6 +1162,7 @@ private struct PeopleList: View {
             }
         }
         .navigationTitle("People")
+        .searchable(text: $search, prompt: "Search people")
         .toolbar {
             ToolbarItem {
                 Button {
@@ -1435,10 +1460,15 @@ private struct PasswordsToChange: View {
 private struct GroupList: View {
     let model: AppModel
     @Binding var selection: GroupSummary.ID?
+    @State private var search = ""
+
+    private var shown: [GroupSummary] {
+        model.groups.filter { matches(search, $0.name) }
+    }
 
     var body: some View {
         List(selection: $selection) {
-            ForEach(model.groups) { group in
+            ForEach(shown) { group in
                 HStack(spacing: 10) {
                     GroupTile(size: 28)
                     VStack(alignment: .leading, spacing: 1) {
@@ -1455,7 +1485,9 @@ private struct GroupList: View {
         }
         // Over the list, as in People.
         .overlay {
-            if model.groups.isEmpty {
+            if !search.trimmed.isEmpty && shown.isEmpty {
+                ContentUnavailableView.search(text: search)
+            } else if model.groups.isEmpty {
                 ContentUnavailableView {
                     Label("No groups yet", systemImage: "person.2.circle")
                 } description: {
@@ -1472,6 +1504,7 @@ private struct GroupList: View {
             }
         }
         .navigationTitle("Groups")
+        .searchable(text: $search, prompt: "Search groups")
         .toolbar {
             ToolbarItem {
                 Button {
@@ -1793,6 +1826,15 @@ private extension View {
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
             .shadow(radius: 4, y: 1)
             .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+/// Whether any of `fields` contains every word of a search, ignoring case and accents; an
+/// empty search matches everything. For the short lists (people, groups, deleted logins);
+/// logins have their own faster search in `AppModel`.
+func matches(_ search: String, _ fields: String...) -> Bool {
+    search.split(whereSeparator: \.isWhitespace).allSatisfy { word in
+        fields.contains { $0.localizedStandardContains(word) }
     }
 }
 

@@ -12,7 +12,8 @@ account back on a new Mac with a Recovery Kit.
   and their details on the right. Double-click a login (or press Return or ⌘C) to copy its
   password. Each login can be edited (name, username, website, password and notes; notes
   stay hidden until shown, like the password), shared with a person or a group, or
-  deleted for everyone who can open it.
+  deleted for everyone who can open it. The sidebar's rows stay put even when empty, and
+  ⌘1 to ⌘7 go to them in order, from All Logins to Groups. Every list can be searched.
 - **Login menu:** what can be done with the selected login, greyed out when its role
   doesn't allow it: Copy Username (⇧⌘C), Copy One-Time Code (⌥⌘C), Edit… (⌘E), Share… or
   Access…, History… (⌘Y), Move To… and Delete… (also the Delete key; it asks first).
@@ -36,7 +37,7 @@ account back on a new Mac with a Recovery Kit.
   Access… (in its right-click menu or toolbar) lists its members; managers change roles
   and remove people, and anyone can leave. Actions someone's role doesn't allow are
   greyed out. The owner removes someone from the team under People.
-- **Groups** (Team › Groups, ⌘4): the owner makes groups; folders and logins are shared
+- **Groups** (Team › Groups, ⌘7): the owner makes groups; folders and logins are shared
   with a group as with a person, and reach everyone in it, including people added later.
   A group's managers in it add people; the owner and its managers remove people, rename
   it and change its managers. Taking someone out gives the group, and the folders shared
@@ -83,7 +84,8 @@ account back on a new Mac with a Recovery Kit.
   The file is encrypted before it's written, and only you can read it.
 - **Recently Deleted:** a deleted login stays in Recently Deleted (in the sidebar) for 30
   days, for everyone who could edit it, with who deleted it and when. Bring Back returns it
-  to everyone who had it; Delete Now… deletes it for good. Needs a 0.9.0 server.
+  to everyone who had it; Delete Now… deletes it for good, and Delete All… everything
+  there. Needs a 0.9.0 server; with an older one, it says so.
 - **Quick search:** ⇧⌘Space (Settings › General: ⌥⌘K, ⌃⌥⌘K or off) opens a Spotlight-style
   box over any app. Type, pick with the arrows, and Return copies the password (Shift-Return
   the username, Option-Return the one-time code) and closes it, so the app you were in is

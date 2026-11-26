@@ -202,8 +202,8 @@ final class AppModel {
 
     /// Logins deleted in the last 30 days that you can bring back, newest first.
     private(set) var recentlyDeleted: [DeletedLogin] = []
-    /// The server keeps deleted logins for 30 days (0.9.0 and later).
-    private(set) var keepsDeleted = false
+    /// The server keeps deleted logins for 30 days (0.9.0 and later); nil until it's asked.
+    private(set) var keepsDeleted: Bool?
     var selectedDeletedID: DeletedLogin.ID?
     /// This account's devices, this Mac included.
     private(set) var devices: [AccountDevice] = []

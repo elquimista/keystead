@@ -104,6 +104,17 @@ enum DockIcon {
 
 /// Menu commands for the main window.
 private struct AppCommands: Commands {
+    /// The sidebar's rows in its order, for ⌘1 to ⌘7.
+    private static let sidebarRows: [(title: String, section: AppModel.Section)] = [
+        ("All Logins", .allLogins),
+        ("Shared with Me", .sharedWithMe),
+        ("To Change", .toChange),
+        ("Recently Deleted", .recentlyDeleted),
+        ("Password Health", .health),
+        ("People", .people),
+        ("Groups", .groups),
+    ]
+
     let model: AppModel
 
     var body: some Commands {
@@ -124,19 +135,13 @@ private struct AppCommands: Commands {
             Button("Export Logins…") { model.sheet = .exportLogins }
                 .disabled(model.phase != .unlocked)
         }
+        // The sidebar's rows, numbered in its order; folders, which come and go, aren't.
         CommandGroup(before: .sidebar) {
-            Button("All Logins") { model.section = .allLogins }
-                .keyboardShortcut("1")
-                .disabled(model.phase != .unlocked)
-            Button("Shared with Me") { model.section = .sharedWithMe }
-                .keyboardShortcut("2")
-                .disabled(model.phase != .unlocked || !model.hasSharedWithMe)
-            Button("People") { model.section = .people }
-                .keyboardShortcut("3")
-                .disabled(model.phase != .unlocked)
-            Button("Groups") { model.section = .groups }
-                .keyboardShortcut("4")
-                .disabled(model.phase != .unlocked)
+            ForEach(Array(Self.sidebarRows.enumerated()), id: \.offset) { index, row in
+                Button(row.title) { model.section = row.section }
+                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))))
+                    .disabled(model.phase != .unlocked)
+            }
             Divider()
         }
         CommandMenu("Login") {

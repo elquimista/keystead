@@ -31,6 +31,10 @@ enum DebugSnapshots {
                 ("2c-sign-out", { model.sheet = .signOut }),
                 ("2d-closed", { model.sheet = nil }),
                 ("2e-no-groups", { model.section = .groups }),
+                // Every sidebar row stays, empty or not.
+                ("2f-nothing-shared", { model.section = .sharedWithMe }),
+                ("2g-nothing-to-change", { model.section = .toChange }),
+                ("2h-nothing-deleted", { model.section = .recentlyDeleted }),
             ]
         } else {
             steps += [
