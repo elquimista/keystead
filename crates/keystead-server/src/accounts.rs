@@ -14,15 +14,15 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use keystead_core::api::{
     AcceptInviteRequest, ApprovalRequest, ApproveRecoveryRequest, Challenge, ChallengeRequest,
     ClaimRecoveryRequest, DeviceInfo, DeviceList, Directory, Enrolled, EscrowRequest, Invite,
-    InviteRequest, Invites, PendingInvite, RecoverRequest, RecoveryChallenge,
+    InviteRequest, Invites, ManagerlessFolder, PendingInvite, RecoverRequest, RecoveryChallenge,
     RecoveryChallengeRequest, RecoveryClaimed, RecoveryInProgress, RecoveryStarted, RecoveryState,
-    RecoveryTokenRequest, Session, SetupRequest, SignInRequest,
+    RecoveryTokenRequest, Removal, RemoveUserRequest, Role, Session, SetupRequest, SignInRequest,
 };
 use keystead_core::directory::{DirectoryEntry, SignedBefore, verify_escrow_consent};
 use keystead_core::encoding::Bytes;
 use keystead_core::folders::FolderEntry;
 use keystead_core::groups::GroupEntry;
-use keystead_core::ids::{DeviceId, UserId};
+use keystead_core::ids::{DeviceId, FolderId, UserId};
 use keystead_core::items::EncryptedItem;
 use keystead_core::keys::{AccountPublicKeys, DevicePublicKey, recovery_message, sign_in_message};
 use rand::RngCore;
@@ -33,7 +33,10 @@ use sqlx::SqliteConnection;
 use subtle::ConstantTimeEq;
 
 use crate::groups::{is_owner, leave_group, parse_group};
-use crate::vault::{leave, leave_item, parse_folder, recovered};
+use crate::vault::{
+    add_role_entry, folder_entries, folder_members, leave, leave_item, parse_folder, recovered,
+    signed_roles,
+};
 use crate::{
     ApiError, AppState, USER_COLUMNS, UserRow, all_retired, entry_from_row, stored_key, user_entry,
 };
@@ -702,9 +705,79 @@ pub(crate) async fn directory(
 /// with them, and each group and folder they were in is marked for a new key. Their directory entry stays,
 /// marked removed, so what they signed before still verifies.
 pub(crate) async fn remove_user(
+    state: State<AppState>,
+    auth: Auth,
+    path: Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    remove_user_with(state, auth, path, Json(RemoveUserRequest::default())).await
+}
+
+/// `GET /v1/users/{user_id}/removal` (owner only): the folders with signed roles that
+/// removing this person would leave without a manager, for the owner's app to sign
+/// someone else in as one.
+pub(crate) async fn removal(
     State(state): State<AppState>,
     auth: Auth,
     Path(user_id): Path<i64>,
+) -> Result<Json<Removal>, ApiError> {
+    let mut conn = state.readers.acquire().await?;
+    require_owner(&mut conn, auth.user_id).await?;
+    let managed: Vec<String> = sqlx::query_scalar(
+        "SELECT folder_id FROM members WHERE user_id = ? AND role = 'manage' AND NOT pending",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut folders = Vec::new();
+    for folder_id in managed {
+        let Some(promote) = next_manager(&mut conn, &folder_id, UserId(user_id)).await? else {
+            continue;
+        };
+        let folder_id = parse_folder(&folder_id)?;
+        let entries = folder_entries(&mut conn, folder_id).await?;
+        if entries.last().is_some_and(|latest| latest.roles.is_some()) {
+            folders.push(ManagerlessFolder {
+                folder_id,
+                entries,
+                promote,
+            });
+        }
+    }
+    Ok(Json(Removal { folders }))
+}
+
+/// Who would manage a folder if `leaving` were gone and nobody else could: whoever has
+/// been in it longest and can open it. None if someone else or a group manages it, or
+/// nobody else is in it.
+async fn next_manager(
+    conn: &mut SqliteConnection,
+    folder_id: &str,
+    leaving: UserId,
+) -> Result<Option<UserId>, ApiError> {
+    let next: Option<i64> = sqlx::query_scalar(
+        "SELECT user_id FROM members
+         WHERE folder_id = ?1 AND NOT pending AND user_id != ?2
+           AND NOT EXISTS (SELECT 1 FROM members WHERE folder_id = ?1 AND role = 'manage'
+                             AND NOT pending AND user_id != ?2)
+           AND NOT EXISTS (SELECT 1 FROM folder_groups
+                           WHERE folder_id = ?1 AND role = 'manage')
+         ORDER BY joined_seq LIMIT 1",
+    )
+    .bind(folder_id)
+    .bind(leaving.0)
+    .fetch_optional(conn)
+    .await?;
+    Ok(next.map(UserId))
+}
+
+/// `POST /v1/users/{user_id}/removal` (owner only): removes someone like
+/// `DELETE /v1/users/{user_id}`, with the owner's signature under the new manager of each
+/// folder whose roles are signed and that they alone managed.
+pub(crate) async fn remove_user_with(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(user_id): Path<i64>,
+    Json(request): Json<RemoveUserRequest>,
 ) -> Result<StatusCode, ApiError> {
     let user = UserId(user_id);
     let mut tx = state.writer.begin().await?;
@@ -757,9 +830,29 @@ pub(crate) async fn remove_user(
             .fetch_all(&mut *tx)
             .await?;
     for folder_id in folders {
-        leave(&mut tx, user, parse_folder(&folder_id)?).await?;
-        // A folder left without a manager who can open it gets one: whoever has been in it
-        // longest and can open it. A group that manages it is a manager.
+        let folder = parse_folder(&folder_id)?;
+        leave(&mut tx, user, folder).await?;
+        // A folder left without a manager who can open it gets one. Where roles are
+        // signed, the owner signed for who: the server's own choice wouldn't count.
+        if signed_roles(&mut tx, folder).await?
+            && next_manager(&mut tx, &folder_id, user).await?.is_some()
+        {
+            let entry = request
+                .promotions
+                .iter()
+                .find(|entry| entry.folder_id == folder)
+                .ok_or_else(|| {
+                    ApiError::Conflict(
+                        "they're the only manager of a folder whose roles are signed, and \
+                         nobody else was signed in as one. Update Keystead and try again"
+                            .into(),
+                    )
+                })?;
+            promote(&mut tx, folder, auth.user_id, entry).await?;
+            continue;
+        }
+        // Otherwise: whoever has been in it longest and can open it. A group that manages
+        // it is a manager.
         sqlx::query(
             "UPDATE members SET role = 'manage'
              WHERE folder_id = ?1 AND NOT pending
@@ -797,6 +890,45 @@ pub(crate) async fn remove_user(
     tx.commit().await?;
     forget_sessions(&state, user);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Makes the people an entry of the owner's names as managers the managers of a folder
+/// that has none left, and stores the entry. It changes roles only, and only upwards.
+async fn promote(
+    conn: &mut SqliteConnection,
+    folder_id: FolderId,
+    owner: UserId,
+    entry: &FolderEntry,
+) -> Result<(), ApiError> {
+    let listed = folder_members(conn, folder_id).await?;
+    let mut promoted = 0;
+    for member in &listed {
+        match entry.member_role(member.user_id) {
+            Some(role) if role == member.role => {}
+            Some(Role::Manage) => {
+                sqlx::query(
+                    "UPDATE members SET role = 'manage'
+                     WHERE folder_id = ? AND user_id = ? AND NOT pending",
+                )
+                .bind(folder_id.to_string())
+                .bind(member.user_id.0)
+                .execute(&mut *conn)
+                .await?;
+                promoted += 1;
+            }
+            _ => {
+                return Err(ApiError::Conflict(
+                    "the folder's roles changed; sync and try again".into(),
+                ));
+            }
+        }
+    }
+    if promoted == 0 {
+        return Err(ApiError::BadRequest(
+            "the entry makes nobody in the folder a manager".into(),
+        ));
+    }
+    add_role_entry(conn, folder_id, owner, Some(entry)).await
 }
 
 /// Ends a removed person's sessions, and the recovery challenges given out for their

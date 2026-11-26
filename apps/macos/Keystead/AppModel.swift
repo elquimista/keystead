@@ -935,7 +935,8 @@ final class AppModel {
             update(\.users, to: try await perform { try $0.knownUsers() })
             update(\.identity, to: try await perform { try $0.identity() })
             if result.rejected > 0 {
-                message = "Ignored \(result.rejected) item(s) not signed by an approved user."
+                message = "Ignored \(result.rejected) change(s) by someone who isn't approved, or who can "
+                    + "only view the folder."
             } else if let problem = result.rekeyProblems.first {
                 // Copies for someone who recovered say what they are; new keys don't.
                 let what = problem.hasPrefix("couldn't")

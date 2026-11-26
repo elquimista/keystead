@@ -742,7 +742,8 @@ pub fn sync(home: &Path) -> Result<SyncSummary> {
 pub fn warn_rejected(summary: &SyncSummary) {
     if summary.rejected > 0 {
         eprintln!(
-            "warning: ignored {} item(s) not signed by an approved user",
+            "warning: ignored {} change(s) by someone who isn't approved, or who can only \
+             view the folder",
             summary.rejected
         );
     }

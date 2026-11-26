@@ -113,6 +113,7 @@ pub(crate) async fn create_folder(
             generation: 0,
             members: HashSet::from([auth.user_id]),
             groups: HashSet::new(),
+            roles: false,
         };
         add_folder_entry(&mut tx, request.folder_id, auth.user_id, entry, &change).await?;
     }
@@ -211,6 +212,7 @@ pub(crate) async fn set_member_role(
         .bind(folder_id.to_string())
         .execute(&mut *tx)
         .await?;
+    add_role_entry(&mut tx, folder_id, auth.user_id, request.entry.as_ref()).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -693,27 +695,55 @@ pub(crate) async fn put_first_folder_entry(
         Role::Manage,
         "sign for this folder's members",
     )?;
-    if signed_membership(&mut tx, folder_id).await?.is_some() {
-        return Err(ApiError::Conflict(
-            "this folder's members are signed already; sync and try again".into(),
-        ));
-    }
-    let change = Membership {
-        generation: generation(&mut tx, folder_id).await?,
-        members: folder_members(&mut tx, folder_id)
-            .await?
-            .into_iter()
-            .map(|member| member.user_id)
-            .collect(),
-        groups: folder_groups(&mut tx, folder_id)
-            .await?
-            .into_iter()
-            .map(|share| share.group_id)
-            .collect(),
+    let change = match signed_membership(&mut tx, folder_id).await? {
+        // Signed for before 0.17.0: its first entry with roles names the same as the
+        // last without.
+        Some(signed) if !signed.roles && request.entry.roles.is_some() => signed,
+        Some(_) => {
+            return Err(ApiError::Conflict(
+                "this folder's members are signed already; sync and try again".into(),
+            ));
+        }
+        None => Membership {
+            generation: generation(&mut tx, folder_id).await?,
+            members: folder_members(&mut tx, folder_id)
+                .await?
+                .into_iter()
+                .map(|member| member.user_id)
+                .collect(),
+            groups: folder_groups(&mut tx, folder_id)
+                .await?
+                .into_iter()
+                .map(|share| share.group_id)
+                .collect(),
+            roles: false,
+        },
     };
     add_folder_entry(&mut tx, folder_id, auth.user_id, &request.entry, &change).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// After a role changed in a folder: its next entry, which says so. A folder whose roles
+/// are signed needs one; one whose members aren't signed yet can't have one.
+pub(crate) async fn add_role_entry(
+    conn: &mut SqliteConnection,
+    folder_id: FolderId,
+    signer: UserId,
+    entry: Option<&FolderEntry>,
+) -> Result<(), ApiError> {
+    match (signed_membership(conn, folder_id).await?, entry) {
+        (Some(signed), Some(entry)) => {
+            add_folder_entry(conn, folder_id, signer, entry, &signed).await
+        }
+        (Some(signed), None) if signed.roles => Err(ApiError::Conflict(
+            "this folder's roles are signed, and this change isn't; update Keystead".into(),
+        )),
+        (None, Some(_)) => Err(ApiError::Conflict(
+            "nobody has signed for this folder's members yet; sync and try again".into(),
+        )),
+        (_, None) => Ok(()),
+    }
 }
 
 /// Who a folder's next entry must name, and for which key.
@@ -721,11 +751,13 @@ struct Membership {
     generation: u32,
     members: HashSet<UserId>,
     groups: HashSet<GroupId>,
+    /// Whether the latest entry has roles: then the next one must.
+    roles: bool,
 }
 
 /// A folder's entries, oldest first; none for a folder from before 0.15.0 that nobody has
 /// signed for yet.
-async fn folder_entries(
+pub(crate) async fn folder_entries(
     conn: &mut SqliteConnection,
     folder_id: FolderId,
 ) -> Result<Vec<FolderEntry>, ApiError> {
@@ -740,6 +772,16 @@ async fn folder_entries(
         .collect()
 }
 
+/// Whether a folder's roles are signed: its latest entry has them.
+pub(crate) async fn signed_roles(
+    conn: &mut SqliteConnection,
+    folder_id: FolderId,
+) -> Result<bool, ApiError> {
+    Ok(signed_membership(conn, folder_id)
+        .await?
+        .is_some_and(|signed| signed.roles))
+}
+
 /// What a folder's latest entry says, if it has entries.
 async fn signed_membership(
     conn: &mut SqliteConnection,
@@ -750,6 +792,7 @@ async fn signed_membership(
         .pop()
         .map(|latest| Membership {
             generation: latest.generation,
+            roles: latest.roles.is_some(),
             members: latest.members.into_iter().collect(),
             groups: latest.groups.into_iter().collect(),
         }))
@@ -807,6 +850,40 @@ async fn add_folder_entry(
             "the folder's members or key changed; sync and try again".into(),
         ));
     }
+    // Roles, once signed, come with every entry, and say what the server's lists say:
+    // for whoever is still on them. Someone who left stays named until the folder's next
+    // key, with the role they had.
+    if expected.roles && entry.roles.is_none() {
+        return Err(ApiError::Conflict(
+            "this folder's roles are signed, and this change isn't; update Keystead".into(),
+        ));
+    }
+    if entry.roles.is_some() {
+        let before = |role: Option<Role>| role.or(Some(Role::before_roles()));
+        let listed = folder_members(conn, folder_id).await?;
+        let members = entry.members.iter().all(|&user| {
+            let now = listed.iter().find(|member| member.user_id == user);
+            let expected = match now {
+                Some(member) => Some(member.role),
+                None => before(latest.and_then(|latest| latest.member_role(user))),
+            };
+            entry.member_role(user) == expected
+        });
+        let listed = folder_groups(conn, folder_id).await?;
+        let groups = entry.groups.iter().all(|&group| {
+            let now = listed.iter().find(|share| share.group_id == group);
+            let expected = match now {
+                Some(share) => Some(share.role),
+                None => before(latest.and_then(|latest| latest.group_role(group))),
+            };
+            entry.group_role(group) == expected
+        });
+        if !members || !groups {
+            return Err(ApiError::Conflict(
+                "the folder's roles changed; sync and try again".into(),
+            ));
+        }
+    }
     // As clients check it: the caller's place in the folder or one of its groups, the
     // order of the change, and their signature. Earlier entries were checked as they came.
     let named = latest.map_or(&entry.groups, |latest| &latest.groups);
@@ -861,6 +938,7 @@ pub(crate) async fn set_folder_group_role(
         .bind(group_id.to_string())
         .execute(&mut *tx)
         .await?;
+    add_role_entry(&mut tx, folder_id, auth.user_id, request.entry.as_ref()).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2033,7 +2111,9 @@ async fn folder_group_role(
 
 /// What `user` may do with a stored item: the highest of their role in its folder, their
 /// direct role (its owner always manages it), and the roles of their groups it's shared
-/// with.
+/// with. In a folder with signed roles, someone its entries never made more than a viewer
+/// stays one, whatever is shared with them directly: everyone's app would refuse what
+/// they saved.
 async fn item_role(
     conn: &mut SqliteConnection,
     user: UserId,
@@ -2053,7 +2133,22 @@ async fn item_role(
     .bind(item.id.to_string())
     .fetch_all(&mut *conn)
     .await?;
-    Ok(in_folder.max(highest(direct)?))
+    let role = in_folder.max(highest(direct)?);
+    if let (Some(folder_id), true) = (item.folder_id, role > Some(Role::View)) {
+        let entries = folder_entries(conn, folder_id).await?;
+        let signed = entries.last().is_some_and(|latest| latest.roles.is_some());
+        // By the entries that name them; through a group, by the group's role now.
+        let most = entries
+            .iter()
+            .filter(|entry| entry.members.contains(&user))
+            .map(|entry| entry.member_role(user).unwrap_or_else(Role::before_roles))
+            .max()
+            .max(in_folder);
+        if signed && most == Some(Role::View) {
+            return Ok(most);
+        }
+    }
+    Ok(role)
 }
 
 async fn stored_item(

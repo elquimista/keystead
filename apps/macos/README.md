@@ -41,7 +41,10 @@ account back on a new Mac with a Recovery Kit.
 - **Roles and access:** folders and logins are shared to view, edit or manage. A folder's
   Access… (in its right-click menu or toolbar) lists its members; managers change roles
   and remove people, and anyone can leave. Actions someone's role doesn't allow are
-  greyed out. The owner removes someone from the team under People.
+  greyed out. The owner removes someone from the team under People. In a folder, roles
+  are signed by its managers (0.17.0 server): the app goes by that, not by what the
+  server says, so a change by someone who only views a folder is ignored, and the
+  sync says so.
 - **Groups** (Team › Groups, ⌘7): the owner makes groups; folders and logins are shared
   with a group as with a person, and reach everyone in it, including people added later.
   A group's managers in it add people; the owner and its managers remove people, rename

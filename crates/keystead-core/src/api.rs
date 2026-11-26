@@ -59,8 +59,9 @@ pub struct Health {
     /// and only store format 1.
     #[serde(default = "item_format_1")]
     pub item_format: u8,
-    /// 1 if the server keeps folders' and groups' signed members (0.15.0 and later); 0,
-    /// or left out, if it only keeps its own lists.
+    /// 1 if the server keeps folders' and groups' signed members (0.15.0 and later), 2 if
+    /// it keeps folders' signed roles too (0.17.0 and later); 0, or left out, if it only
+    /// keeps its own lists.
     #[serde(default)]
     pub membership: u8,
 }
@@ -422,7 +423,8 @@ pub struct Members {
 }
 
 /// `PUT /v1/folders/{folder_id}/entries` (managers): the first signed entry of a folder
-/// from before 0.15.0, naming exactly who it's shared with now.
+/// from before 0.15.0, naming exactly who it's shared with now; or the first entry with
+/// roles of a folder from before 0.17.0, changing nothing else.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FolderEntryRequest {
     pub entry: FolderEntry,
@@ -433,6 +435,35 @@ pub struct FolderEntryRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoleRequest {
     pub role: Role,
+    /// For a folder: its next signed entry, with the new role (0.17.0 and later). Needed
+    /// once the folder's roles are signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<FolderEntry>,
+}
+
+/// `GET /v1/users/{user_id}/removal` (owner): the folders with signed roles that removing
+/// this person from the team would leave without a manager (0.17.0 and later).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Removal {
+    pub folders: Vec<ManagerlessFolder>,
+}
+
+/// A folder about to lose its only manager, for the owner to sign someone else in.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManagerlessFolder {
+    pub folder_id: FolderId,
+    /// Its signed entries, oldest first.
+    pub entries: Vec<FolderEntry>,
+    /// Whoever has been in it longest, whom the server suggests.
+    pub promote: UserId,
+}
+
+/// `POST /v1/users/{user_id}/removal` (owner): removes someone from the team, like
+/// `DELETE /v1/users/{user_id}`, with the next entry of each folder they alone managed:
+/// its roles, signed by the owner, with a new manager (0.17.0 and later).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RemoveUserRequest {
+    pub promotions: Vec<FolderEntry>,
 }
 
 /// One link of a folder's or group's key chain: the key of `generation - 1`, sealed with

@@ -386,6 +386,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/users/{user_id}/approval", post(accounts::approve))
         .route("/v1/users/{user_id}", delete(accounts::remove_user))
         .route(
+            "/v1/users/{user_id}/removal",
+            get(accounts::removal).post(accounts::remove_user_with),
+        )
+        .route(
             "/v1/users/{user_id}/recovery",
             post(accounts::start_recovery)
                 .get(accounts::recovery_in_progress)
@@ -494,7 +498,7 @@ async fn health() -> Json<Health> {
         status: "ok".into(),
         version: keystead_core::VERSION.into(),
         item_format: keystead_core::items::ITEM_FORMAT,
-        membership: 1,
+        membership: 2,
     })
 }
 

@@ -14,8 +14,9 @@ use keystead_core::api::{
     DeviceTransferState, Directory, Enrolled, Exposures, GroupFolderKey, GroupMemberKey,
     GroupRekeyRequest, GroupShare, Groups, Health, Invite, InviteRequest, Invites, ItemHistory,
     JoinDeviceTransferRequest, KeyLink, Member, MemberKey, Members, PendingInvite, PutItemRequest,
-    RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest,
-    SendAccountSecretRequest, SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
+    RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Removal,
+    RemoveUserRequest, Role, RoleRequest, SendAccountSecretRequest, SetupRequest, SyncEntry,
+    SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::folders::FolderEntry;
@@ -548,7 +549,8 @@ pub enum EditOutcome {
 #[derive(Debug, Default)]
 pub struct SyncSummary {
     pub received: usize,
-    /// Items dropped because their author isn't approved or the signature failed.
+    /// Items dropped because their author isn't approved, the signature failed, or the
+    /// folder's signed roles never let the author do more than view.
     pub rejected: usize,
     /// Folders this account manages that got a new key after someone lost access.
     pub rekeyed: usize,
@@ -799,7 +801,11 @@ pub struct Vault {
     /// The server stores this build's item format; checked before the first save.
     server_takes_items: bool,
     /// Whether the server keeps signed members, once asked this session.
-    server_membership: Option<bool>,
+    /// What the server says it keeps signed (see `membership_level`), once asked.
+    server_membership: Option<u8>,
+    /// Whether an author could save into a folder, by its signed roles, while a sync
+    /// applies logins (see `apply_item`).
+    could_save: HashMap<(FolderId, UserId), bool>,
     /// The keys of the groups this account is in, from the profile.
     groups: GroupKeyring,
     /// Login histories fetched this session, by login, newest first; kept encrypted.
@@ -830,6 +836,7 @@ impl Vault {
             server_renews: true,
             server_takes_items: false,
             server_membership: None,
+            could_save: HashMap::new(),
             history: HashMap::new(),
             adding_device: None,
             deleted: HashMap::new(),
@@ -856,6 +863,7 @@ impl Vault {
             server_renews: true,
             server_takes_items: false,
             server_membership: None,
+            could_save: HashMap::new(),
             history: HashMap::new(),
             adding_device: None,
             deleted: HashMap::new(),
@@ -954,6 +962,7 @@ impl Vault {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
         self.profile.set_directory(directory.entries);
         self.fetch_signed_before()?;
+        self.could_save.clear();
         // Servers before 0.4.0 have no groups.
         match self.call(|client| client.get::<Groups>("/v1/groups", &[]))? {
             Ok(groups) => {
@@ -1175,6 +1184,9 @@ impl Vault {
         if self.membership()? {
             let me = self.profile.user_id;
             let mut entry = FolderEntry::first(folder_id, 0, &key, vec![me], Vec::new());
+            if self.signed_roles()? {
+                entry = entry.with_roles(|_| Role::Manage, |_| Role::Manage);
+            }
             entry.sign(me, &self.keys);
             record.entries.push(entry);
         }
@@ -1356,7 +1368,7 @@ impl Vault {
         let key = self
             .profile
             .folder_key(&self.keys, &self.groups, folder_id)?;
-        let entry = self.next_folder_entry(folder_id, |entry| entry.members.push(user))?;
+        let entry = self.next_folder_entry(folder_id, |entry| entry.put_member(user, role))?;
         let request = AddMemberRequest {
             user_id: user,
             wrapped_key: recipient.wrap_folder_key(&key, folder_id)?,
@@ -1391,7 +1403,16 @@ impl Vault {
     pub fn set_folder_role(&mut self, folder: &str, user: UserId, role: Role) -> Result<()> {
         let folder_id = self.profile.find_folder(&self.keys, &self.groups, folder)?;
         let path = format!("/v1/folders/{folder_id}/members/{user}");
-        let () = self.call(|client| client.put(&path, &RoleRequest { role }))??;
+        let entry = self.next_role_entry(folder_id, |entry| entry.put_member(user, role))?;
+        let request = RoleRequest {
+            role,
+            entry: entry.clone(),
+        };
+        let () = self.call(|client| client.put(&path, &request))??;
+        if let Some(entry) = entry {
+            self.keep_folder_entry(folder_id, entry);
+            self.save()?;
+        }
         Ok(())
     }
 
@@ -1450,6 +1471,7 @@ impl Vault {
             let path = format!("/v1/folders/{folder_id}/members");
             self.call(|client| client.get(&path, &[]))??
         };
+        let roles = signs && self.signed_roles()?;
         let record = &self.profile.folders[&folder_id];
         let key = FolderKey::generate();
         let entry = match record.entries.last() {
@@ -1464,9 +1486,17 @@ impl Vault {
                          don't. Don't trust this server"
                     );
                 }
+                // The new key is for who's in the folder now, each with the role they had.
                 let mut entry = latest.next_generation(&key);
-                entry.members = users;
-                entry.groups = groups;
+                if latest.roles.is_none() && roles {
+                    entry = Self::with_listed_roles(entry, &members);
+                }
+                for &user in latest.members.iter().filter(|user| !users.contains(user)) {
+                    entry.drop_member(user);
+                }
+                for &group in latest.groups.iter().filter(|group| !groups.contains(group)) {
+                    entry.drop_group(group);
+                }
                 entry.sign(self.profile.user_id, &self.keys);
                 Some(entry)
             }
@@ -1549,10 +1579,65 @@ impl Vault {
     /// lose every folder and login. Folders they were in get new keys from their managers.
     pub fn remove_user(&mut self, user: UserId) -> Result<String> {
         let name = self.profile.user_name(user);
-        let path = format!("/v1/users/{user}");
-        let () = self.call(|client| client.delete(&path))??;
+        match self.new_managers_after(user)? {
+            Some(promotions) => {
+                let path = format!("/v1/users/{user}/removal");
+                let request = RemoveUserRequest { promotions };
+                let () = self.call(|client| client.post(&path, &request))??;
+            }
+            None => {
+                let path = format!("/v1/users/{user}");
+                let () = self.call(|client| client.delete(&path))??;
+            }
+        }
         self.sync()?;
         Ok(name)
+    }
+
+    /// For the folders with signed roles that `user` alone manages: the next entry of
+    /// each, signed by this account as the team's owner, making someone else in it a
+    /// manager. The server's own choice wouldn't count with anyone's app. None with a
+    /// server that doesn't keep roles, which picks a manager itself.
+    ///
+    /// The server says which folders and suggests whom, whoever has been in each longest.
+    /// This signs only where the folder's own entries check out and make `user` one of
+    /// its managers, and only for someone they name who is still on the team.
+    fn new_managers_after(&mut self, user: UserId) -> Result<Option<Vec<FolderEntry>>> {
+        if !self.signed_roles()? {
+            return Ok(None);
+        }
+        self.sync()?;
+        let path = format!("/v1/users/{user}/removal");
+        let removal: Removal = self.call(|client| client.get(&path, &[]))??;
+        let me = self.profile.user_id;
+        let mut promotions = Vec::new();
+        for folder in removal.folders {
+            let latest = self
+                .profile
+                .verify_folder(&folder.entries, 0)
+                .ok()
+                .filter(|latest| latest.folder_id == folder.folder_id)
+                .context("a folder's signed members don't check out. Don't trust this server")?;
+            let manages = latest
+                .role_of(user, |group, who| self.profile.in_group(group, who, true))
+                == Some(Role::Manage);
+            let promote = folder.promote;
+            if !manages
+                || promote == user
+                || !latest.members.contains(&promote)
+                || self.profile.trusted_keys(promote).is_none()
+            {
+                bail!(
+                    "the server asked for a new manager of a folder that doesn't need one, \
+                     or for someone who isn't in it. Don't trust this server"
+                );
+            }
+            let mut entry = latest.next();
+            entry.put_member(promote, Role::Manage);
+            entry.sign(me, &self.keys);
+            promotions.push(entry);
+        }
+        Ok(Some(promotions))
     }
 
     // MARK: Groups
@@ -1859,7 +1944,7 @@ impl Vault {
         let key = self
             .profile
             .folder_key(&self.keys, &self.groups, folder_id)?;
-        let signed = self.next_folder_entry(folder_id, |entry| entry.groups.push(group_id))?;
+        let signed = self.next_folder_entry(folder_id, |entry| entry.put_group(group_id, role))?;
         let (_, entry) = self.profile.team_group(group_id)?;
         let request = AddFolderGroupRequest {
             group_id,
@@ -1884,7 +1969,16 @@ impl Vault {
         let folder_id = self.profile.find_folder(&self.keys, &self.groups, folder)?;
         let group_id = self.profile.find_group(group)?;
         let path = format!("/v1/folders/{folder_id}/groups/{group_id}");
-        let () = self.call(|client| client.put(&path, &RoleRequest { role }))??;
+        let entry = self.next_role_entry(folder_id, |entry| entry.put_group(group_id, role))?;
+        let request = RoleRequest {
+            role,
+            entry: entry.clone(),
+        };
+        let () = self.call(|client| client.put(&path, &request))??;
+        if let Some(entry) = entry {
+            self.keep_folder_entry(folder_id, entry);
+            self.save()?;
+        }
         Ok(())
     }
 
@@ -1972,7 +2066,7 @@ impl Vault {
     pub fn set_item_group_role(&mut self, item_id: ItemId, group: &str, role: Role) -> Result<()> {
         let group_id = self.profile.find_group(group)?;
         let path = format!("/v1/items/{item_id}/groups/{group_id}");
-        let () = self.call(|client| client.put(&path, &RoleRequest { role }))??;
+        let () = self.call(|client| client.put(&path, &RoleRequest { role, entry: None }))??;
         Ok(())
     }
 
@@ -2220,7 +2314,8 @@ impl Vault {
         let mut versions = Vec::new();
         for saved in list.versions {
             let item = saved.item;
-            let signed = self.profile.signed_by_author(&item);
+            let signed =
+                self.profile.signed_by_author(&item) && self.profile.author_could_save(&item);
             if item.id != item_id || item.deleted || item.format > ITEM_FORMAT || !signed {
                 continue;
             }
@@ -2265,7 +2360,9 @@ impl Vault {
             Err(Failure::Status { code: 404, .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let signed = |item: &EncryptedItem| self.profile.signed_by_author(item);
+        let signed = |item: &EncryptedItem| {
+            self.profile.signed_by_author(item) && self.profile.author_could_save(item)
+        };
         let mut rows = Vec::new();
         let mut kept = HashMap::new();
         for entry in list.items {
@@ -3017,7 +3114,7 @@ impl Vault {
     /// Changes the role of someone a login is shared with directly (managers only).
     pub fn set_item_role(&mut self, item_id: ItemId, user: UserId, role: Role) -> Result<()> {
         let path = format!("/v1/items/{item_id}/people/{user}");
-        let () = self.call(|client| client.put(&path, &RoleRequest { role }))??;
+        let () = self.call(|client| client.put(&path, &RoleRequest { role, entry: None }))??;
         Ok(())
     }
 
@@ -3219,6 +3316,12 @@ impl Vault {
                     if !self.profile.signed_by_author(&theirs) {
                         bail!("the newer version isn't signed by an approved author");
                     }
+                    if !self.profile.author_could_save(&theirs) {
+                        bail!(
+                            "the newer version is by someone who can only view this \
+                             folder. Don't trust this server"
+                        );
+                    }
                     let outcome = EditOutcome::Conflict {
                         version: theirs.version,
                         author: self.profile.user_name(theirs.author),
@@ -3296,6 +3399,18 @@ impl Vault {
                 .folder_keys(&self.keys, &self.groups, folder_id)?,
             _ => Vec::new(),
         };
+        // In a folder with signed roles, only the copy sealed with the folder's key
+        // counts: whoever saved it then knew a key of the folder's, or kept the copy of
+        // someone who did. A copy made out to this account alone could be anyone's.
+        if item
+            .folder_id
+            .is_some_and(|folder| self.profile.folder_has_roles(folder))
+        {
+            return folder_keys
+                .iter()
+                .find_map(|key| item.unlock_in_folder(key).ok())
+                .context("this login doesn't open with its folder's key");
+        }
         unlock_with(
             item,
             &folder_keys,
@@ -3345,6 +3460,10 @@ impl Vault {
     }
 
     fn apply_entry(&mut self, entry: SyncEntry, summary: &mut SyncSummary) {
+        if !matches!(entry, SyncEntry::Item { .. }) {
+            // Folders, groups or their members may change with it.
+            self.could_save.clear();
+        }
         match entry {
             SyncEntry::Item { item, .. } => self.apply_item(item, summary),
             SyncEntry::Joined {
@@ -3373,6 +3492,7 @@ impl Vault {
                     return;
                 }
                 self.profile.folders.insert(folder_id, record);
+                self.could_save.clear();
                 for item in items {
                     self.apply_item(item, summary);
                 }
@@ -3456,6 +3576,22 @@ impl Vault {
         if !self.profile.signed_by_author(&item) {
             summary.rejected += 1;
             return;
+        }
+        // By the folder's signed roles, not the server's word: worked out once for each
+        // author and folder while nothing but logins arrives.
+        if let Some(folder_id) = item.folder_id {
+            let could = match self.could_save.get(&(folder_id, item.author)) {
+                Some(&could) => could,
+                None => {
+                    let could = self.profile.author_could_save(&item);
+                    self.could_save.insert((folder_id, item.author), could);
+                    could
+                }
+            };
+            if !could {
+                summary.rejected += 1;
+                return;
+            }
         }
         if self
             .profile

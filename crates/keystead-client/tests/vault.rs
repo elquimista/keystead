@@ -2930,3 +2930,283 @@ fn a_folder_of_any_size_reaches_someone_it_is_shared_with_and_a_new_device() {
     bob_new.sync().unwrap();
     all_there(&bob_new);
 }
+
+/// What each person may do in a folder is signed with who is in it, and apps go by that:
+/// a server that says a viewer may edit, or manage, changes nothing for anyone else.
+#[test]
+fn a_lying_server_cant_raise_someones_role_in_a_folder() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        alice_secret,
+        ..
+    } = team(&fixture);
+    let (alice_id, bob_id) = (alice.whoami().user_id, bob.whoami().user_id);
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+    let folder = alice.create_folder("Production").unwrap();
+    let (overview, details) = login("AWS root", "first");
+    let aws = alice.add(Some("Production"), overview, details).unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::View)
+        .unwrap();
+    let password = |vault: &Vault| vault.open_item(aws).unwrap().1.password.clone();
+
+    // The folder's entries say who may do what, from the first.
+    let entries = alice.profile().folders[&folder].entries.clone();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].member_role(alice_id), Some(Role::Manage));
+    assert_eq!(entries[1].member_role(bob_id), Some(Role::View));
+    bob.sync().unwrap();
+    assert_eq!(bob.profile().folders[&folder].entries, entries);
+
+    // The server says Bob may edit, and takes his change. Alice's app doesn't: her copy
+    // stays, and the sync says something was turned away.
+    fixture.lie(&format!(
+        "UPDATE members SET role = 'edit' WHERE user_id = {bob_id}"
+    ));
+    bob.sync().unwrap();
+    assert!(matches!(
+        bob.edit(aws, "changed by a viewer").unwrap(),
+        EditOutcome::Saved { .. }
+    ));
+    let summary = alice.sync().unwrap();
+    assert_eq!(summary.rejected, 1);
+    assert_eq!(password(&alice), "first");
+    // Nor does a new device of hers, which has only the folder's entries to go by: it
+    // has no earlier copy, so the login is missing there, not replaced.
+    let mut alice_new = recover(
+        &fixture.profile("alice-new"),
+        new_device(
+            &fixture,
+            &alice_secret,
+            DeviceId::random(),
+            Arc::new(SoftwareDeviceKey::generate()),
+        ),
+        None,
+    )
+    .unwrap();
+    assert_eq!(alice_new.sync().unwrap().rejected, 1);
+    assert!(alice_new.list().unwrap().is_empty());
+
+    // The server says Bob manages it. His own app won't sign for a folder whose entries
+    // don't make him a manager, and if it did nobody's app would take it.
+    fixture.lie(&format!(
+        "UPDATE members SET role = 'manage' WHERE user_id = {bob_id}"
+    ));
+    bob.sync().unwrap();
+    let error = bob
+        .share_folder("Production", carol_identity.user_id, Role::Edit)
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("signed roles don't make you one of its managers"),
+        "{error:#}"
+    );
+
+    // Alice makes him an editor, which she signs. Now his changes count, for her and for
+    // Carol, who joins afterwards and has seen none of this.
+    alice
+        .set_folder_role("Production", bob_id, Role::Edit)
+        .unwrap();
+    let latest = alice.profile().folders[&folder]
+        .entries
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(latest.member_role(bob_id), Some(Role::Edit));
+    assert_eq!(latest.signer, alice_id);
+    bob.sync().unwrap();
+    assert!(matches!(
+        bob.edit(aws, "changed by an editor").unwrap(),
+        EditOutcome::Saved { .. }
+    ));
+    assert_eq!(alice.sync().unwrap().rejected, 0);
+    assert_eq!(password(&alice), "changed by an editor");
+    alice
+        .share_folder("Production", carol_identity.user_id, Role::View)
+        .unwrap();
+    assert_eq!(carol.sync().unwrap().rejected, 0);
+    assert_eq!(password(&carol), "changed by an editor");
+}
+
+/// Removing a folder's only manager from the team: the owner, who isn't in the folder,
+/// signs someone else in as its manager, and that person gives it a new key.
+#[test]
+fn the_owner_signs_in_a_new_manager_when_a_folders_only_one_leaves_the_team() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        mut carol,
+        ..
+    } = team(&fixture);
+    let (alice_id, bob_id) = (alice.whoami().user_id, bob.whoami().user_id);
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+    let carol_id = carol_identity.user_id;
+
+    let folder = bob.create_folder("Billing").unwrap();
+    let (overview, details) = login("Bank", "pw");
+    bob.add(Some("Billing"), overview, details).unwrap();
+    bob.share_folder("Billing", carol_id, Role::View).unwrap();
+    carol.sync().unwrap();
+
+    alice.remove_user(bob_id).unwrap();
+    let summary = carol.sync().unwrap();
+    assert_eq!(summary.rekey_problems, Vec::<String>::new());
+    assert_eq!(summary.rekeyed, 1);
+    let record = &carol.profile().folders[&folder];
+    assert_eq!(record.generation, 1);
+    let [.., promoted, rekeyed] = &record.entries[..] else {
+        panic!("{:?}", record.entries);
+    };
+    // The owner changed Carol's role and nothing else; Carol dropped Bob with the new key.
+    assert_eq!(promoted.signer, alice_id);
+    assert_eq!(promoted.members, [bob_id, carol_id]);
+    assert_eq!(promoted.member_role(carol_id), Some(Role::Manage));
+    assert_eq!(rekeyed.signer, carol_id);
+    assert_eq!(rekeyed.members, [carol_id]);
+    let members = carol.folder_members("Billing").unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].role, Role::Manage);
+    // And she can use it as its manager.
+    let (overview, details) = login("Card", "pw");
+    carol.add(Some("Billing"), overview, details).unwrap();
+    carol.share_folder("Billing", alice_id, Role::View).unwrap();
+    alice.sync().unwrap();
+    assert_eq!(alice.list().unwrap().len(), 2);
+}
+
+/// A folder signed for by apps before 0.17.0 has entries without roles. A manager's next
+/// sync signs its roles, as the server lists them, changing nothing else.
+#[test]
+fn a_folder_from_before_signed_roles_gets_them_from_a_manager() {
+    use keystead_core::folders::FolderEntry;
+
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        alice_secret,
+        ..
+    } = team(&fixture);
+    let (alice_id, bob_id) = (alice.whoami().user_id, bob.whoami().user_id);
+    let folder = alice.create_folder("Old").unwrap();
+    alice.share_folder("Old", bob_id, Role::View).unwrap();
+    // As a 0.16.0 app left it: one entry, naming both, without roles.
+    let keys = AccountKeys::derive(&alice_secret);
+    let key = alice
+        .profile()
+        .folder_key(&keys, &GroupKeyring::default(), folder)
+        .unwrap();
+    let mut old = FolderEntry::first(folder, 0, &key, vec![alice_id, bob_id], Vec::new());
+    old.sign(alice_id, &keys);
+    fixture.lie(&format!(
+        "DELETE FROM folder_entries;
+         INSERT INTO folder_entries (folder_id, revision, body) VALUES ('{folder}', 1, '{}')",
+        serde_json::to_string(&old).unwrap()
+    ));
+    let fresh = |secret, name: &'static str| NewAccount {
+        server: &fixture.url,
+        secret,
+        device_id: DeviceId::random(),
+        device_name: name,
+        signer: Arc::new(SoftwareDeviceKey::generate()),
+    };
+    drop(alice);
+    let mut alice = recover(
+        &fixture.profile("alice-2"),
+        fresh(&alice_secret, "Alice's new Mac"),
+        None,
+    )
+    .unwrap();
+
+    alice.sync().unwrap();
+    let entries = alice.profile().folders[&folder].entries.clone();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0], old);
+    assert_eq!(entries[1].members, old.members);
+    assert_eq!(entries[1].member_role(alice_id), Some(Role::Manage));
+    assert_eq!(entries[1].member_role(bob_id), Some(Role::View));
+    alice.sync().unwrap();
+    assert_eq!(alice.profile().folders[&folder].entries, entries);
+    // From then on changes carry roles.
+    alice.set_folder_role("Old", bob_id, Role::Edit).unwrap();
+    let latest = alice.profile().folders[&folder]
+        .entries
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (latest.revision, latest.member_role(bob_id)),
+        (3, Some(Role::Edit))
+    );
+    let _ = bob.sync();
+}
+
+/// In a folder with signed roles a login opens with the folder's key only. Someone outside
+/// the folder, with a server that puts their version in a login's place, can make out a
+/// copy of their own key to each member, but not one sealed with the folder's key: the
+/// login then doesn't open, instead of showing what they wrote.
+#[test]
+fn a_login_put_in_a_folder_by_someone_outside_it_doesnt_open() {
+    use keystead_core::items::{ItemKeys, PersonKey};
+    use keystead_core::keys::ItemKey;
+
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        bob,
+        alice_secret,
+        bob_secret,
+        ..
+    } = team(&fixture);
+    let (alice_id, bob_id) = (alice.whoami().user_id, bob.whoami().user_id);
+    let folder = alice.create_folder("Production").unwrap();
+    let (overview, details) = login("AWS root", "real");
+    let aws = alice.add(Some("Production"), overview, details).unwrap();
+    let current = alice.profile().items[&aws].clone();
+
+    // Bob, approved but not in the folder, writes version 2 under a key of his own. He
+    // keeps the folder's copy of the real key, which he can't open or replace, and makes
+    // out his key to Alice directly.
+    let key = ItemKey::generate();
+    let alice_public = AccountKeys::derive(&alice_secret).public();
+    let keys = ItemKeys {
+        folder: current.keys.folder.clone(),
+        people: vec![PersonKey {
+            user_id: alice_id,
+            wrapped_key: alice_public.wrap_item_key(&key, aws).unwrap(),
+        }],
+        ..ItemKeys::default()
+    };
+    let at = ItemVersion {
+        id: aws,
+        folder_id: Some(folder),
+        owner: None,
+        version: 2,
+        author: bob_id,
+    };
+    let (overview, details) = login("AWS root", "bob's");
+    let bob_keys = AccountKeys::derive(&bob_secret);
+    let forged = EncryptedItem::seal(at, &key, keys, &bob_keys, &overview, &details).unwrap();
+    fixture.lie(&format!(
+        "UPDATE feed_counter SET last_seq = last_seq + 1;
+         UPDATE items SET version = 2, seq = (SELECT last_seq FROM feed_counter), body = '{}'
+         WHERE id = '{aws}'",
+        serde_json::to_string(&forged).unwrap()
+    ));
+
+    // Her app takes the folder's copy, which holds the real key, and that key doesn't
+    // open what Bob wrote. It never tries the copy made out to her.
+    alice.sync().unwrap();
+    assert_eq!(alice.profile().items[&aws].version, 2);
+    assert!(alice.open_item(aws).is_err());
+}

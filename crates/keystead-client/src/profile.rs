@@ -147,6 +147,9 @@ pub struct Profile {
     /// it stays: a server can't go back to having its own word taken for who they are.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub membership: bool,
+    /// The server keeps folders' signed roles too (0.17.0 and later). Once seen it stays.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_roles: bool,
     /// The signed entries of groups since deleted, from the last sync: folder entries
     /// their members signed are still checked against them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -180,6 +183,7 @@ impl Profile {
             signed_before: Vec::new(),
             folder_pins: BTreeMap::new(),
             membership: false,
+            signed_roles: false,
             former_groups: Vec::new(),
         }
     }
@@ -343,6 +347,42 @@ impl Profile {
         self.signed_by(item.author, &item.signature_digest(), |keys| {
             item.verify(keys).is_ok()
         })
+    }
+
+    /// Whether a version of a login in one of this device's folders could be its author's
+    /// to save, by the folder's signed roles: not if the most they ever were there is a
+    /// viewer. The server's word that they may edit doesn't count against that.
+    ///
+    /// Anyone the folder's entries never named passes: someone the login was shared with
+    /// directly, whose role only the server keeps. So does anyone in an entry from before
+    /// roles were signed, when everyone could do everything.
+    pub fn author_could_save(&self, item: &EncryptedItem) -> bool {
+        let Some(record) = item.folder_id.and_then(|folder| self.folders.get(&folder)) else {
+            return true;
+        };
+        let latest = record.entries.len();
+        let most = record
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                // A group's members now, for the folder's latest entry; anyone it ever
+                // had, for the ones before.
+                entry.role_of(item.author, |group, user| {
+                    self.in_group(group, user, index + 1 == latest)
+                })
+            })
+            .max();
+        most != Some(Role::View)
+    }
+
+    /// Whether this device's folder has signed roles: then its logins open with the
+    /// folder's key and no other copy (see `Vault::item_key`).
+    pub fn folder_has_roles(&self, folder_id: FolderId) -> bool {
+        self.folders
+            .get(&folder_id)
+            .and_then(|record| record.entries.last())
+            .is_some_and(|latest| latest.roles.is_some())
     }
 
     /// Whether `user` signed what `digest` names, `verify` checking the signature against a

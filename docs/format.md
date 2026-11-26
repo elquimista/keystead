@@ -370,8 +370,9 @@ and `keys.folder`. Absent fields are left out.
   An absent copy has empty nonce and ciphertext fields.
 - A deletion is a signed version with `"deleted": true`, empty parts and the same key
   copies, so everyone who could open the item hears about it.
-- Clients must verify the signature against the author's approved directory entry,
-  and that the author could open the item.
+- Clients must verify the signature against the author's approved directory entry. For
+  an item in a folder with signed roles they also check that its author could save it
+  there, and open it only through the folder's copy of its key (see Signed roles).
 - A version must have the shape of its format, and clients and servers refuse one that
   doesn't, whatever its signature: either a folder with the folder's copy or an owner with
   the owner's, each person and each group once and never the owner among the people, and
@@ -582,6 +583,8 @@ codes (400, 401, 403, 404, 409).
 | `POST /v1/users/{id}/approval` | `ApprovalRequest` | 204 | Owner |
 | `GET /v1/directory` | | `Directory` | Members |
 | `DELETE /v1/users/{id}` | | 204 | Owner, for anyone but themselves |
+| `GET /v1/users/{id}/removal` | | `Removal` | Owner (0.17.0) |
+| `POST /v1/users/{id}/removal` | `RemoveUserRequest` | 204 | Owner, for anyone but themselves (0.17.0) |
 | `POST /v1/users/{id}/recovery` | | `RecoveryStarted` | Owner, for anyone approved but themselves |
 | `GET /v1/users/{id}/recovery` | | `RecoveryInProgress` | Owner |
 | `DELETE /v1/users/{id}/recovery` | | 204 | Owner, or the person themselves |
@@ -606,7 +609,7 @@ codes (400, 401, 403, 404, 409).
 | `PUT /v1/folders/{id}/members/{user}/key` | `RestoreFolderKeyRequest` | 204 | Folder members, for someone who recovered; themselves, from escrow |
 | `DELETE /v1/folders/{id}?logins=N` | | 204 | Folder managers |
 | `POST /v1/folders/{id}/rekey` | `RekeyRequest` | 204 | Folder managers |
-| `PUT /v1/folders/{id}/entries` | `FolderEntryRequest` | 204 | Folder managers, once (0.15.0) |
+| `PUT /v1/folders/{id}/entries` | `FolderEntryRequest` | 204 | Folder managers: once for its members (0.15.0), once for its roles (0.17.0) |
 | `POST /v1/folders/{id}/groups` | `AddFolderGroupRequest` | 204 | Folder managers |
 | `PUT /v1/folders/{id}/groups/{group}` | `RoleRequest` | 204 | Folder managers |
 | `DELETE /v1/folders/{id}/groups/{group}` | | 204 | Folder managers |
@@ -700,8 +703,10 @@ anyone or any group. A folder or item shared with
 a group gives the group a role, which is everyone's in it. Someone with access more than
 one way (through a folder, directly, through groups) gets the highest role. A folder
 always keeps at least one manager, a person or a group. Members and shares from before roles existed are managers, since everyone could
-do everything then. Roles are kept and enforced by the server; reading depends only on the
-keys someone holds.
+do everything then. The server keeps and enforces roles; reading depends only on the keys
+someone holds. In a folder, roles are also signed by its managers, and clients go by that
+(0.17.0 and later; see Signed roles). On a single item shared directly they are the
+server's alone.
 
 ### Removing access, and new keys
 
@@ -752,8 +757,10 @@ true`, so what they signed still verifies; nobody can share with them again, and
 account can't be recovered: recovery challenges given out before the removal stop working
 with it. Removing someone already removed answers 404, and removes any device the account
 still has. A folder left without a manager, a person or a group, gets one: whoever has
-been in it longest. An item outside folders left without one is managed by everyone it
-was shared with. Clients drop removed people's copies from items as they save them.
+been in it longest. Where the folder's roles are signed, the owner signs that person in
+(see Signed roles), and a plain `DELETE` answers 409. An item outside folders left
+without one is managed by everyone it was shared with. Clients drop removed people's
+copies from items as they save them.
 
 **History** (0.7.0 and later). When a version replaces another, the server keeps the one
 replaced, as stored, with when it was saved (`saved_at`, seconds since 1970, set by the
@@ -924,16 +931,93 @@ its word. Until then clients open the folder but put nothing new into it, since 
 only its key vouches for could be anyone's. A manager who has the folder only through a
 group signs once the group's own members are signed.
 
-**What this doesn't cover.** Roles stay the server's (anyone a folder names can sign its
-next entry, a viewer too). A removal is the server's word until the folder's next key. A
+**What this doesn't cover.** A removal is the server's word until the folder's next key. A
 device with no history of a folder, such as a new one, checks the entries it's given from
 the first, so a server can still show it an earlier state of the folder as the current
 one. And clients that only ever talk to a server from before 0.15.0 take its lists at its
 word, as before; once a client has seen a server keep signed members, it doesn't go back.
 
+### Signed roles
+
+(0.17.0 and later; `"membership": 2` in `GET /v1/health`.) Before, the entries said who is
+in a folder and the server alone said what each may do. A server that lied could let a
+viewer's changes through to everyone, or let a viewer share the folder. So an entry also
+carries the roles:
+
+```json
+{ "…": "as above", "roles": { "members": ["manage", "view"], "groups": ["edit"] } }
+```
+
+`roles.members` are the roles of `members`, in their order, and `roles.groups` those of
+`groups`. With roles, the signature is over another domain and two more parts, so an
+entry can't pass for one without them and its roles can't be taken off:
+
+```
+transcript("keystead/folder-entry/v2", …the parts above…,
+           each member's role (1 byte each: 1 view, 2 edit, 3 manage), each group's role)
+```
+
+Apps before 0.17.0 can't check such an entry: they keep what they have of the folder and
+take no change to it until they're updated.
+
+Clients check, with the rest:
+
+- An entry with roles has one for each member and each group, and at least one of them
+  is `manage`. Once an entry has roles, every later one does.
+- It is signed by someone the entry before makes a manager: by their own role, or that of
+  a group they're in. The first entry of a folder is signed by someone it makes a manager
+  itself.
+- The team's owner may sign an entry that changes roles and nothing else, whether or not
+  they're in the folder. That is for a folder whose only manager leaves the team.
+- An entry from before roles were signed makes everyone it names a manager, as everyone
+  was. The first entry with roles after such ones is signed by anyone they name.
+
+Every change to a folder then comes with its next entry, roles included, and the server
+checks they say what its own lists say: sharing with a person or a group (their role),
+changing a role (`RoleRequest.entry`, which is new), and a new key (those who stay, as
+they were). A change without roles to a folder that has them is refused (409), as is a
+change of role without an entry.
+
+**Saving.** A client refuses a version of an item in one of its folders if the most its
+author ever was in that folder, by its entries, is a viewer: the version counts as not
+signed. The server refuses such a save too (403), also from someone the item is shared
+with directly to edit: in a folder with signed roles, a viewer of the folder views its
+items. Someone the entries never named passes, as an item in a folder can also be shared
+with someone outside it, whose role only the server keeps. And in a folder with signed
+roles a client opens an item only through the copy of its key sealed with the folder's
+key, never through a copy made out to its own account or a group: whoever wrote a version
+that opens either knew one of the folder's keys or kept a copy sealed by someone who did.
+A version put there by someone outside, under a key of their own, doesn't open.
+
+**Changing things.** A client signs the next entry of a folder only if the latest makes
+its account a manager, whatever the server says.
+
+**Removing a folder's only manager from the team.** The server can't pick the next one:
+its choice wouldn't be signed. `GET /v1/users/{id}/removal` lists the folders with signed
+roles that the person alone manages and others are in, each with its entries and whom the
+server suggests (`promote`: whoever has been in it longest). The owner's client checks
+each folder's entries, that they make the person a manager, and that they name the one
+suggested; it signs the next entry, the same but with that one a manager, and sends them
+with `POST /v1/users/{id}/removal` (`{"promotions": [entry, …]}`). The server makes them
+managers in its lists too, takes only a rise to manager, and refuses the removal (409) if
+one is missing. The new manager then gives the folder its new key.
+
+**Folders from before.** A folder with entries but no roles gets them from one of its
+managers' apps at its next sync: an entry that changes nothing else, with the roles the
+server lists (`PUT /v1/folders/{id}/entries`). That once, the server's list of roles is
+taken at its word. Someone it no longer lists, who stays named until the folder's next
+key, is written down as a manager, like everyone from before roles.
+
+**What this doesn't cover.** Roles on a single item shared directly, and so what someone
+outside a folder may do to an item in it. Someone who could once edit a folder can still
+be passed off as the author of a later version, since nothing signed says when a version
+was written. A new device, which a server can show an earlier state of a folder, can be
+shown one from before its roles were signed. And a group's managers are the server's to
+name: anyone in a group can sign its next entry.
+
 ## Not in this format yet
 
-- Signed roles. Who is in a folder or a group is signed (see Signed members), but their
-  roles are kept and enforced by the server: a server that lied could let someone save
-  who shouldn't, though every version stays signed by its author.
+- Signed roles on single items. In a folder roles are signed (see Signed roles); on an
+  item shared directly, and for a group's managers, they are kept and enforced by the
+  server alone.
 - Groups inside groups (on purpose: no loops, and access stays easy to follow).

@@ -305,6 +305,25 @@ port) back in: it now limits how many requests each client address makes. The se
 itself keeps only a few sessions for each device, and a setup code works for a day, which
 matters only for a server nobody has claimed yet.
 
+**Updating to 0.17.0.** Update the server first, then every app and CLI, soon after: the
+folders' managers and the owner first.
+
+What each person may do in a folder (view, edit, manage) is now signed by its managers,
+like who is in it, and apps go by that instead of the server's word. Nothing needs doing
+by hand: the first time a folder's manager opens a 0.17.0 app, it signs the folder's
+roles as they are. From then on, for that folder:
+
+- An app from before 0.17.0 still opens, adds and changes logins, but can't share the
+  folder, change a role or give it a new key; the server tells it to update.
+- The owner needs 0.17.0 to remove from the team someone who is a folder's only manager:
+  their app signs in whoever has been in the folder longest as its next manager.
+- Someone who only views a folder can't change its logins, even one shared with them
+  directly to edit.
+
+A new device's first sync, and a big folder shared with someone, used to fail once there
+was more than about 10 MB to send. Both now arrive in parts. This needs the server and
+the app on 0.17.0; an app from before still can't take a folder that big.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`

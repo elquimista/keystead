@@ -462,6 +462,20 @@ impl EncryptedItem {
         }
     }
 
+    /// The key that opens this item, from the copy sealed with its folder's key and no
+    /// other: what a member of a folder goes by where the folder's roles are signed.
+    pub fn unlock_in_folder(&self, folder_key: &FolderKey) -> Result<ItemKey, Error> {
+        match (self.format, self.folder_id, &self.keys.folder) {
+            (1, _, _) => Ok(folder_key.format_1_item_key()),
+            (2..=4, Some(folder_id), Some(sealed)) => {
+                let aad = folder_copy_aad(self.id, folder_id);
+                open_key(&folder_key.cipher(), &aad, sealed)
+            }
+            (2..=4, _, _) => Err(Error::Decrypt),
+            (other, _, _) => Err(Error::UnsupportedFormat(other)),
+        }
+    }
+
     /// The key of one of `me`'s own items, from the owner's copy sealed with an earlier
     /// personal key, brought back after a recovery.
     pub fn unlock_as_owner(&self, personal: &PersonalKey, me: UserId) -> Result<ItemKey, Error> {

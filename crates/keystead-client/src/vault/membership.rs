@@ -22,17 +22,49 @@ impl Vault {
     /// Whether the server keeps folders' and groups' signed members (0.15.0 and later).
     /// Once a server has, this device never goes back to taking its word for them.
     pub(super) fn membership(&mut self) -> Result<bool> {
-        if self.profile.membership {
-            return Ok(true);
+        Ok(self.membership_level()? >= 1)
+    }
+
+    /// Whether the server keeps folders' signed roles too (0.17.0 and later). Once a
+    /// server has, this device never goes back to taking its word for them either.
+    pub(super) fn signed_roles(&mut self) -> Result<bool> {
+        Ok(self.membership_level()? >= 2)
+    }
+
+    /// What the server keeps signed: 0 nothing, 1 members, 2 roles too. Asked once per
+    /// run, unless this device already knows it keeps both.
+    fn membership_level(&mut self) -> Result<u8> {
+        if self.profile.signed_roles {
+            return Ok(2);
         }
-        if let Some(known) = self.server_membership {
-            return Ok(known);
-        }
-        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
-        let has = health.membership >= 1;
-        self.server_membership = Some(has);
-        self.profile.membership = has;
-        Ok(has)
+        let level = match self.server_membership {
+            Some(level) => level,
+            None => {
+                let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+                self.server_membership = Some(health.membership);
+                health.membership
+            }
+        };
+        self.profile.membership |= level >= 1;
+        self.profile.signed_roles |= level >= 2;
+        Ok(level.max(u8::from(self.profile.membership)))
+    }
+
+    /// A folder entry about to get its first roles: each member's and group's as the
+    /// server lists them, the one time its word is taken for them. Whoever the server
+    /// doesn't list any more keeps the entry's place until the folder's next key, with
+    /// the role of everyone from before roles.
+    pub(super) fn with_listed_roles(entry: FolderEntry, listed: &Members) -> FolderEntry {
+        entry.with_roles(
+            |user| {
+                let member = listed.members.iter().find(|member| member.user_id == user);
+                member.map_or_else(Role::before_roles, |member| member.role)
+            },
+            |group| {
+                let share = listed.groups.iter().find(|share| share.group_id == group);
+                share.map_or_else(Role::before_roles, |share| share.role)
+            },
+        )
     }
 
     /// Whether a folder's record from the server carries members this device can go by:
@@ -48,7 +80,23 @@ impl Vault {
         if record.entries.is_empty() {
             return known.is_empty();
         }
-        if record.entries.len() < known.len() || record.entries[..known.len()] != *known {
+        // An entry kept here without its roles is the same entry: an app from before
+        // 0.17.0, run on this device since, saves them without. The one with roles is
+        // checked like any, and only it has a signature that holds.
+        let same = |known: &FolderEntry, given: &FolderEntry| {
+            known == given
+                || (known.roles.is_none()
+                    && FolderEntry {
+                        roles: None,
+                        ..given.clone()
+                    } == *known)
+        };
+        if record.entries.len() < known.len()
+            || !known
+                .iter()
+                .zip(&record.entries)
+                .all(|(known, given)| same(known, given))
+        {
             return false;
         }
         let Ok(latest) = self.profile.verify_folder(&record.entries, known.len()) else {
@@ -110,8 +158,26 @@ impl Vault {
             return Ok(false);
         }
         let members = self.folder_members_now(folder_id)?;
+        let roles = self.signed_roles()?;
         let record = &self.profile.folders[&folder_id];
-        if !record.entries.is_empty() {
+        if let Some(latest) = record.entries.last() {
+            // Signed for before 0.17.0: a manager signs its roles too, changing nothing
+            // else. If that doesn't work now, the next change to the folder does it.
+            if roles
+                && latest.roles.is_none()
+                && self.profile.folder_role(folder_id) == Role::Manage
+            {
+                let mut entry = Self::with_listed_roles(latest.next(), &members);
+                entry.sign(self.profile.user_id, &self.keys);
+                let path = format!("/v1/folders/{folder_id}/entries");
+                let request = FolderEntryRequest {
+                    entry: entry.clone(),
+                };
+                if let Ok(Ok(())) = self.call(|client| client.put::<_, ()>(&path, &request)) {
+                    self.keep_folder_entry(folder_id, entry);
+                    self.save()?;
+                }
+            }
             return Ok(true);
         }
         let me = self.profile.user_id;
@@ -126,6 +192,9 @@ impl Vault {
         }
         let key = record.open_key(&self.keys, &self.groups, folder_id)?;
         let mut entry = FolderEntry::first(folder_id, record.generation, &key, users, groups);
+        if roles {
+            entry = Self::with_listed_roles(entry, &members);
+        }
         entry.sign(me, &self.keys);
         let path = format!("/v1/folders/{folder_id}/entries");
         let request = FolderEntryRequest {
@@ -171,10 +240,39 @@ impl Vault {
                  yet. One of the group's managers needs to open Keystead 0.15 or later first"
             );
         }
+        // Once roles are signed, only who they make a manager changes the folder: the
+        // server's saying so isn't enough, and everyone else's app would refuse it.
+        if latest.roles.is_some()
+            && latest.role_of(me, |group, user| self.profile.in_group(group, user, true))
+                != Some(Role::Manage)
+        {
+            bail!(
+                "this folder's signed roles don't make you one of its managers. If the \
+                 server says you are, don't trust this server"
+            );
+        }
         let mut entry = latest.next();
+        if latest.roles.is_none() && self.signed_roles()? {
+            // Still without roles (see `sign_folder_members`): this change brings them.
+            let listed = self.folder_members_now(folder_id)?;
+            entry = Self::with_listed_roles(entry, &listed);
+        }
         change(&mut entry);
         entry.sign(me, &self.keys);
         Ok(Some(entry))
+    }
+
+    /// The folder's next entry for a change of role alone: none with a server that doesn't
+    /// keep roles, where roles are its own to change.
+    pub(super) fn next_role_entry(
+        &mut self,
+        folder_id: FolderId,
+        change: impl FnOnce(&mut FolderEntry),
+    ) -> Result<Option<FolderEntry>> {
+        if !self.signed_roles()? {
+            return Ok(None);
+        }
+        self.next_folder_entry(folder_id, change)
     }
 
     /// Keeps an entry this account just signed and the server took.
@@ -308,11 +406,17 @@ impl Vault {
         for group_id in groups {
             let _ = self.sign_group_members(group_id);
         }
+        // Folders nobody signed for, and with a server that keeps roles, the ones whose
+        // roles nobody signed.
+        let roles = self.signed_roles().unwrap_or(false);
         let folders: Vec<FolderId> = self
             .profile
             .folders
             .iter()
-            .filter(|(_, record)| record.entries.is_empty())
+            .filter(|(_, record)| match record.entries.last() {
+                Some(latest) => roles && latest.roles.is_none(),
+                None => true,
+            })
             .map(|(&folder_id, _)| folder_id)
             .collect();
         for folder_id in folders {

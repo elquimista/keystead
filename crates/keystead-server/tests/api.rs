@@ -15,7 +15,7 @@ use keystead_core::api::{
     RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest, Session, SetupRequest,
     SignInRequest, SyncEntry, SyncPage, UpdateGroupRequest, ViaGroup,
 };
-use keystead_core::api::{FolderEntryRequest, Health, Invites};
+use keystead_core::api::{FolderEntryRequest, Health, Invites, Removal, RemoveUserRequest};
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::folders::FolderEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries};
@@ -1429,7 +1429,7 @@ async fn roles_limit_what_people_can_do_in_a_folder() {
     assert_eq!(roles.folders[0].role, Role::View);
 
     // Alice makes Bob an editor; now he can add logins.
-    let role = |role| json(&RoleRequest { role });
+    let role = |role| json(&RoleRequest { role, entry: None });
     let path = format!("/v1/folders/{folder_id}/members/{}", bob.user_id);
     let (status, _) = alice
         .call(&server, Method::PUT, &path, role(Role::Edit))
@@ -2481,7 +2481,7 @@ async fn a_folders_members_are_signed_once_it_has_a_first_entry() {
     let server = Server::new().await;
     let (alice, bob, carol) = team(&server).await;
     let (_, body) = server.call(Method::GET, "/v1/health", None, None).await;
-    assert_eq!(decode::<Health>(body).membership, 1);
+    assert_eq!(decode::<Health>(body).membership, 2);
 
     // A folder as apps before 0.15.0 make and share it: no entries.
     let (folder_id, key) = create_folder(&server, &alice, "Old").await;
@@ -3116,4 +3116,261 @@ async fn a_big_folder_arrives_in_parts_and_pages_stay_small() {
     }
     assert!(pages >= 3, "{pages}");
     assert_eq!(seen.len(), 12);
+}
+
+/// Once a folder's entry says what each of its members may do, every change to the folder
+/// comes with the next one, saying the same as the server's own lists, and only someone
+/// the entries make a manager signs it.
+#[tokio::test]
+async fn a_folders_roles_are_signed_once_an_entry_has_them() {
+    let server = Server::new().await;
+    let (alice, bob, carol) = team(&server).await;
+    let dan = invite(&server, &alice, "Dan").await;
+    approve(&server, &alice, &dan).await;
+
+    // Bob makes a folder as 0.17.0 apps do: its first entry names him its manager.
+    let folder_id = FolderId::random();
+    let key = FolderKey::generate();
+    let mut first = FolderEntry::first(folder_id, 0, &key, vec![bob.user_id], Vec::new())
+        .with_roles(|_| Role::Manage, |_| Role::Manage);
+    first.sign(bob.user_id, &bob.keys);
+    let request = CreateFolderRequest {
+        entry: Some(first.clone()),
+        folder_id,
+        info: FolderInfo {
+            name: "Billing".into(),
+        }
+        .seal(folder_id, &key)
+        .unwrap(),
+        wrapped_key: bob.keys.public().wrap_folder_key(&key, folder_id).unwrap(),
+    };
+    let (status, body) = bob
+        .call(&server, Method::POST, "/v1/folders", json(&request))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let members_path = format!("/v1/folders/{folder_id}/members");
+    let add = async |entry: Option<FolderEntry>, person: &Person, role: Role| {
+        let request = AddMemberRequest {
+            entry,
+            user_id: person.user_id,
+            wrapped_key: person
+                .keys
+                .public()
+                .wrap_folder_key(&key, folder_id)
+                .unwrap(),
+            role,
+            generation: 0,
+        };
+        bob.call(&server, Method::POST, &members_path, json(&request))
+            .await
+    };
+    let signed = |by: &Person, after: &FolderEntry, change: &dyn Fn(&mut FolderEntry)| {
+        let mut entry = after.next();
+        change(&mut entry);
+        entry.sign(by.user_id, &by.keys);
+        entry
+    };
+
+    // Sharing it takes the next entry, with the role it's shared at: not none, not one
+    // without roles as apps before 0.17.0 would send, and not one that says otherwise.
+    let (status, _) = add(None, &carol, Role::View).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let mut without = first.next();
+    without.roles = None;
+    without.members.push(carol.user_id);
+    without.sign(bob.user_id, &bob.keys);
+    let (status, body) = add(Some(without), &carol, Role::View).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.to_string().contains("update Keystead"), "{body}");
+    let wrong = signed(&bob, &first, &|entry| {
+        entry.put_member(carol.user_id, Role::Manage);
+    });
+    let (status, _) = add(Some(wrong), &carol, Role::View).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let second = signed(&bob, &first, &|entry| {
+        entry.put_member(carol.user_id, Role::View);
+    });
+    let (status, body) = add(Some(second.clone()), &carol, Role::View).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let third = signed(&bob, &second, &|entry| {
+        entry.put_member(dan.user_id, Role::View);
+    });
+    let (status, body) = add(Some(third.clone()), &dan, Role::View).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Carol only views the folder. A login in it shared with her directly to edit stays
+    // out of her reach: everyone's app would refuse what she saved there.
+    let at = ItemVersion {
+        id: ItemId::random(),
+        folder_id: Some(folder_id),
+        owner: None,
+        version: 1,
+        author: bob.user_id,
+    };
+    let item_key = ItemKey::generate();
+    let copies = || ItemKeys {
+        folder: Some(item_key.seal_for_folder(at.id, folder_id, &key)),
+        people: vec![copy_for(&carol, &item_key, at.id)],
+        ..ItemKeys::default()
+    };
+    let shared = seal_with(&bob, &item_key, at, copies(), "Bank", "pw");
+    let to_edit = vec![Member {
+        user_id: carol.user_id,
+        role: Role::Edit,
+    }];
+    let (status, body) = bob.put_with_roles(&server, &shared, None, to_edit).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let by_carol = ItemVersion {
+        version: 2,
+        author: carol.user_id,
+        ..at
+    };
+    let changed = seal_with(&carol, &item_key, by_carol, copies(), "Bank", "hers");
+    let (status, _) = carol.put(&server, &changed, Some(1)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // So does changing a role.
+    let role_path = format!("{members_path}/{}", dan.user_id.0);
+    let set = async |entry: Option<FolderEntry>, role: Role| {
+        bob.call(
+            &server,
+            Method::PUT,
+            &role_path,
+            json(&RoleRequest { role, entry }),
+        )
+        .await
+    };
+    let (status, _) = set(None, Role::Edit).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let fourth = signed(&bob, &third, &|entry| {
+        entry.put_member(dan.user_id, Role::Edit);
+    });
+    let (status, body) = set(Some(fourth.clone()), Role::Edit).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Bob is its only manager. The owner can't remove him from the team without signing
+    // someone else in as one: the server's own choice wouldn't count with anyone's app.
+    let removal_path = format!("/v1/users/{}/removal", bob.user_id.0);
+    let (status, _) = carol.call(&server, Method::GET, &removal_path, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = alice.call(&server, Method::GET, &removal_path, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let removal: Removal = decode(body);
+    let [waiting] = &removal.folders[..] else {
+        panic!("{:?}", removal.folders);
+    };
+    assert_eq!(waiting.folder_id, folder_id);
+    assert_eq!(waiting.promote, carol.user_id);
+    assert_eq!(waiting.entries.last(), Some(&fourth));
+    let (status, body) = alice
+        .call(
+            &server,
+            Method::DELETE,
+            &format!("/v1/users/{}", bob.user_id.0),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    // The owner signs a change of roles and nothing else, and only a rise to manager.
+    let lowered = signed(&alice, &fourth, &|entry| {
+        entry.put_member(carol.user_id, Role::Manage);
+        entry.put_member(dan.user_id, Role::View);
+    });
+    let remove = async |entry: &FolderEntry| {
+        let request = RemoveUserRequest {
+            promotions: vec![entry.clone()],
+        };
+        alice
+            .call(&server, Method::POST, &removal_path, json(&request))
+            .await
+    };
+    let (status, _) = remove(&lowered).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let by_carol = signed(&carol, &fourth, &|entry| {
+        entry.put_member(carol.user_id, Role::Manage);
+    });
+    let (status, _) = remove(&by_carol).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let fifth = signed(&alice, &fourth, &|entry| {
+        entry.put_member(carol.user_id, Role::Manage);
+    });
+    let (status, body) = remove(&fifth).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Carol manages it now, by the server's list and by the entries, and gives it a new
+    // key without Bob.
+    let (status, body) = carol.call(&server, Method::GET, &members_path, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let members: Members = decode(body);
+    assert_eq!(members.entries.last(), Some(&fifth));
+    let roles: Vec<(UserId, Role)> = members
+        .members
+        .iter()
+        .map(|member| (member.user_id, member.role))
+        .collect();
+    assert_eq!(
+        roles,
+        [(carol.user_id, Role::Manage), (dan.user_id, Role::Edit)]
+    );
+    let new_key = FolderKey::generate();
+    let mut sixth = fifth.next_generation(&new_key);
+    sixth.drop_member(bob.user_id);
+    sixth.sign(carol.user_id, &carol.keys);
+    let rekey = RekeyRequest {
+        entry: Some(sixth),
+        generation: 1,
+        info: FolderInfo {
+            name: "Billing".into(),
+        }
+        .seal(folder_id, &new_key)
+        .unwrap(),
+        previous: new_key.seal_previous(&key, folder_id, 1),
+        wrapped_keys: [&carol, &dan]
+            .iter()
+            .map(|person| MemberKey {
+                user_id: person.user_id,
+                wrapped_key: person
+                    .keys
+                    .public()
+                    .wrap_folder_key(&new_key, folder_id)
+                    .unwrap(),
+            })
+            .collect(),
+        group_keys: Vec::new(),
+    };
+    let (status, body) = carol
+        .call(
+            &server,
+            Method::POST,
+            &format!("/v1/folders/{folder_id}/rekey"),
+            json(&rekey),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // A folder signed for before 0.17.0 has entries without roles. Its roles are the
+    // server's to change until a manager signs them, which changes nothing else.
+    let (old_id, old_key) = create_folder(&server, &alice, "Old").await;
+    let entries_path = format!("/v1/folders/{old_id}/entries");
+    let put = async |who: &Person, entry: &FolderEntry| {
+        let request = FolderEntryRequest {
+            entry: entry.clone(),
+        };
+        who.call(&server, Method::PUT, &entries_path, json(&request))
+            .await
+            .0
+    };
+    let mut old = FolderEntry::first(old_id, 0, &old_key, vec![alice.user_id], Vec::new());
+    old.sign(alice.user_id, &alice.keys);
+    assert_eq!(put(&alice, &old).await, StatusCode::NO_CONTENT);
+    let mut again = old.next();
+    again.sign(alice.user_id, &alice.keys);
+    assert_eq!(put(&alice, &again).await, StatusCode::CONFLICT);
+    let mut wrong = old.next().with_roles(|_| Role::Edit, |_| Role::Manage);
+    wrong.sign(alice.user_id, &alice.keys);
+    assert_ne!(put(&alice, &wrong).await, StatusCode::NO_CONTENT);
+    let mut with = old.next().with_roles(|_| Role::Manage, |_| Role::Manage);
+    with.sign(alice.user_id, &alice.keys);
+    assert_eq!(put(&alice, &with).await, StatusCode::NO_CONTENT);
+    assert_eq!(put(&alice, &with).await, StatusCode::CONFLICT);
 }
