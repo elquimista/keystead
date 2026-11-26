@@ -208,18 +208,28 @@ private struct Sidebar: View {
         .safeAreaInset(edge: .bottom) {
             if let identity = model.identity {
                 HStack(spacing: 8) {
-                    Image(systemName: "person.crop.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(identity.name)
-                            .lineLimit(1)
-                        Text(identity.isOwner ? "Owner · \(host(identity.server))" : host(identity.server))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                    // You, as People shows you; a click opens your page there. The server is
+                    // in the tooltip and Settings › Account, not cut off here.
+                    Button {
+                        model.section = .people
+                        model.selectedUserID = identity.userId
+                    } label: {
+                        HStack(spacing: 8) {
+                            Avatar(name: identity.name, size: 28)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(identity.name)
+                                    .lineLimit(1)
+                                Text(identity.isOwner ? "Owner" : "Member")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(Rectangle())
                     }
-                    Spacer()
+                    .buttonStyle(.plain)
+                    .help("Signed in to \(host(identity.server)). Show your page in People")
                     // Syncing happens on its own; this shows it, and syncs now on a click. Out
                     // of the toolbar, which stays for what's selected; also in the Vault menu.
                     if model.isSyncing {
@@ -231,7 +241,7 @@ private struct Sidebar: View {
                         Button {
                             Task { await model.refresh() }
                         } label: {
-                            Image(systemName: "arrow.triangle.2.circlepath")
+                            Image(systemName: "arrow.clockwise")
                         }
                         .buttonStyle(.borderless)
                         .help("Syncs on its own every few minutes. Sync now (⌘R)")
