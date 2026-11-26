@@ -43,12 +43,14 @@ struct VaultView: View {
                 } else {
                     Text(model.groups.isEmpty ? "" : "Select a group")
                         .foregroundStyle(.secondary)
+                        .toolbar { GroupActions(model: model, group: nil) }
                 }
             } else if let item = model.items.first(where: { $0.id == model.selectedItemID }) {
                 LoginDetail(model: model, item: item)
                     .id(item.id)
             } else {
                 ContentUnavailableView("No Login Selected", systemImage: "key.horizontal")
+                    .toolbar { LoginActions(model: model, item: nil) }
             }
         }
         .overlay(alignment: .bottom) {
@@ -72,7 +74,13 @@ struct VaultView: View {
         }
         .onChange(of: model.section) {
             if model.section == .health {
-                Task { await model.checkHealth() }
+                Task {
+                    await model.checkHealth()
+                    // Its list comes from the check; with none yet, nothing to compare.
+                    if model.health != nil { keepSelectionIfListed() }
+                }
+            } else {
+                keepSelectionIfListed()
             }
         }
         .onChange(of: model.toChange.isEmpty) {
@@ -80,6 +88,23 @@ struct VaultView: View {
             if model.toChange.isEmpty && model.section == .toChange {
                 model.section = .allLogins
             }
+        }
+    }
+}
+
+extension VaultView {
+    /// After switching sections, a login stays selected only if the list now shown has it,
+    /// so the details never show a login the list doesn't. One that drops out of a list
+    /// while you're on it, because you just changed it, stays.
+    fileprivate func keepSelectionIfListed() {
+        guard let id = model.selectedItemID else { return }
+        let section = model.section ?? .allLogins
+        switch section {
+        case .people, .groups, .recentlyDeleted: return
+        default: break
+        }
+        if !model.items(matching: search, in: section).contains(where: { $0.id == id }) {
+            model.selectedItemID = nil
         }
     }
 }
@@ -368,14 +393,18 @@ private struct LoginList: View {
         .navigationTitle(title)
         .searchable(text: $search, prompt: "Search logins")
         .toolbar {
-            ToolbarItem {
-                Button {
-                    model.sheet = .addLogin(folder: folder)
-                } label: {
-                    Label("New Login", systemImage: "plus")
+            // Only where a new login shows up in the list: a login added from Password
+            // Health, To Change or Shared with Me wouldn't be in them.
+            if section == .allLogins || folder != nil {
+                ToolbarItem {
+                    Button {
+                        model.sheet = .addLogin(folder: folder)
+                    } label: {
+                        Label("New Login", systemImage: "plus")
+                    }
+                    .help("Add a login")
+                    .disabled(folder.map { model.folderRoles[$0] == .view } ?? false)
                 }
-                .help("Add a login")
-                .disabled(folder.map { model.folderRoles[$0] == .view } ?? false)
             }
             if let folder {
                 ToolbarItem {
@@ -600,37 +629,7 @@ private struct LoginDetail: View {
             }
         }
         .formStyle(.grouped)
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    model.sheet = .editLogin(item)
-                } label: {
-                    Label("Edit", systemImage: "pencil")
-                }
-                .help("Edit this login")
-                .disabled(item.role == .view)
-                Button {
-                    model.sheet = .shareLogin(item)
-                } label: {
-                    Label(
-                        item.role == .manage ? "Share" : "Access",
-                        systemImage: item.role == .manage ? "person.crop.circle.badge.plus" : "person.2")
-                }
-                .help(item.role == .manage ? "Share this login" : "Who can open this login")
-                Menu {
-                    Button("History…") { model.sheet = .history(item) }
-                        .disabled(item.role == .view)
-                    Button("Move To…") { model.sheet = .moveLogin(item) }
-                        .disabled(!model.canMove(item))
-                    Divider()
-                    Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
-                        .disabled(item.role == .view)
-                } label: {
-                    Label("More", systemImage: "ellipsis.circle")
-                }
-                .help("History, Move To and Delete")
-            }
-        }
+        .toolbar { LoginActions(model: model, item: item) }
         .onChange(of: model.items) {
             // The login may have changed; don't keep showing the old password or notes.
             details = nil
@@ -659,6 +658,54 @@ private struct LoginDetail: View {
             error = nil
         } catch let failure {
             error = describe(failure)
+        }
+    }
+}
+
+/// A login's buttons in the toolbar: Edit, Share (or Access) and More. With no login
+/// selected they're there all the same, greyed out, so the toolbar keeps one layout and
+/// the list's New Login button stays put.
+private struct LoginActions: ToolbarContent {
+    let model: AppModel
+    let item: ItemSummary?
+
+    /// Shares it, rather than only seeing who can open it. With none selected, Share.
+    private var manages: Bool { (item?.role ?? .manage) == .manage }
+    private var canEdit: Bool { item.map { $0.role != .view } ?? false }
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                if let item { model.sheet = .editLogin(item) }
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            .help("Edit this login")
+            .disabled(!canEdit)
+            Button {
+                if let item { model.sheet = .shareLogin(item) }
+            } label: {
+                Label(
+                    manages ? "Share" : "Access",
+                    systemImage: manages ? "person.crop.circle.badge.plus" : "person.2")
+            }
+            .help(manages ? "Share this login" : "Who can open this login")
+            .disabled(item == nil)
+            Menu {
+                if let item {
+                    Button("History…") { model.sheet = .history(item) }
+                        .disabled(item.role == .view)
+                    Button("Move To…") { model.sheet = .moveLogin(item) }
+                        .disabled(!model.canMove(item))
+                    Divider()
+                    Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
+                        .disabled(item.role == .view)
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .help("History, Move To and Delete")
+            .disabled(item == nil)
         }
     }
 }
@@ -1318,6 +1365,65 @@ private struct GroupList: View {
     }
 }
 
+/// A group's buttons in the toolbar: Add Person, Share a Folder and More. They're always
+/// there, greyed out where they don't apply or with no group selected, so the toolbar keeps
+/// one layout and the list's New Group button stays put.
+private struct GroupActions: ToolbarContent {
+    let model: AppModel
+    let group: GroupSummary?
+    var busy = false
+    var leave: () -> Void = {}
+    var delete: () -> Void = {}
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            if busy {
+                ProgressView().controlSize(.small)
+            }
+            Button {
+                if let group { model.sheet = .addToGroup(group) }
+            } label: {
+                Label("Add Person", systemImage: "person.badge.plus")
+            }
+            .help(addHelp)
+            .disabled(!(group?.canAdd ?? false))
+            Button {
+                if let group { model.sheet = .shareWithGroup(group) }
+            } label: {
+                Label("Share a Folder", systemImage: "folder.badge.plus")
+            }
+            .help(group.map { "Share a folder with everyone in \($0.name)" } ?? "Share a folder with a group")
+            .disabled(group == nil || !model.folders.contains { model.manages(folder: $0) })
+            Menu {
+                if let group {
+                    if group.canManage {
+                        Button("Rename…") { model.sheet = .renameGroup(group) }
+                    }
+                    if group.isMember {
+                        Button("Leave…", action: leave)
+                    }
+                    if group.canManage {
+                        Divider()
+                        Button("Delete Group…", role: .destructive, action: delete)
+                    }
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .help("Rename, Leave and Delete")
+            .disabled(!(group.map { $0.canManage || $0.isMember } ?? false))
+        }
+    }
+
+    /// Adding someone hands them the group's key, so only a manager in the group can.
+    private var addHelp: String {
+        guard let group else { return "Add someone to a group" }
+        return group.canAdd
+            ? "Add someone to \(group.name)"
+            : "Only someone in \(group.name) who manages it can add people"
+    }
+}
+
 private struct GroupDetail: View {
     let model: AppModel
     let group: GroupSummary
@@ -1392,43 +1498,9 @@ private struct GroupDetail: View {
         .formStyle(.grouped)
         .disabled(busy)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if busy {
-                    ProgressView().controlSize(.small)
-                }
-                if group.canAdd {
-                    Button {
-                        model.sheet = .addToGroup(group)
-                    } label: {
-                        Label("Add Person", systemImage: "person.badge.plus")
-                    }
-                    .help("Add someone to \(group.name)")
-                }
-                Button {
-                    model.sheet = .shareWithGroup(group)
-                } label: {
-                    Label("Share a Folder", systemImage: "folder.badge.plus")
-                }
-                .help("Share a folder with everyone in \(group.name)")
-                .disabled(!model.folders.contains { model.manages(folder: $0) })
-                if group.canManage || group.isMember {
-                    Menu {
-                        if group.canManage {
-                            Button("Rename…") { model.sheet = .renameGroup(group) }
-                        }
-                        if group.isMember {
-                            Button("Leave…") { leaving = true }
-                        }
-                        if group.canManage {
-                            Divider()
-                            Button("Delete Group…", role: .destructive) { deleting = true }
-                        }
-                    } label: {
-                        Label("More", systemImage: "ellipsis.circle")
-                    }
-                    .help("Rename, Leave and Delete")
-                }
-            }
+            GroupActions(
+                model: model, group: group, busy: busy,
+                leave: { leaving = true }, delete: { deleting = true })
         }
         .confirmationDialog("Leave \u{201C}\(group.name)\u{201D}?", isPresented: $leaving) {
             Button("Leave", role: .destructive) {

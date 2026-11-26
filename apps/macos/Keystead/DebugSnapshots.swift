@@ -89,6 +89,11 @@ enum DebugSnapshots {
                 }),
                 // Groups: Olivia manages Engineering and is in it; On-call she can manage as
                 // the owner but isn't in. Bank is shared with On-call.
+                // No group chosen yet: the group buttons stay, greyed out.
+                ("6e0-groups-none-selected", {
+                    model.section = .groups
+                    model.selectedGroupID = nil
+                }),
                 ("6e1-groups", {
                     model.section = .groups
                     model.selectedGroupID = model.groups.first?.id
@@ -138,6 +143,12 @@ enum DebugSnapshots {
                     model.selectedItemID = model.items[0].id
                 }),
                 ("6e9b-password-health", { model.section = .health }),
+                // Database isn't in Password Health: opening it leaves nothing selected.
+                ("6e9c-database-selected", {
+                    model.section = .allLogins
+                    model.selectedItemID = model.items[1].id
+                }),
+                ("6e9d-health-without-database", { model.section = .health }),
                 ("6f-quick-search", { QuickSearch.shared?.show(query: "a") }),
                 // The down arrow, as the keyboard sends it: the second match is picked.
                 ("6f2-quick-search-down", { pressKey(keyCode: 125) }),
