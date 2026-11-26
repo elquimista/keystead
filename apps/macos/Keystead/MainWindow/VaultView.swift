@@ -47,37 +47,45 @@ struct VaultView: View {
                 if let user = model.users.first(where: { $0.id == model.selectedUserID }) {
                     PersonDetail(model: model, user: user)
                 } else {
-                    Text("Select a person")
-                        .foregroundStyle(.secondary)
-                        .toolbar { PersonActions(model: model, user: nil) }
+                    NothingSelected {
+                        Text("Select a person")
+                            .foregroundStyle(.secondary)
+                    }
+                    .toolbar { PersonActions(model: model, user: nil) }
                 }
             } else if model.section == .recentlyDeleted {
                 if let login = model.recentlyDeleted.first(where: { $0.id == model.selectedDeletedID }) {
                     DeletedDetail(model: model, login: login)
                         .id(login.id)
                 } else {
-                    Text(model.recentlyDeleted.isEmpty ? "" : "Select a login")
-                        .foregroundStyle(.secondary)
-                        .toolbar { DeletedActions(login: nil) }
+                    NothingSelected {
+                        Text(model.recentlyDeleted.isEmpty ? "" : "Select a login")
+                            .foregroundStyle(.secondary)
+                    }
+                    .toolbar { DeletedActions(login: nil) }
                 }
             } else if model.section == .groups {
                 if let group = model.groups.first(where: { $0.id == model.selectedGroupID }) {
                     GroupDetail(model: model, group: group)
                         .id(group.id)
                 } else {
-                    Text(model.groups.isEmpty ? "" : "Select a group")
-                        .foregroundStyle(.secondary)
-                        .toolbar { GroupActions(model: model, group: nil) }
+                    NothingSelected {
+                        Text(model.groups.isEmpty ? "" : "Select a group")
+                            .foregroundStyle(.secondary)
+                    }
+                    .toolbar { GroupActions(model: model, group: nil) }
                 }
             } else if let item = model.items.first(where: { $0.id == model.selectedItemID }) {
                 LoginDetail(model: model, item: item)
                     .id(item.id)
             } else {
-                ContentUnavailableView {
-                    Label("No Login Selected", systemImage: "key.horizontal")
-                } description: {
-                    if let about = sectionAbout {
-                        Text(about)
+                NothingSelected {
+                    ContentUnavailableView {
+                        Label("No Login Selected", systemImage: "key.horizontal")
+                    } description: {
+                        if let about = sectionAbout {
+                            Text(about)
+                        }
                     }
                 }
                 .toolbar { LoginActions(model: model, item: nil) }
@@ -136,6 +144,19 @@ extension VaultView {
         if !model.items(matching: search, in: section).contains(where: { $0.id == id }) {
             model.selectedItemID = nil
         }
+    }
+}
+
+/// The detail pane with nothing picked: its message over an empty page like the ones shown
+/// when something is, so the pane and its toolbar look the same either way. Over a column
+/// with no scrolling page, macOS gives the toolbar a background and a line.
+private struct NothingSelected<Message: View>: View {
+    @ViewBuilder let message: Message
+
+    var body: some View {
+        Form {}
+            .formStyle(.grouped)
+            .overlay { message }
     }
 }
 
@@ -356,54 +377,54 @@ private struct LoginList: View {
 
     var body: some View {
         let items = model.items(matching: search, in: section)
-        Group {
+        // Rows only, like every other list; what a section is for shows in the login pane
+        // until one is picked. The list stays when it's empty, under the empty state: a
+        // column without one gets a toolbar background and a line the others don't have.
+        List(selection: $selection) {
+            rows(items)
+        }
+        .contextMenu(forSelectionType: ItemSummary.ID.self) { ids in
+            if let item = items.first(where: { ids.contains($0.id) }) {
+                Button("Copy Password") { Task { await model.copyPassword(of: item) } }
+                Button("Copy Username") { model.copy(item.username) }
+                    .disabled(item.username.isEmpty)
+                if item.hasOneTimeCode {
+                    Button("Copy One-Time Code") { Task { await model.copyOneTimeCode(of: item) } }
+                }
+                Divider()
+                Button("Edit…") { model.sheet = .editLogin(item) }
+                    .disabled(item.role == .view)
+                Button("Move To…") { model.sheet = .moveLogin(item) }
+                    .disabled(!model.canMove(item))
+                Button(item.role == .manage ? "Share…" : "Access…") {
+                    model.sheet = .shareLogin(item)
+                }
+                Divider()
+                Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
+                    .disabled(item.role == .view)
+            }
+        } primaryAction: { ids in
+            // Double-click or Return copies the password.
+            if let item = items.first(where: { ids.contains($0.id) }) {
+                Task { await model.copyPassword(of: item) }
+            }
+        }
+        // ⌘C and Delete while the list has focus; text fields keep their own.
+        .onCommand(#selector(NSText.copy(_:))) {
+            if let item = model.selectedItem {
+                Task { await model.copyPassword(of: item) }
+            }
+        }
+        .onDeleteCommand {
+            if let item = model.selectedItem, item.role != .view {
+                model.sheet = .deleteLogin(item)
+            }
+        }
+        // Logins added or deleted slide in and out; typing a search doesn't animate.
+        .animation(.snappy(duration: 0.25), value: model.items.count)
+        .overlay {
             if items.isEmpty {
                 emptyState
-            } else {
-                // Rows only, like every other list; what a section is for shows in the login
-                // pane until one is picked.
-                List(selection: $selection) {
-                    rows(items)
-                }
-                .contextMenu(forSelectionType: ItemSummary.ID.self) { ids in
-                    if let item = items.first(where: { ids.contains($0.id) }) {
-                        Button("Copy Password") { Task { await model.copyPassword(of: item) } }
-                        Button("Copy Username") { model.copy(item.username) }
-                            .disabled(item.username.isEmpty)
-                        if item.hasOneTimeCode {
-                            Button("Copy One-Time Code") { Task { await model.copyOneTimeCode(of: item) } }
-                        }
-                        Divider()
-                        Button("Edit…") { model.sheet = .editLogin(item) }
-                            .disabled(item.role == .view)
-                        Button("Move To…") { model.sheet = .moveLogin(item) }
-                            .disabled(!model.canMove(item))
-                        Button(item.role == .manage ? "Share…" : "Access…") {
-                            model.sheet = .shareLogin(item)
-                        }
-                        Divider()
-                        Button("Delete…", role: .destructive) { model.sheet = .deleteLogin(item) }
-                            .disabled(item.role == .view)
-                    }
-                } primaryAction: { ids in
-                    // Double-click or Return copies the password.
-                    if let item = items.first(where: { ids.contains($0.id) }) {
-                        Task { await model.copyPassword(of: item) }
-                    }
-                }
-                // ⌘C and Delete while the list has focus; text fields keep their own.
-                .onCommand(#selector(NSText.copy(_:))) {
-                    if let item = model.selectedItem {
-                        Task { await model.copyPassword(of: item) }
-                    }
-                }
-                .onDeleteCommand {
-                    if let item = model.selectedItem, item.role != .view {
-                        model.sheet = .deleteLogin(item)
-                    }
-                }
-                // Logins added or deleted slide in and out; typing a search doesn't animate.
-                .animation(.snappy(duration: 0.25), value: model.items.count)
             }
         }
         .navigationTitle(title)
@@ -487,9 +508,10 @@ private struct LoginList: View {
                     + "up here."))
         } else if section == .health {
             if let health = model.health {
+                let logins = health.checked == 1 ? "1 login" : "\(health.checked) logins"
                 ContentUnavailableView(
                     "No weak, reused or old passwords", systemImage: "checkmark.shield",
-                    description: Text("Checked \(health.checked) logins you can change."))
+                    description: Text("Checked \(logins) you can change."))
             } else {
                 ProgressView("Checking passwords…")
             }
