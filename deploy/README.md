@@ -261,6 +261,12 @@ after the server restarts. Update the server for this: with a 0.13 server, a 0.1
 signs in as before and still asks, but says why. The order doesn't matter, and older apps
 keep working with the new server.
 
+**Updating to 0.14.1.** Sessions renew for up to 24 hours after a device signed in with
+its key, so a copied session token can't be kept alive for good. After that the app signs
+in with the key once, which asks for Touch ID or the password only if Keystead has stayed
+unlocked that long. The limit comes from the server, so update it; the order doesn't
+matter, and 0.14.0 apps keep working with it.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
