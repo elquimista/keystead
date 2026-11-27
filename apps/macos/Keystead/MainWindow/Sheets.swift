@@ -815,7 +815,7 @@ private struct AddDeviceSheet: View {
             } else if let line {
                 Form {
                     Section {
-                        LineRow(line: line) { model.copy(line) }
+                        LineRow(line: line) { model.copyLine(line) }
                     } header: {
                         Text("1. Paste this line on the new device")
                     } footer: {
@@ -1091,7 +1091,7 @@ private struct HelpRecoverSheet: View {
                 Form {
                     if let line {
                         Section {
-                            LineRow(line: line) { model.copy(line) }
+                            LineRow(line: line) { model.copyLine(line) }
                         } header: {
                             Text("Send \(user.name) this line, privately")
                         } footer: {
@@ -2393,7 +2393,7 @@ private struct InviteSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Form {
                     Section {
-                        LineRow(line: invitation.command) { model.copy(invitation.command) }
+                        LineRow(line: invitation.command) { model.copyLine(invitation.command) }
                     } footer: {
                         FormFooter(
                             (invitation.key == nil

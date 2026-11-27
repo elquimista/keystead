@@ -11,6 +11,10 @@ What each release changes, newest first. The release workflow puts a version's s
 - The apps read at most 4 MB of a server's error answer, so a server can't make them read without end.
 - In the CLI, `--otp -` asks for a one-time code setup instead of taking it in the command, where others on the computer could see it in `ps` and it stayed in your shell's history; a setup code can be left out to be asked for too. Passphrases and recovery words are wiped from memory once used, and so is the account secret the Mac app hands to Keystead's core.
 - A server that says it has no groups no longer makes the next save of a login drop its groups' copies; the groups stay as they were.
+- Mac app: if the screen locks or the Mac sleeps while Keystead is unlocking, it locks again as soon as unlocking finishes; and a click after the time without using it is up locks it, rather than counting as use. Locking also forgets your name and what was selected.
+- Mac app: a revealed password or notes hide again a minute after they were shown.
+- Mac app: invite, new-device and recovery lines are copied the way passwords are: to this Mac only, hidden from clipboard managers, and cleared after 30 seconds.
+- Mac app: launch arguments no longer change the auto-lock time or put an update notice up, and the update's link is checked again before Keystead opens it.
 
 **Speed**
 

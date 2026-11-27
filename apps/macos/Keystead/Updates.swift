@@ -33,9 +33,9 @@ final class Updates {
         let defaults = UserDefaults.standard
         lastChecked = defaults.object(forKey: Self.lastCheckedKey) as? Date
         dismissed = defaults.string(forKey: Self.dismissedKey)
-        if let found = defaults.dictionary(forKey: Self.foundKey) as? [String: String],
+        if let found = SavedSetting.value(forKey: Self.foundKey) as? [String: String],
             let version = found["version"], let page = found["page"], let download = found["download"],
-            Self.isNewer(version)
+            Self.isNewer(version), Self.isReleaseLink(page), Self.isReleaseLink(download)
         {
             available = AppUpdate(version: version, page: page, download: download)
         }
@@ -121,8 +121,20 @@ final class Updates {
 
     /// Opens the release's page in the browser.
     func openPage() {
-        guard let available, let url = URL(string: available.page) else { return }
+        guard let available, Self.isReleaseLink(available.page), let url = URL(string: available.page)
+        else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    /// Whether a link is one of this repository's release pages or downloads. The core
+    /// checks GitHub's answer as it reads it; this checks the links again where they come
+    /// back from saved settings, which anything running as you can change.
+    static func isReleaseLink(_ link: String) -> Bool {
+        guard let url = URL(string: link), url.scheme == "https", url.host == "github.com",
+            url.user == nil, url.password == nil, url.port == nil
+        else { return false }
+        return url.path.hasPrefix("/elquimista/keystead/releases/")
+            && !url.pathComponents.contains("..")
     }
 
     /// Closes the notice until a newer version than this one is out.

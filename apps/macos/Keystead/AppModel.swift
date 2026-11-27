@@ -786,17 +786,28 @@ final class AppModel {
         message = nil
         lockNote = nil
         phase = .working("Unlocking…")
+        unlocking = true
+        awayWhileUnlocking = false
+        defer { unlocking = false }
         do {
             // Before asking: nothing to unlock on a Mac that isn't set up.
             _ = try store.load()
             let context = try await DeviceAuthentication.authenticate(reason: "unlock Keystead")
             let (vault, signer) = try await openVault(with: context)
             try await finishUnlocking(vault, signer: signer)
+            if awayWhileUnlocking {
+                lockBecauseAway()
+            }
         } catch {
             phase = .locked
             message = describe(error)
         }
     }
+
+    /// Unlocking is under way; and whether the screen locked or the Mac slept meanwhile,
+    /// which locks again as soon as it's done.
+    @ObservationIgnored private var unlocking = false
+    @ObservationIgnored private var awayWhileUnlocking = false
 
     /// Opens this Mac's vault with an approval just given. Doesn't touch the network.
     private func openVault(with context: LAContext) async throws -> (Vault, SecureEnclaveSigner) {
@@ -840,6 +851,9 @@ final class AppModel {
         selectedItemID = nil
         selectedUserID = nil
         selectedInviteID = nil
+        selectedDeletedID = nil
+        selectedGroupID = nil
+        identity = nil
         copiedName = nil
         message = nil
         approvedNames = []
@@ -850,7 +864,10 @@ final class AppModel {
     /// Locks because the user seems to be away (see `AutoLock`), and clears the clipboard if
     /// it still holds a password Keystead copied.
     func lockBecauseAway() {
-        guard phase == .unlocked else { return }
+        guard phase == .unlocked else {
+            if unlocking { awayWhileUnlocking = true }
+            return
+        }
         clipboard.clearNow()
         copiedNoticeTask?.cancel()
         lock()
@@ -1144,6 +1161,13 @@ final class AppModel {
     }
 
     /// Copies something that isn't secret, like a username or an invite.
+    /// Copies an invite or add-device line the way passwords are copied: to this Mac only,
+    /// hidden from clipboard managers, and cleared after 30 seconds. Until it's used,
+    /// whoever has it can join the team or add a device.
+    func copyLine(_ line: String) {
+        clipboard.copy(line)
+    }
+
     func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)

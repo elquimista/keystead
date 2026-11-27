@@ -565,6 +565,7 @@ private struct LoginDetail: View {
     @State private var details: LoginDetails?
     @State private var showsPassword = false
     @State private var showsNotes = false
+    @State private var hiding: Task<Void, Never>?
     @State private var error: String?
 
     var body: some View {
@@ -703,8 +704,22 @@ private struct LoginDetail: View {
             }
             self[keyPath: shown] = true
             error = nil
+            hideLater()
         } catch let failure {
             error = describe(failure)
+        }
+    }
+
+    /// A password or notes shown stay up for a minute after the last one was shown, then
+    /// hide, and what was decrypted for them goes.
+    private func hideLater() {
+        hiding?.cancel()
+        hiding = Task {
+            try? await Task.sleep(for: .seconds(60))
+            guard !Task.isCancelled else { return }
+            showsPassword = false
+            showsNotes = false
+            details = nil
         }
     }
 }

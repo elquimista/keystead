@@ -19,7 +19,7 @@ final class AutoLock {
     static let choices = [1, 5, 10, 30, 60, 0]
 
     static var minutes: Int {
-        UserDefaults.standard.object(forKey: minutesKey) as? Int ?? defaultMinutes
+        SavedSetting.value(forKey: minutesKey) as? Int ?? defaultMinutes
     }
 
     private let model: AppModel
@@ -52,8 +52,7 @@ final class AutoLock {
         eventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
         ) { [weak self] event in
-            MainActor.assumeIsolated { self?.lastUse = .now }
-            return event
+            MainActor.assumeIsolated { self?.used() ?? true } ? event : nil
         }
         timer = Task { [weak self] in await self?.run() }
     }
@@ -76,12 +75,28 @@ final class AutoLock {
         #endif
     }
 
+    /// How long Keystead may go unused before it locks; zero for never.
+    private var limit: Duration {
+        Self.testing ? .seconds(5) : .seconds(Self.minutes * 60)
+    }
+
+    /// A click, key press or scroll in Keystead counts as using it, unless the time without
+    /// using it was up already and the next check hadn't come yet: then Keystead locks, as
+    /// the check would have, and the event goes nowhere. Returns whether to pass it on.
+    private func used() -> Bool {
+        let wasUp = limit > .zero && ContinuousClock.now - lastUse >= limit
+        lastUse = .now
+        guard wasUp, model.phase == .unlocked else { return true }
+        model.lockBecauseAway()
+        return false
+    }
+
     /// Checks every 15 seconds how long it's been since Keystead was last used.
     private func run() async {
         let testing = Self.testing
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(testing ? 1 : 15))
-            let limit: Duration = testing ? .seconds(5) : .seconds(Self.minutes * 60)
+            let limit = self.limit
             let unused = ContinuousClock.now - lastUse
             if testing {
                 // Unbuffered, so nothing is lost when the test run is stopped.
@@ -92,5 +107,21 @@ final class AutoLock {
                 model.lockBecauseAway()
             }
         }
+    }
+}
+
+/// A setting as Keystead saved it. UserDefaults also takes settings from how an app was
+/// launched (`-autoLockMinutes 0`), so Release builds read the ones that guard security only
+/// from what was saved, which takes Settings or `defaults write`; Debug builds take launch
+/// arguments too, for testing.
+enum SavedSetting {
+    static func value(forKey key: String) -> Any? {
+        #if DEBUG
+        UserDefaults.standard.object(forKey: key)
+        #else
+        Bundle.main.bundleIdentifier.flatMap {
+            UserDefaults.standard.persistentDomain(forName: $0)?[key]
+        }
+        #endif
     }
 }
