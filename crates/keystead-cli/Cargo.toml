@@ -22,6 +22,11 @@ clap.workspace = true
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
 
 [dev-dependencies]
 keystead-server.workspace = true

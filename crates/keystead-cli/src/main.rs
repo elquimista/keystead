@@ -501,6 +501,7 @@ fn run(cli: Cli) -> Result<()> {
             let me = commands::setup(&home, &server, &setup_code, &name)?;
             println!("You're now your team's owner on {}.", me.server);
             println!("Your fingerprint: {}", me.fingerprint);
+            note_where_keys_are(&home);
         }
         Command::Invite { name } => {
             let invite = commands::invite(&home, &name)?;
@@ -565,6 +566,7 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("Read it to the owner, in person or on a call, so they can approve you.");
             }
+            note_where_keys_are(&home);
         }
         Command::Whoami => {
             let me = commands::whoami(&home)?;
@@ -614,6 +616,7 @@ fn run(cli: Cli) -> Result<()> {
                 "Added this machine to {}'s account (user {}) on {}.",
                 me.name, me.user_id, me.server
             );
+            note_where_keys_are(&home);
         }
         Command::RecoverWithHelp {
             server,
@@ -649,6 +652,7 @@ fn run(cli: Cli) -> Result<()> {
                 me.name, me.user_id, me.server
             );
             println!("Save your new recovery kit now: `keystead recovery-kit`.");
+            note_where_keys_are(&home);
         }
         Command::Recovery(RecoveryCommand::Start {
             user_id,
@@ -737,6 +741,7 @@ fn run(cli: Cli) -> Result<()> {
                 me.name, me.user_id, me.server
             );
             println!("Remove your lost device with `keystead devices remove <id>`.");
+            note_where_keys_are(&home);
         }
         Command::SignOut { yes } => {
             let me = commands::whoami(&home)?;
@@ -1572,6 +1577,16 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Where there's no login Keychain, says the keys are in a file that isn't encrypted.
+fn note_where_keys_are(home: &std::path::Path) {
+    if !keystead_cli::device::keys_in_keychain() {
+        println!(
+            "Your keys are in {}: only you can read it, but it isn't encrypted.",
+            home.join("device.json").display()
+        );
+    }
 }
 
 /// A generated password, a hidden prompt on a terminal, or one line from piped input.

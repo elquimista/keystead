@@ -17,6 +17,8 @@ struct Fixture {
 
 impl Fixture {
     fn start() -> Self {
+        // Throwaway accounts stay out of the login Keychain.
+        keystead_cli::device::keep_keys_in_files();
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
             "keystead-cli-test-{}-{}",

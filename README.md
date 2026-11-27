@@ -242,9 +242,12 @@ keystead recovery approve 2 --fingerprint <Bob's new fingerprint>  # Alice, afte
 keystead recovery cancel             # Bob, on a device he still has, if he didn't ask for it
 ```
 
-The CLI keeps the shared `profile.json` (the same format the Mac app uses) and its keys in
-`device.json`. For now those keys are stored unencrypted in `$KEYSTEAD_HOME/device.json` (readable only
-by you). Use it for trying things out, not for real secrets yet.
+The CLI keeps the shared `profile.json` (the same format the Mac app uses) and
+`device.json`. On a Mac its keys, the account secret and this machine's sign-in key, are in
+your login Keychain under "Keystead CLI", and `device.json` only names the item; keys from
+an older CLI move there the next time you run a command. The first run of a newly built
+`keystead` may ask to use them: choose Always Allow. Elsewhere the keys are in
+`$KEYSTEAD_HOME/device.json`, readable only by you but not encrypted.
 
 Build the macOS app (signing is covered in [apps/macos/README.md](apps/macos/README.md)):
 

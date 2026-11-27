@@ -31,6 +31,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-platform-verifier = "0.7"
 # The Argon2 keepass uses, to choose its settings for exports.
 rust-argon2 = "3"
+# The login Keychain, for the CLI's keys on a Mac.
+security-framework = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -40,7 +40,7 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
 
 | Key | What it is | Where it lives |
 | --- | --- | --- |
-| Account secret | 32 random bytes per user | On each device, wrapped by that device's hardware key |
+| Account secret | 32 random bytes per user | On each device, wrapped by that device's hardware key; the CLI keeps it in the login Keychain on a Mac, elsewhere in a file only the user can read |
 | Account encryption key | X25519, derived from the secret | Derived in memory at unlock |
 | Account signing key | Ed25519, derived from the secret | Derived in memory at unlock |
 | Account personal key | 32 bytes, derived from the secret | Derived in memory at unlock |
@@ -48,7 +48,7 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
 | Item key | 32 random bytes per item version | With the item: sealed with its folder key or its owner's personal key, and wrapped for each person and group it's shared with |
 | Group secret | 32 random bytes per group, replaced after someone leaves | Wrapped for each member's account encryption key; each older secret sealed with the next |
 | Group keys | An X25519 key and a chain key, derived from the group secret | Derived in memory; the public key is in the group's signed entry |
-| Device key | Signs the device in to the server | Secure Enclave, TPM, or (CLI) a local file |
+| Device key | Signs the device in to the server | Secure Enclave, TPM, or (CLI) with the account secret |
 | Recovery kit | The account secret as 24 words | On paper, with the user |
 
 **Deriving account keys.** HKDF-SHA256 with no salt, input = the account secret:

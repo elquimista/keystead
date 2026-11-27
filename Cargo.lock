@@ -1632,9 +1632,12 @@ dependencies = [
  "keystead-core",
  "keystead-server",
  "rpassword",
+ "security-framework",
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
