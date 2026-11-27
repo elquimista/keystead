@@ -30,6 +30,7 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use sqlx::AssertSqlSafe;
 use sqlx::SqliteConnection;
 use subtle::ConstantTimeEq;
 
@@ -194,11 +195,11 @@ pub(crate) async fn setup(
 /// same time wherever the two differ, so how long an answer takes says nothing about the
 /// code.
 async fn check_setup_code(conn: &mut SqliteConnection, given: &str) -> Result<(), ApiError> {
-    let code: Option<(String, bool)> = sqlx::query_as(&format!(
+    let code: Option<(String, bool)> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT value, COALESCE((SELECT CAST(value AS INTEGER) > {NOW} FROM settings
                                  WHERE name = 'setup_code_expires'), 0)
          FROM settings WHERE name = 'setup_code'"
-    ))
+    )))
     .fetch_optional(conn)
     .await?;
     let Some((code, works)) = code else {
@@ -359,11 +360,11 @@ pub(crate) async fn create_invite(
     OsRng.fill_bytes(&mut token);
     // Rows stay, used or not, so an id is never given to another invite: a list of them
     // on the owner's screen can't end up taking back someone else's.
-    let expires_at: i64 = sqlx::query_scalar(&format!(
+    let expires_at: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
         "INSERT INTO invites (token_hash, name, id, created_at, expires_at, nonce)
          VALUES (?, ?, (SELECT COALESCE(MAX(id), 0) + 1 FROM invites), {NOW}, {NOW} + ?, ?)
          RETURNING expires_at"
-    ))
+    )))
     .bind(&hash(&token)[..])
     .bind(&request.name)
     .bind(INVITE_LASTS.as_secs() as i64)
@@ -384,10 +385,10 @@ pub(crate) async fn invites(
 ) -> Result<Json<Invites>, ApiError> {
     let mut conn = state.readers.acquire().await?;
     require_owner(&mut conn, auth.user_id).await?;
-    let rows: Vec<(i64, String, i64, i64)> = sqlx::query_as(&format!(
+    let rows: Vec<(i64, String, i64, i64)> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT id, name, created_at, expires_at FROM invites
          WHERE used = 0 AND expires_at > {NOW} ORDER BY id"
-    ))
+    )))
     .fetch_all(&mut *conn)
     .await?;
     Ok(Json(Invites {
@@ -413,9 +414,9 @@ pub(crate) async fn revoke_invite(
 ) -> Result<StatusCode, ApiError> {
     let mut tx = state.writer.begin().await?;
     require_owner(&mut tx, auth.user_id).await?;
-    let gone = sqlx::query(&format!(
+    let gone = sqlx::query(AssertSqlSafe(format!(
         "UPDATE invites SET used = {TAKEN_BACK} WHERE id = ? AND used = 0"
-    ))
+    )))
     .bind(id)
     .execute(&mut *tx)
     .await?
@@ -458,13 +459,13 @@ pub(crate) async fn accept_invite(
         )
     };
     // Looked up without the writer first (see `AppState::writer`), then again with it.
-    sqlx::query_as::<_, (String, Option<Vec<u8>>)>(&waiting)
+    sqlx::query_as::<_, (String, Option<Vec<u8>>)>(AssertSqlSafe(waiting.as_str()))
         .bind(&hash(&token)[..])
         .fetch_optional(&state.readers)
         .await?
         .ok_or_else(gone)?;
     let mut tx = state.writer.begin().await?;
-    let (name, nonce): (String, Option<Vec<u8>>) = sqlx::query_as(&waiting)
+    let (name, nonce): (String, Option<Vec<u8>>) = sqlx::query_as(AssertSqlSafe(waiting.as_str()))
         .bind(&hash(&token)[..])
         .fetch_optional(&mut *tx)
         .await?
@@ -766,7 +767,7 @@ pub(crate) async fn directory(
     _auth: Auth,
 ) -> Result<Json<Directory>, ApiError> {
     let mut conn = state.readers.acquire().await?;
-    let rows: Vec<UserRow> = sqlx::query_as(&format!("{USER_COLUMNS} ORDER BY id"))
+    let rows: Vec<UserRow> = sqlx::query_as(AssertSqlSafe(format!("{USER_COLUMNS} ORDER BY id")))
         .fetch_all(&mut *conn)
         .await?;
     let mut retired = all_retired(&mut conn).await?;
@@ -1068,12 +1069,12 @@ pub(crate) async fn start_recovery(
     }
     let mut token = [0u8; 32];
     OsRng.fill_bytes(&mut token);
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO recoveries (user_id, token_hash, expires_at) VALUES (?, ?, {NOW} + ?)
          ON CONFLICT (user_id) DO UPDATE SET token_hash = excluded.token_hash,
              expires_at = excluded.expires_at, approved = 0, encryption_key = NULL,
              signing_key = NULL, device_id = NULL, device_key = NULL, device_name = NULL"
-    ))
+    )))
     .bind(user.0)
     .bind(&hash(&token)[..])
     .bind(RECOVERY_LIFETIME_SECONDS)
@@ -1109,11 +1110,11 @@ pub(crate) async fn recovery_in_progress(
     require_owner(&mut conn, auth.user_id).await?;
     // The new keys, if claimed, and the escrowed personal key, if any.
     type Waiting = (Option<Vec<u8>>, Option<Vec<u8>>, Option<String>);
-    let row: Option<Waiting> = sqlx::query_as(&format!(
+    let row: Option<Waiting> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT r.encryption_key, r.signing_key, u.escrow
              FROM recoveries r JOIN users u ON u.id = r.user_id
              WHERE r.user_id = ? AND NOT r.approved AND r.expires_at > {NOW}"
-    ))
+    )))
     .bind(user_id)
     .fetch_optional(&mut *conn)
     .await?;
@@ -1239,13 +1240,13 @@ pub(crate) async fn claim_recovery(
         )
     };
     // Looked up without the writer first (see `AppState::writer`), then again with it.
-    sqlx::query_as::<_, Waiting>(&waiting)
+    sqlx::query_as::<_, Waiting>(AssertSqlSafe(waiting.as_str()))
         .bind(&hash(&token)[..])
         .fetch_optional(&state.readers)
         .await?
         .ok_or_else(gone)?;
     let mut tx = state.writer.begin().await?;
-    let (user_id, device_id, encryption): Waiting = sqlx::query_as(&waiting)
+    let (user_id, device_id, encryption): Waiting = sqlx::query_as(AssertSqlSafe(waiting.as_str()))
         .bind(&hash(&token)[..])
         .fetch_optional(&mut *tx)
         .await?
@@ -1306,9 +1307,9 @@ pub(crate) async fn recovery_state(
     let token = URL_SAFE_NO_PAD
         .decode(request.token.trim())
         .map_err(|_| ApiError::NotFound)?;
-    let approved: bool = sqlx::query_scalar(&format!(
+    let approved: bool = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT approved FROM recoveries WHERE token_hash = ? AND expires_at > {NOW}"
-    ))
+    )))
     .bind(&hash(&token)[..])
     .fetch_optional(&state.readers)
     .await?
@@ -1338,10 +1339,10 @@ pub(crate) async fn approve_recovery(
         Option<String>,
         Option<String>,
     );
-    let claim: Option<Claim> = sqlx::query_as(&format!(
+    let claim: Option<Claim> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT encryption_key, signing_key, device_id, device_key, device_name FROM recoveries
          WHERE user_id = ? AND NOT approved AND expires_at > {NOW}"
-    ))
+    )))
     .bind(user.0)
     .fetch_optional(&mut *tx)
     .await?;
@@ -1516,10 +1517,10 @@ pub(crate) async fn refuse_while_recovering(
     conn: &mut SqliteConnection,
     user: UserId,
 ) -> Result<(), ApiError> {
-    let recovering: bool = sqlx::query_scalar(&format!(
+    let recovering: bool = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT EXISTS (SELECT 1 FROM recoveries
                         WHERE user_id = ? AND NOT approved AND expires_at > {NOW})"
-    ))
+    )))
     .bind(user.0)
     .fetch_one(conn)
     .await?;

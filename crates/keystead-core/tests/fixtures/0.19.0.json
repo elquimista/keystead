@@ -1,0 +1,143 @@
+{
+  "account_secret": [
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7
+  ],
+  "device": {
+    "key": "BFkat3HrvP1tnLkJTRBlKK3Rpp1EwsH2J_CJ7Fi5xhrfn05qvw0EXAxpOjxorXyXynK-ZN70om_s0mPdmKkngPA",
+    "scheme": "ecdsa-p256-sha256"
+  },
+  "device_message": "keystead fixture sign-in",
+  "device_signature": "pOQlc6qIcEXiXAFUEd_XW902Npqe18POh5Uzon6jXYLG9VZ7K4hXjZa-bWvMOAKXlyCGHzhcYVaLzSHJ72uN9g",
+  "fingerprint": "2926-0d3d-f478-c1fa-221a",
+  "folder_id": "6f1c2a3e-2222-4c4c-8a8a-000000000002",
+  "folder_info": {
+    "ciphertext": "S4GnItzo2ivUX_1vfa5rRI8xraeH3OjbFkhce2cQPhOBtnKHJLVTqfs",
+    "nonce": "jvnaEzRCJxnJKLErJkYFrFMCNb3KL2oP"
+  },
+  "folder_key": {
+    "ciphertext": "O9llw9eFe0ioh_61ZGwV_MdAYCAhEWPLeXrGuka2SoPUV1Ga1_DaEmfVlqwRQE8h",
+    "encapsulated_key": "eB05_4w9gHd2rU0mtvytyO18XadTz7gcccFPZUHGvEw",
+    "scheme": "hpke-x25519-sha256-chacha20poly1305"
+  },
+  "folder_key_for_group": {
+    "ciphertext": "aQB0svrUZx9XoAq4cpPYM6nePuaYZAN6c1Ts1Wg0YUrZdz_0LtAwCFzBtnEp-_uE",
+    "encapsulated_key": "CekSAd-Bl4rUiHCemr6qtLsOfx37rjhZ8SC2ayEKUhE",
+    "scheme": "hpke-x25519-sha256-chacha20poly1305"
+  },
+  "folder_pin": "ARnuGatQLwPekDDnPsot05HuHv_5PqinHebMfSXS5TI",
+  "group_generation": 3,
+  "group_id": "6f1c2a3e-1111-4c4c-8a8a-000000000001",
+  "group_public": "wTwml1f9wlQebHDuFf5O-1dwwum1E6cdtoUv5SaSezk",
+  "group_secret": {
+    "ciphertext": "4G99w-S75RSuLrBpbnW1Ur6ajHsEtP3mTcPvPk8iaGLb1QoAeISIGWw5UNo_fb7x",
+    "encapsulated_key": "PojF-Tp8DeMjEAJT5eE7gr-Dk1I8M5jkMR51K63J_HU",
+    "scheme": "hpke-x25519-sha256-chacha20poly1305"
+  },
+  "item": {
+    "author": 1,
+    "deleted": false,
+    "details": {
+      "ciphertext": "TD8-lvUJQo0YqLdVWq_NlcNz7jkXKLozKk1rdQQu37XsvgmFfmnpjnG0gIAuh4ZtM4Eu67mw4kzuTgX6v9Y-2LcGN37RMXA",
+      "nonce": "h5Sx_JmepUq0Wz_J-vHLZq_cbnv54edP"
+    },
+    "folder_id": "6f1c2a3e-2222-4c4c-8a8a-000000000002",
+    "format": 3,
+    "id": "6f1c2a3e-3333-4c4c-8a8a-000000000003",
+    "keys": {
+      "folder": {
+        "ciphertext": "RNJ-ZXZvWW3RcEX4q_100Feyq6SeSUumNACTTWD8y6XU3qCIZYSSR3XpnV6_Ap1f",
+        "nonce": "25wq1jfG9LTsi85T3pPBdpuNzfI2J_7r"
+      },
+      "groups": [
+        {
+          "generation": 3,
+          "group_id": "6f1c2a3e-1111-4c4c-8a8a-000000000001",
+          "wrapped_key": {
+            "ciphertext": "z3DiKiV3yxykPio2aL6PrKksK--GSAp6gSo7xUepPNhd_gMwx9NWr08ggjsAaWwY",
+            "encapsulated_key": "m4PfhmoMxv_fZUrxsohcSCdWEeCm65M_pQ3n0etQcSI",
+            "scheme": "hpke-x25519-sha256-chacha20poly1305"
+          }
+        }
+      ],
+      "people": [
+        {
+          "user_id": 1,
+          "wrapped_key": {
+            "ciphertext": "XcMViBd5lmEIHKECR3SVZ7i6l6QgrSgXg3-oj0MDMvtXkRXNHRAnH_fcth_xPISA",
+            "encapsulated_key": "MQuqAE4vl42U99YmhxLoG66QMVqvfq2O0J290rj4anY",
+            "scheme": "hpke-x25519-sha256-chacha20poly1305"
+          }
+        }
+      ]
+    },
+    "overview": {
+      "ciphertext": "EPxsSRxvs1GZzhwLmaRqIKd4f1LTlwDHwH3JhxzSGw7GgbhSiyHw_6Rx08XZJnHOVxa17P6atCOYsG8uqcSyYw94ozBApdGOfl5C0ycvfDf4I_rvOLI0cjUomcI",
+      "nonce": "1mBVXYUzLMXZM1dkeLrYSKmVP-vgDw9Q"
+    },
+    "signature": "sbl2tgd8yG7e5irXJiYPs6mzwZq1CNKjWs45ktMwrGnL5x8BbZeYJST3mikQSVUuNdo6ydmOMtweV8nEKbg5Dw",
+    "version": 1
+  },
+  "own_item": {
+    "author": 1,
+    "deleted": false,
+    "details": {
+      "ciphertext": "wJRPbAqD7cFleEU8suKOe-y97yl9EF5RgwAm00pkErPtYCyuTJ4SsSZE2QQ1qqaUmf5mOP3JQQP33MvNSPBryYhaov6chnY",
+      "nonce": "Oc2Q5_R451E8wXGElJVsOV124xUOfDV8"
+    },
+    "format": 2,
+    "id": "6f1c2a3e-4444-4c4c-8a8a-000000000004",
+    "keys": {
+      "owner": {
+        "ciphertext": "lH2JH4YFH9XmEhPL5msfRJxb2gXlqRGUdEv172woAhpfZ1fG0e1HnoenNA-AyskE",
+        "nonce": "e9DZxTPyY7QBg5d_xcgna6-kbpqptozH"
+      }
+    },
+    "overview": {
+      "ciphertext": "0C-1zwjPa3bJ9Bde4QVRvYntOkvnJkHN9iAdZtALKcyBbvQbXcXmAlUhQFdBeAxRUucX_aLCB2DCArqq4GAjJdW1E2NLAJIYAPgO_DZFW2GH2spDNYmrf3JuN60",
+      "nonce": "QvEHcRM_50GTJIlBG_QmW3A3BiBSTIbt"
+    },
+    "owner": 1,
+    "signature": "yRoY476BRdvFMdiOMB_9C19RAxTyvtwXeUn3Yd_7TQV4DvLsBtmaFYo-ojtl4ODGbPCEAXw4MgiZkH_rRLjvAg",
+    "version": 1
+  },
+  "personal_key": {
+    "ciphertext": "mv6dhoPTrf2Tyby6azdEtvnHShICupitQF6DcWSSydbOR8rM927sCv2jPVL9GdNZ",
+    "encapsulated_key": "G5EXOmv_Pb9Kqd9WzalSYV68nRyji9TEZ3UDP5kqWCU",
+    "scheme": "hpke-x25519-sha256-chacha20poly1305"
+  },
+  "public": {
+    "encryption": "5JAEHFG2MZ3_-ta1eDNBaVS4HmdVN6r82qSgBcax2TM",
+    "signing": "dBqDnYqxsVTPeWZYVEDA1NR_KcEPSG9RsgEp7IcyY3s"
+  }
+}

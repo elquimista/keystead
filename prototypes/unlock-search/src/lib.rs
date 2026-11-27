@@ -131,13 +131,12 @@ impl Vault {
             let mut key = [0u8; 32];
             OsRng.fill_bytes(&mut key);
             let (encapped_key, ciphertext) =
-                hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
+                hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem>(
                     &OpModeS::Base,
                     &account.public_key,
                     FOLDER_KEY_INFO,
                     &key,
                     &folder_id.to_le_bytes(),
-                    &mut OsRng,
                 )
                 .expect("sealing a folder key");
             folder_keys.push(WrappedFolderKey {

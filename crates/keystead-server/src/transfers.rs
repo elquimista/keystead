@@ -20,6 +20,7 @@ use rand::rngs::OsRng;
 
 use crate::accounts::{Auth, MAX_DEVICES, check_name, device_count, hash};
 use crate::{ApiError, AppState};
+use sqlx::AssertSqlSafe;
 
 /// How long a transfer waits for the new device and the approval.
 const LIFETIME_SECONDS: i64 = 10 * 60;
@@ -45,9 +46,9 @@ pub(crate) async fn start(
              remove`"
         )));
     }
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM device_transfers WHERE expires_at < {NOW}"
-    ))
+    )))
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -59,10 +60,10 @@ pub(crate) async fn start(
     .bind(OPEN_PER_ACCOUNT - 1)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO device_transfers (id, token_hash, user_id, expires_at)
          VALUES (?, ?, ?, {NOW} + ?)"
-    ))
+    )))
     .bind(&id)
     .bind(&hash(&token)[..])
     .bind(auth.user_id.0)
@@ -85,10 +86,10 @@ pub(crate) async fn join(
     check_name(&request.device_name)?;
     let token_hash = token_hash(&request.token)?;
     // Looked up without the writer first (see `AppState::writer`).
-    let waiting: bool = sqlx::query_scalar(&format!(
+    let waiting: bool = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT EXISTS (SELECT 1 FROM device_transfers
          WHERE token_hash = ? AND transfer_key IS NULL AND expires_at >= {NOW})"
-    ))
+    )))
     .bind(&token_hash[..])
     .fetch_one(&state.readers)
     .await?;
@@ -96,10 +97,10 @@ pub(crate) async fn join(
         return Err(ApiError::NotFound);
     }
     let mut tx = state.writer.begin().await?;
-    let joined = sqlx::query(&format!(
+    let joined = sqlx::query(AssertSqlSafe(format!(
         "UPDATE device_transfers SET device_name = ?, transfer_key = ?
          WHERE token_hash = ? AND transfer_key IS NULL AND expires_at >= {NOW}"
-    ))
+    )))
     .bind(&request.device_name)
     .bind(serde_json::to_string(&request.transfer_key)?)
     .bind(&token_hash[..])
@@ -121,10 +122,10 @@ pub(crate) async fn state(
     auth: Auth,
     Path(id): Path<String>,
 ) -> Result<Json<DeviceTransferState>, ApiError> {
-    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(&format!(
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT device_name, transfer_key FROM device_transfers
          WHERE id = ? AND user_id = ? AND expires_at >= {NOW}"
-    ))
+    )))
     .bind(&id)
     .bind(auth.user_id.0)
     .fetch_optional(&state.readers)
@@ -146,11 +147,11 @@ pub(crate) async fn send_secret(
     Json(request): Json<SendAccountSecretRequest>,
 ) -> Result<StatusCode, ApiError> {
     let mut tx = state.writer.begin().await?;
-    let sent = sqlx::query(&format!(
+    let sent = sqlx::query(AssertSqlSafe(format!(
         "UPDATE device_transfers SET wrapped_secret = ?
          WHERE id = ? AND user_id = ? AND transfer_key IS NOT NULL AND wrapped_secret IS NULL
            AND expires_at >= {NOW}"
-    ))
+    )))
     .bind(serde_json::to_string(&request.wrapped_secret)?)
     .bind(&id)
     .bind(auth.user_id.0)
@@ -180,18 +181,19 @@ pub(crate) async fn claim(
     // The new device asks every few seconds while it waits. Until the secret is there,
     // and for a token that doesn't work, the answer comes without the writer (see
     // `AppState::writer`).
-    let waiting: Option<String> = sqlx::query_scalar::<_, Option<String>>(&sealed)
-        .bind(&token_hash[..])
-        .fetch_optional(&state.readers)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let waiting: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>(AssertSqlSafe(sealed.as_str()))
+            .bind(&token_hash[..])
+            .fetch_optional(&state.readers)
+            .await?
+            .ok_or(ApiError::NotFound)?;
     if waiting.is_none() {
         return Ok(Json(ClaimedAccountSecret {
             wrapped_secret: None,
         }));
     }
     let mut tx = state.writer.begin().await?;
-    let wrapped_secret = sqlx::query_scalar::<_, Option<String>>(&sealed)
+    let wrapped_secret = sqlx::query_scalar::<_, Option<String>>(AssertSqlSafe(sealed.as_str()))
         .bind(&token_hash[..])
         .fetch_optional(&mut *tx)
         .await?

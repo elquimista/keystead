@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use keystead_core::keys::AccountSecret;
 use keystead_ffi::{
     CoreError, DeviceSigner, LoginFields, Role, SaveOutcome, Vault,
     account_secret_from_recovery_words, new_device_id, parse_invite, recovery_words,
 };
 use keystead_server::AppState;
 use p256::ecdsa::signature::Signer as _;
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 
 /// ECDSA P-256 with a SEC1 public key and raw r‖s signatures, like `SecureEnclaveSigner`.
 struct EnclaveLikeSigner(p256::ecdsa::SigningKey);
@@ -21,7 +21,7 @@ impl DeviceSigner for EnclaveLikeSigner {
     fn public_key(&self) -> Vec<u8> {
         self.0
             .verifying_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec()
     }
@@ -33,15 +33,17 @@ impl DeviceSigner for EnclaveLikeSigner {
 }
 
 fn signer() -> Arc<dyn DeviceSigner> {
-    Arc::new(EnclaveLikeSigner(p256::ecdsa::SigningKey::random(
-        &mut OsRng,
-    )))
+    // From random bytes, like a Secure Enclave key: one out of range is all but
+    // impossible, and tried again.
+    loop {
+        if let Ok(key) = p256::ecdsa::SigningKey::from_slice(AccountSecret::generate().as_bytes()) {
+            return Arc::new(EnclaveLikeSigner(key));
+        }
+    }
 }
 
 fn account_secret() -> Vec<u8> {
-    let mut bytes = vec![0; 32];
-    OsRng.fill_bytes(&mut bytes);
-    bytes
+    AccountSecret::generate().as_bytes().to_vec()
 }
 
 struct Server {

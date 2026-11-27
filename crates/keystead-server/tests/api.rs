@@ -66,7 +66,10 @@ impl Server {
     async fn sql(&self, sql: &str) {
         let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&self.path);
         let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
-        sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&pool)
+            .await
+            .unwrap();
         pool.close().await;
     }
 
@@ -106,7 +109,10 @@ impl Server {
     async fn number(&self, sql: &str) -> i64 {
         let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&self.path);
         let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
-        let number = sqlx::query_scalar(sql).fetch_one(&pool).await.unwrap();
+        let number = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         pool.close().await;
         number
     }

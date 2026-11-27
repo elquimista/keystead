@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 chacha20poly1305 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-hpke = "0.12"
+hpke.workspace = true
 nucleo-matcher = "0.3"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }

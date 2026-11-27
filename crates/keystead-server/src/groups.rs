@@ -18,6 +18,7 @@ use keystead_core::api::{
 };
 use keystead_core::groups::GroupEntry;
 use keystead_core::ids::{GroupId, UserId};
+use sqlx::AssertSqlSafe;
 use sqlx::SqliteConnection;
 
 use crate::accounts::{Auth, check_name};
@@ -338,10 +339,12 @@ pub(crate) async fn delete_group(
         "group_keys",
         "group_entries",
     ] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE group_id = ?"))
-            .bind(group_id.to_string())
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE group_id = ?"
+        )))
+        .bind(group_id.to_string())
+        .execute(&mut *tx)
+        .await?;
     }
     sqlx::query("DELETE FROM team_groups WHERE id = ?")
         .bind(group_id.to_string())

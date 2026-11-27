@@ -32,6 +32,7 @@ use keystead_core::encoding::Key32;
 use keystead_core::ids::UserId;
 use keystead_core::keys::AccountPublicKeys;
 use rand::Rng;
+use sqlx::AssertSqlSafe;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePool, SqlitePoolOptions,
     SqliteSynchronous,
@@ -361,21 +362,21 @@ impl AppState {
             // A code that ran out is replaced, here at start. One from before codes ran
             // out (0.16.0) gets its day from now.
             let mut tx = writer.begin().await?;
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "DELETE FROM settings WHERE name IN ('setup_code', 'setup_code_expires')
                    AND EXISTS (SELECT 1 FROM settings WHERE name = 'setup_code_expires'
                                AND CAST(value AS INTEGER) <= {NOW})"
-            ))
+            )))
             .execute(&mut *tx)
             .await?;
             sqlx::query("INSERT OR IGNORE INTO settings (name, value) VALUES ('setup_code', ?)")
                 .bind(new_setup_code())
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "INSERT OR IGNORE INTO settings (name, value)
                  VALUES ('setup_code_expires', {NOW} + {SETUP_CODE_LASTS})"
-            ))
+            )))
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -392,11 +393,11 @@ impl AppState {
 
     /// The setup code, until someone has used it or it has run out.
     pub async fn pending_setup_code(&self) -> Result<Option<String>, sqlx::Error> {
-        sqlx::query_scalar(&format!(
+        sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT value FROM settings WHERE name = 'setup_code'
                AND EXISTS (SELECT 1 FROM settings WHERE name = 'setup_code_expires'
                            AND CAST(value AS INTEGER) > {NOW})"
-        ))
+        )))
         .fetch_optional(&self.readers)
         .await
     }
@@ -645,9 +646,11 @@ async fn migrate(writer: &SqlitePool) -> Result<(), sqlx::Error> {
     let applied = usize::try_from(applied).unwrap_or(0);
     for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
         let mut tx = writer.begin().await?;
-        sqlx::raw_sql(migration).execute(&mut *tx).await?;
+        sqlx::raw_sql(*migration).execute(&mut *tx).await?;
         let version = format!("PRAGMA user_version = {}", index + 1);
-        sqlx::raw_sql(&version).execute(&mut *tx).await?;
+        sqlx::raw_sql(AssertSqlSafe(version))
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
     }
     Ok(())
@@ -711,10 +714,11 @@ async fn user_entry(
     conn: &mut SqliteConnection,
     user: UserId,
 ) -> Result<Option<DirectoryEntry>, ApiError> {
-    let row: Option<UserRow> = sqlx::query_as(&format!("{USER_COLUMNS} WHERE id = ?"))
-        .bind(user.0)
-        .fetch_optional(&mut *conn)
-        .await?;
+    let row: Option<UserRow> =
+        sqlx::query_as(AssertSqlSafe(format!("{USER_COLUMNS} WHERE id = ?")))
+            .bind(user.0)
+            .fetch_optional(&mut *conn)
+            .await?;
     let Some(row) = row else {
         return Ok(None);
     };

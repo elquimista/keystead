@@ -2,6 +2,12 @@
 
 What each release changes, newest first. The release workflow puts a version's section at the top of its GitHub release, above the install notes. GitHub shows line breaks there as they are, so each paragraph and item is one line. Releases before 0.16.0 have their notes on the [releases page](https://github.com/elquimista/keystead/releases).
 
+## Unreleased
+
+**Security**
+
+- The encryption and database libraries are updated (hpke 0.15, p256 0.14, and sqlx 0.9 with a newer SQLite), which clears the two advisories that CI's dependency check allowed in 0.19.0. Nothing stored changes: a test checks that keys, logins and sign-in signatures made by 0.19.0 still open and verify, and a server's database from 0.16.0 opens and updates as before. Building from source takes Rust 1.94 or later.
+
 ## 0.19.0
 
 Update the server and the apps in any order; each works with the other on an older version, without the new savings. Copy the new `deploy/keystead.nginx.conf` over yours, and `git pull` for the new `deploy/compose.yaml`, as in "Updating to 0.19.0" in `deploy/README.md`.

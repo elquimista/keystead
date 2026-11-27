@@ -275,13 +275,13 @@ fn hpke_wrap(
     aad: &[u8],
 ) -> Result<WrappedKey, Error> {
     let recipient = KemPublicKey::from_bytes(&recipient.0).map_err(|_| Error::InvalidKey)?;
-    let (encapped, ciphertext) = hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
+    // A fresh key to encapsulate, from the operating system's random source.
+    let (encapped, ciphertext) = hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem>(
         &OpModeS::Base,
         &recipient,
         info,
         key,
         aad,
-        &mut OsRng,
     )
     .map_err(|_| Error::InvalidKey)?;
     Ok(WrappedKey {
@@ -991,15 +991,18 @@ mod tests {
     fn secure_enclave_style_p256_keys_sign_in() {
         use p256::ecdsa::signature::Signer as _;
 
-        let key = p256::ecdsa::SigningKey::random(&mut OsRng);
+        // From random bytes, like a Secure Enclave key: one out of range is all but
+        // impossible, and tried again.
+        let key = loop {
+            let mut bytes = [0u8; 32];
+            OsRng.fill_bytes(&mut bytes);
+            if let Ok(key) = p256::ecdsa::SigningKey::from_slice(&bytes) {
+                break key;
+            }
+        };
         let public = DevicePublicKey {
             scheme: DeviceKeyScheme::EcdsaP256Sha256,
-            key: Bytes(
-                key.verifying_key()
-                    .to_encoded_point(false)
-                    .as_bytes()
-                    .to_vec(),
-            ),
+            key: Bytes(key.verifying_key().to_sec1_point(false).as_bytes().to_vec()),
         };
         let message = sign_in_message(DeviceId::random(), b"challenge");
         let signature: p256::ecdsa::Signature = key.sign(&message);

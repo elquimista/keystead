@@ -33,7 +33,7 @@ impl DeviceSigner for P256Signer {
             key: Bytes(
                 self.0
                     .verifying_key()
-                    .to_encoded_point(false)
+                    .to_sec1_point(false)
                     .as_bytes()
                     .to_vec(),
             ),
@@ -90,7 +90,10 @@ impl Fixture {
         self._runtime.block_on(async {
             let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
             let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
-            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&pool)
+                .await
+                .unwrap();
             pool.close().await;
         });
     }
@@ -127,9 +130,7 @@ fn a_secure_enclave_style_device_joins_and_syncs() {
     let invite = alice.invite("Bob").unwrap();
 
     let bob_secret = AccountSecret::generate();
-    let bob_signer: Arc<dyn DeviceSigner> = Arc::new(P256Signer(p256::ecdsa::SigningKey::random(
-        &mut rand_core_rng(),
-    )));
+    let bob_signer: Arc<dyn DeviceSigner> = Arc::new(P256Signer(enclave_key()));
     let bob = join(
         &fixture.profile("bob"),
         NewAccount {
@@ -217,11 +218,7 @@ fn opening_with_the_wrong_secret_cannot_read_items() {
 #[test]
 fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
     let fixture = Fixture::start();
-    let enclave = || -> Arc<dyn DeviceSigner> {
-        Arc::new(P256Signer(p256::ecdsa::SigningKey::random(
-            &mut rand_core_rng(),
-        )))
-    };
+    let enclave = || -> Arc<dyn DeviceSigner> { Arc::new(P256Signer(enclave_key())) };
 
     // Alice owns the server from her Mac and shares a folder with Bob.
     let alice_secret = AccountSecret::generate();
@@ -658,8 +655,14 @@ fn one_login_from_a_folder_can_be_shared_alone() {
     );
 }
 
-fn rand_core_rng() -> impl p256::elliptic_curve::rand_core::CryptoRngCore {
-    p256::elliptic_curve::rand_core::OsRng
+/// A random P-256 key, like a Mac's Secure Enclave key: from random bytes, as one out of
+/// range is all but impossible (and tried again).
+fn enclave_key() -> p256::ecdsa::SigningKey {
+    loop {
+        if let Ok(key) = p256::ecdsa::SigningKey::from_slice(AccountSecret::generate().as_bytes()) {
+            return key;
+        }
+    }
 }
 
 #[test]

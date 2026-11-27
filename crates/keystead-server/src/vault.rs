@@ -30,6 +30,7 @@ use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT, Sealed};
 use keystead_core::keys::WrappedKey;
 use serde::Deserialize;
+use sqlx::AssertSqlSafe;
 use sqlx::SqliteConnection;
 
 use crate::accounts::Auth;
@@ -529,10 +530,12 @@ pub(crate) async fn recovered(conn: &mut SqliteConnection, user: UserId) -> Resu
     .execute(&mut *conn)
     .await?;
     for table in ["members", "group_members"] {
-        sqlx::query(&format!("UPDATE {table} SET pending = 1 WHERE user_id = ?"))
-            .bind(user.0)
-            .execute(&mut *conn)
-            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {table} SET pending = 1 WHERE user_id = ?"
+        )))
+        .bind(user.0)
+        .execute(&mut *conn)
+        .await?;
     }
     sqlx::query(
         "UPDATE item_access SET pending = 1
@@ -595,9 +598,9 @@ pub(crate) async fn delete_folder(
     .fetch_all(&mut *tx)
     .await?;
     for table in ["item_access", "item_groups", "item_history", "exposures"] {
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "DELETE FROM {table} WHERE item_id IN (SELECT id FROM items WHERE folder_id = ?)"
-        ))
+        )))
         .bind(&folder)
         .execute(&mut *tx)
         .await?;
@@ -609,10 +612,12 @@ pub(crate) async fn delete_folder(
         "folder_keys",
         "folder_entries",
     ] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE folder_id = ?"))
-            .bind(&folder)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE folder_id = ?"
+        )))
+        .bind(&folder)
+        .execute(&mut *tx)
+        .await?;
     }
     sqlx::query("DELETE FROM folders WHERE id = ?")
         .bind(&folder)
@@ -1353,9 +1358,9 @@ async fn save_item(
             .bind(item_id.to_string())
             .execute(&mut *tx)
             .await?;
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "{EXPOSE} VALUES (?1, ?2, CAST(strftime('%s', 'now') AS INTEGER)) {EXPOSE_AGAIN}"
-            ))
+            )))
             .bind(item_id.to_string())
             .bind(member)
             .execute(&mut *tx)
@@ -1383,9 +1388,11 @@ pub(crate) async fn purge_deleted(conn: &mut SqliteConnection) -> Result<(), sql
         DELETED_KEPT_DAYS * 86_400
     );
     for table in ["item_history", "exposures"] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE item_id IN ({expired})"))
-            .execute(&mut *conn)
-            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE item_id IN ({expired})"
+        )))
+        .execute(&mut *conn)
+        .await?;
     }
     Ok(())
 }
@@ -1399,7 +1406,7 @@ pub(crate) async fn deleted_items(
     auth: Auth,
 ) -> Result<Json<DeletedItems>, ApiError> {
     let mut conn = state.readers.acquire().await?;
-    let rows: Vec<(i64, String, String)> = sqlx::query_as(&format!(
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT i.saved_at, i.body, h.body FROM items i
          JOIN item_history h ON h.item_id = i.id
          WHERE COALESCE(json_extract(i.body, '$.deleted'), 0)
@@ -1407,7 +1414,7 @@ pub(crate) async fn deleted_items(
            AND h.version = (SELECT MAX(version) FROM item_history WHERE item_id = i.id)
          ORDER BY i.saved_at DESC",
         DELETED_KEPT_DAYS * 86_400
-    ))
+    )))
     .fetch_all(&mut *conn)
     .await?;
     let mut items = Vec::new();
@@ -1444,10 +1451,12 @@ pub(crate) async fn purge_item(
         "delete this for good",
     )?;
     for table in ["item_history", "exposures"] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE item_id = ?"))
-            .bind(item_id.to_string())
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE item_id = ?"
+        )))
+        .bind(item_id.to_string())
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
@@ -2523,11 +2532,11 @@ pub(crate) async fn expose_folder(
     user: UserId,
     folder_id: &str,
 ) -> Result<(), ApiError> {
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
          WHERE folder_id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
          {EXPOSE_AGAIN}"
-    ))
+    )))
     .bind(user.0)
     .bind(folder_id)
     .execute(&mut *conn)
@@ -2541,11 +2550,11 @@ pub(crate) async fn expose_item(
     user: UserId,
     item_id: &str,
 ) -> Result<(), ApiError> {
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
          WHERE id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
          {EXPOSE_AGAIN}"
-    ))
+    )))
     .bind(user.0)
     .bind(item_id)
     .execute(&mut *conn)
@@ -2683,11 +2692,11 @@ async fn reconcile_with(
         .await?;
         // They could see every password in it.
         if expose {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
                  WHERE folder_id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
                  {EXPOSE_AGAIN}"
-            ))
+            )))
             .bind(user.0)
             .bind(folder_id)
             .execute(&mut *conn)
@@ -2793,11 +2802,11 @@ async fn lose_item(
         .execute(&mut *conn)
         .await?;
     if expose {
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
              WHERE id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
              {EXPOSE_AGAIN}"
-        ))
+        )))
         .bind(user)
         .bind(item_id)
         .execute(&mut *conn)
