@@ -658,7 +658,8 @@ or 405 to listing and revoking, leave out `expires_at`, and their invites work u
 used; clients say to update the server instead of failing.
 
 When saving an item, the server checks that the path and body ids match, the session's
-user is the author and the version is `base_version + 1` (or 1 for a new item). The
+user is the author and the version is `base_version + 1`, or from 0.17.0 up to 1,000,000
+past that (see Older copies), or 1 for a new item. The
 author must be an editor or manager of the current version (see Roles); a new item must
 be in a folder where the author edits or manages, or be the author's own. Adding anyone
 to `people`, or dropping anyone, takes a manager, except that anyone who can save may
@@ -682,7 +683,9 @@ differs from the previous version's (see Passwords to change). A live version ma
 deletion marker, which brings the item back (see Recently deleted). If another version was
 saved first, it answers 409 with that version. A client keeps the answer to a save only
 if it's the version it sent, and a 409's version only if it's of the same item and signed
-by an approved author. A first version under an id already in use
+by an approved author. If that version is older than the client's own copy, the server is
+behind, and the client saves its version again on top of it (see Older copies). A first
+version under an id already in use
 gets the item there back the same way only if the caller can open it; anyone else gets a
 409 with just an error, so an id kept by someone who lost access shows them nothing.
 
@@ -840,6 +843,14 @@ consistent snapshot:
   before anything that needs the group's keys.
 - `left_group`: forget a group's keys.
 
+Change numbers only go up. From 0.17.0 each is also at least the time it was given out, in
+milliseconds since 1970, so a server restored from a backup numbers its new changes past
+anything a device saw before the restore, instead of giving the same numbers to other
+changes, which devices would skip. When caught up, a page's `cursor` is the newest change
+number, from 0.17.0 even if the cursor asked with is higher: that happens only if the
+server went back, and the client takes the lower number and says so. Servers before then
+answer with the higher one.
+
 **Pages.** A page holds up to `limit` entries (500 unless asked, 1,000 at most) and, from
 0.17.0, about 4 MB of items: it ends before the entry that would take it over, though it
 always takes one. `more` says to ask again from `cursor`. So an answer stays under the
@@ -937,6 +948,42 @@ the first, so a server can still show it an earlier state of the folder as the c
 one. And clients that only ever talk to a server from before 0.15.0 take its lists at its
 word, as before; once a client has seen a server keep signed members, it doesn't go back.
 
+### Older copies
+
+Everything a server hands out is signed, but so is an older copy: an earlier version of an
+item, an earlier key of a folder with the entries it had then, a group's entries cut back
+to an earlier revision. A server could hand one out as if it were the current one, to put
+back a password that was changed or someone who was taken out.
+
+A client keeps the newest it has seen of each item (its `version`), each folder (its key's
+`generation` and its latest entry's `revision`) and each group (its latest entry's
+`revision`). What it holds says that. When it drops something, after losing a login,
+leaving a folder or seeing a group deleted, it remembers how far it had seen it, until it
+holds something at least that new again. Then:
+
+- An item older than the client's copy, or than what it remembers of one it dropped, is
+  ignored. So is a folder record or group with an earlier generation or fewer entries.
+  The client keeps what it has and the sync says so.
+- An equal version is the same one, and is taken: as when someone is added back.
+- A save answered with an older version than the client's (409) means the server is
+  behind. The client sends the version it sealed again, on top of the server's copy
+  (`base_version` set to the server's). Its number is past everything the client has
+  seen, so every client takes it. Servers before 0.17.0 take only the version right after
+  their own, and refuse it (400); the client then says to update the server.
+- A save answered 404 says the server doesn't have the item: deleted for good, or a
+  server restored from before it existed. The client says so and doesn't re-create it.
+
+**A server restored from a backup** looks exactly like this. Clients keep their newer
+copies, follow the server's change numbers down and warn. A device that first syncs again
+after new changes were made isn't warned, as nothing it gets is older. What was saved after the backup
+was made isn't on the server, and only each author can save their versions again: people
+save their recent changes again. Their newer copies are what they edit, and their saves go
+past the versions others saw.
+
+**What this doesn't cover.** A device that has never seen something has nothing to compare
+with: a new device, or one that never had a folder, can be shown an older state as the
+current one. Only a log of every change, signed and kept by every device, would close that.
+
 ### Signed roles
 
 (0.17.0 and later; `"membership": 2` in `GET /v1/health`.) Before, the entries said who is
@@ -1011,8 +1058,8 @@ key, is written down as a manager, like everyone from before roles.
 **What this doesn't cover.** Roles on a single item shared directly, and so what someone
 outside a folder may do to an item in it. Someone who could once edit a folder can still
 be passed off as the author of a later version, since nothing signed says when a version
-was written. A new device, which a server can show an earlier state of a folder, can be
-shown one from before its roles were signed. And a group's managers are the server's to
+was written. A new device, which a server can show an earlier state of a folder (see Older
+copies), can be shown one from before its roles were signed. And a group's managers are the server's to
 name: anyone in a group can sign its next entry.
 
 ## Not in this format yet

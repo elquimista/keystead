@@ -21,6 +21,8 @@ account back on a new Mac with a Recovery Kit.
 - **Syncing:** on its own every 5 minutes while unlocked, and when you come back to the app
   after a minute or more; Vault › Sync (⌘R) syncs now. A sync asked for while one runs
   waits for it and then runs once, and a spinner stands in for the sync button meanwhile.
+  If the server sends older copies of logins, folders or groups than this Mac has already
+  seen, as one restored from a backup does, the Mac keeps its own and says so.
 - **Moving logins:** Move To… (in a login's "⋯" toolbar menu or right-click menu) moves it to
   another folder you can add to, or out of folders as yours. Whoever had it only through
   the old folder loses it, and its password goes on their To Change list; people and

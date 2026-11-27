@@ -740,6 +740,9 @@ pub fn sync(home: &Path) -> Result<SyncSummary> {
 }
 
 pub fn warn_rejected(summary: &SyncSummary) {
+    if summary.older > 0 || summary.server_went_back {
+        eprintln!("warning: {}", older_note(summary));
+    }
     if summary.rejected > 0 {
         eprintln!(
             "warning: ignored {} change(s) by someone who isn't approved, or who can only \
@@ -750,6 +753,24 @@ pub fn warn_rejected(summary: &SyncSummary) {
     for problem in &summary.rekey_problems {
         eprintln!("warning: couldn't give a folder or group its new key ({problem}); will retry");
     }
+}
+
+/// What to say when the server sent older copies than this device had seen, or its
+/// change numbers went back.
+pub fn older_note(summary: &SyncSummary) -> String {
+    let what = if summary.older > 0 {
+        format!(
+            "the server sent older copies of {} login(s), folder(s) or group(s) than this \
+             device has already seen, and it kept its own",
+            summary.older
+        )
+    } else {
+        "the server's changes went back to an earlier point".to_owned()
+    };
+    format!(
+        "{what}. If the server was restored from a backup, save your recent changes again; \
+         if not, don't trust it"
+    )
 }
 
 fn open(home: &Path) -> Result<Vault> {

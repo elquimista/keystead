@@ -3210,3 +3210,156 @@ fn a_login_put_in_a_folder_by_someone_outside_it_doesnt_open() {
     assert_eq!(alice.profile().items[&aws].version, 2);
     assert!(alice.open_item(aws).is_err());
 }
+
+/// Puts an older signed version of a login back on the server as its current one, with
+/// the history it had then, as a server restored from a backup has it, or one that keeps
+/// newer versions back.
+fn put_back(fixture: &Fixture, older: &EncryptedItem) {
+    fixture.lie(&format!(
+        "UPDATE feed_counter SET last_seq = last_seq + 1;
+         UPDATE items SET version = {version}, seq = (SELECT last_seq FROM feed_counter),
+                body = '{body}'
+         WHERE id = '{id}';
+         DELETE FROM item_history WHERE item_id = '{id}' AND version >= {version}",
+        version = older.version,
+        body = serde_json::to_string(older).unwrap(),
+        id = older.id
+    ));
+}
+
+/// Every copy the server hands out is signed, but so is an older one. A device keeps the
+/// newest it has seen of a login, in a folder or not, also after losing it, and of each
+/// group; and saving over a server that has gone back puts the edit past what anyone saw.
+#[test]
+fn a_server_cant_hand_back_older_copies_as_current_ones() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let carol_identity = carol.whoami();
+    alice
+        .approve(carol_identity.user_id, &carol_identity.fingerprint)
+        .unwrap();
+    let password = |vault: &Vault, item| vault.open_item(item).unwrap().1.password.clone();
+
+    // A login in a folder Bob can edit: version 1, then 2.
+    alice.create_folder("Production").unwrap();
+    let (overview, details) = login("AWS root", "first");
+    let aws = alice.add(Some("Production"), overview, details).unwrap();
+    let first = alice.profile().items[&aws].clone();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    alice.edit(aws, "second").unwrap();
+    bob.sync().unwrap();
+    assert_eq!(password(&bob, aws), "second");
+
+    // The server puts version 1 back. Bob keeps version 2, and is told.
+    put_back(&fixture, &first);
+    let summary = bob.sync().unwrap();
+    assert_eq!((summary.older, summary.rejected), (1, 0));
+    assert_eq!(password(&bob, aws), "second");
+
+    // Bob changes it: his edit goes on top of the server's copy, as version 3, past what
+    // anyone saw, and reaches Alice, who had version 2.
+    assert!(matches!(
+        bob.edit(aws, "third").unwrap(),
+        EditOutcome::Saved { version: 3 }
+    ));
+    assert_eq!(alice.sync().unwrap().older, 0);
+    assert_eq!(password(&alice, aws), "third");
+
+    // Alice's own login, shared with Bob directly, then not: Bob drops it, and remembers
+    // how far he had seen it. The server can't hand him an older version as if it were
+    // shared with him again.
+    let (overview, details) = login("Bank", "pw");
+    let bank = alice.add(None, overview, details).unwrap();
+    alice.share_item(bank, bob_id, Role::View).unwrap();
+    let shared = alice.profile().items[&bank].clone();
+    alice.edit(bank, "pw2").unwrap();
+    bob.sync().unwrap();
+    assert_eq!(password(&bob, bank), "pw2");
+    alice.unshare_item(bank, bob_id).unwrap();
+    bob.sync().unwrap();
+    assert!(bob.open_item(bank).is_err());
+    put_back(&fixture, &shared);
+    fixture.lie(&format!(
+        "INSERT INTO item_reach (user_id, item_id) VALUES ({bob_id}, '{bank}');
+         INSERT INTO item_access (user_id, item_id, role) VALUES ({bob_id}, '{bank}', 'view')"
+    ));
+    assert_eq!(bob.sync().unwrap().older, 1);
+    assert!(bob.open_item(bank).is_err());
+
+    // A group's entries, cut back to an earlier revision: one that still has Carol in it,
+    // after she was taken out. Bob keeps the newer copy of the group.
+    let ops = alice
+        .create_group("Ops", &[bob_id, carol_identity.user_id])
+        .unwrap();
+    alice
+        .remove_from_group("Ops", carol_identity.user_id)
+        .unwrap();
+    bob.sync().unwrap();
+    let entries = |vault: &Vault| {
+        vault
+            .profile()
+            .team_groups
+            .iter()
+            .find(|info| info.entries[0].group_id == ops)
+            .map(|info| info.entries.clone())
+            .unwrap()
+    };
+    let held = entries(&bob);
+    assert!(!held.last().unwrap().has_member(carol_identity.user_id));
+    fixture.lie(&format!(
+        "DELETE FROM group_entries WHERE group_id = '{ops}'
+           AND revision = (SELECT MAX(revision) FROM group_entries WHERE group_id = '{ops}')"
+    ));
+    assert_eq!(bob.sync().unwrap().older, 1);
+    assert_eq!(entries(&bob), held);
+
+    // Bob, taken out of the folder, remembers how far he had seen it and its logins.
+    alice.remove_from_folder("Production", bob_id).unwrap();
+    bob.sync().unwrap();
+    assert!(bob.profile().folders.is_empty());
+    let seen = &bob.profile().seen;
+    assert_eq!(seen.items.get(&aws), Some(&3));
+    assert!(seen.folders.values().any(|&(_, revision)| revision >= 2));
+}
+
+/// After a server goes back, as when restored from a backup, devices follow its change
+/// numbers down and say so. Its new changes are numbered from the clock, so they come
+/// after anything a device saw before, also on a device that hasn't synced since.
+#[test]
+fn devices_get_what_changes_on_a_server_that_went_back() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    let (overview, details) = login("AWS root", "first");
+    let aws = alice.add(Some("Production"), overview, details).unwrap();
+    bob.sync().unwrap();
+    alice.sync().unwrap();
+    let before = alice.profile().cursor;
+
+    // Back to an earlier point. Bob's next sync follows it down; then he saves.
+    fixture.lie("UPDATE feed_counter SET last_seq = 3");
+    let summary = bob.sync().unwrap();
+    assert!(summary.server_went_back);
+    assert_eq!(bob.profile().cursor, 3);
+    bob.edit(aws, "second").unwrap();
+
+    // Alice hasn't synced since. Bob's change comes after her cursor, and reaches her.
+    let summary = alice.sync().unwrap();
+    assert!(alice.profile().cursor > before);
+    assert!(!summary.server_went_back);
+    assert_eq!(alice.open_item(aws).unwrap().1.password, "second");
+}

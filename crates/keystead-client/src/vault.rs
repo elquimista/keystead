@@ -11,7 +11,7 @@ use keystead_core::api::{
     AcceptInviteRequest, AddFolderGroupRequest, AddGroupMemberRequest, AddMemberRequest,
     ApprovalRequest, ClaimDeviceTransferRequest, ClaimedAccountSecret, Conflict,
     CreateFolderRequest, CreateGroupRequest, DeletedItems, DeviceList, DeviceTransfer,
-    DeviceTransferState, Directory, Enrolled, Exposures, GroupFolderKey, GroupMemberKey,
+    DeviceTransferState, Directory, Enrolled, Exposures, GroupFolderKey, GroupInfo, GroupMemberKey,
     GroupRekeyRequest, GroupShare, Groups, Health, Invite, InviteRequest, Invites, ItemHistory,
     JoinDeviceTransferRequest, KeyLink, Member, MemberKey, Members, PendingInvite, PutItemRequest,
     RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Removal,
@@ -38,7 +38,7 @@ use crate::DeviceSigner;
 use crate::export::{KdbxWriter, MIN_EXPORT_PASSPHRASE};
 use crate::http::{Client, Failure};
 use crate::import::ImportedLogin;
-use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile};
+use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile, group_revision};
 
 mod health;
 mod membership;
@@ -558,6 +558,11 @@ pub struct SyncSummary {
     pub rekey_problems: Vec<String>,
     /// Copies made for people who recovered with the owner's help.
     pub restored: usize,
+    /// Logins, folders and groups the server sent older than this device had already
+    /// seen; it kept what it had (see `Seen`).
+    pub older: usize,
+    /// The server's change numbers went back, as when it's restored from a backup.
+    pub server_went_back: bool,
 }
 
 /// What enrolling a new device needs, whatever the platform.
@@ -966,7 +971,8 @@ impl Vault {
         // Servers before 0.4.0 have no groups.
         match self.call(|client| client.get::<Groups>("/v1/groups", &[]))? {
             Ok(groups) => {
-                self.profile.team_groups = groups.groups;
+                let listed = self.newest_groups(groups.groups, summary);
+                self.profile.team_groups = listed;
                 self.profile.former_groups = groups.former;
             }
             Err(Failure::Status { code: 404, .. }) => self.profile.team_groups.clear(),
@@ -991,6 +997,9 @@ impl Vault {
             query.extend(resume.take().map(|resume| ("resume", resume)));
             let page: SyncPage = self.call(|client| client.get("/v1/sync", &query))??;
             summary.received += page.entries.len();
+            // A server on 0.17.0 or later answers with a lower cursor if its change
+            // numbers went back; from there on it sends what changes, as usual.
+            summary.server_went_back |= page.cursor < self.profile.cursor;
             for entry in page.entries {
                 self.apply_entry(entry, summary);
             }
@@ -2114,10 +2123,17 @@ impl Vault {
         let me = self.profile.user_id;
         // Its first key's fingerprint stays, to recognise the folder if it comes back.
         self.pin_folder(folder_id);
-        self.profile.folders.remove(&folder_id);
+        if let Some(record) = self.profile.folders.remove(&folder_id) {
+            self.profile.seen.folders.insert(folder_id, record.reach());
+        }
         let groups = &self.groups;
+        let seen = &mut self.profile.seen.items;
         self.profile.items.retain(|_, item| {
-            item.folder_id != Some(folder_id) || item.reaches_directly(me, groups)
+            let keep = item.folder_id != Some(folder_id) || item.reaches_directly(me, groups);
+            if !keep {
+                seen.insert(item.id, item.version);
+            }
+            keep
         });
     }
 
@@ -3292,46 +3308,83 @@ impl Vault {
             password_changed,
         };
         let path = format!("/v1/items/{}", current.id);
-        Ok(
-            match self.call(|client| client.put::<_, EncryptedItem>(&path, &request))? {
-                Ok(saved) => {
-                    let saved = kept(&request.item, saved)?;
-                    let version = saved.version;
-                    // The server forgets who could have seen the old password too.
-                    if password_changed || saved.deleted {
-                        self.profile
-                            .exposures
-                            .retain(|exposure| exposure.item_id != saved.id);
-                    }
-                    self.profile.items.insert(saved.id, saved);
-                    EditOutcome::Saved { version }
+        let mut result = self.call(|client| client.put::<_, EncryptedItem>(&path, &request))?;
+        // The server has an older copy than this device, signed and of this login: it was
+        // restored from a backup, or keeps newer versions back. The edit goes on top of
+        // its copy, with the version this device sealed, past what it has seen, so every
+        // app takes it. Servers before 0.17.0 take only the version after their own.
+        let behind = match &result {
+            Err(Failure::Status { code: 409, body }) => {
+                serde_json::from_value::<Conflict>(body.clone())
+                    .ok()
+                    .map(|conflict| conflict.current)
+                    .filter(|theirs| {
+                        theirs.id == current.id
+                            && theirs.version < current.version
+                            && self.profile.signed_by_author(theirs)
+                            && self.profile.author_could_save(theirs)
+                    })
+                    .map(|theirs| theirs.version)
+            }
+            _ => None,
+        };
+        if let Some(base) = behind {
+            let again = PutItemRequest {
+                base_version: Some(base),
+                ..request.clone()
+            };
+            result = match self.call(|client| client.put::<_, EncryptedItem>(&path, &again))? {
+                Err(Failure::Status { code: 400, .. }) => bail!(
+                    "the server has an older copy of this login than this device has seen, as \
+                     if it was restored from a backup, and is older than Keystead 0.17.0, which \
+                     can save over it. Update the server to 0.17.0 or later"
+                ),
+                other => other,
+            };
+        }
+        Ok(match result {
+            Err(Failure::Status { code: 404, .. }) => bail!(
+                "the server doesn't have this login: it was deleted for good, or the server \
+                     was restored from a backup from before it existed. Add it again if you \
+                     still need it"
+            ),
+            Ok(saved) => {
+                let saved = kept(&request.item, saved)?;
+                let version = saved.version;
+                // The server forgets who could have seen the old password too.
+                if password_changed || saved.deleted {
+                    self.profile
+                        .exposures
+                        .retain(|exposure| exposure.item_id != saved.id);
                 }
-                Err(Failure::Status { code: 409, body }) => {
-                    let theirs = serde_json::from_value::<Conflict>(body)?.current;
-                    // Another version of this login, by someone approved: not whatever
-                    // the server would like kept in its place.
-                    if theirs.id != current.id {
-                        bail!("the server answered with a different login");
-                    }
-                    if !self.profile.signed_by_author(&theirs) {
-                        bail!("the newer version isn't signed by an approved author");
-                    }
-                    if !self.profile.author_could_save(&theirs) {
-                        bail!(
-                            "the newer version is by someone who can only view this \
+                self.profile.items.insert(saved.id, saved);
+                EditOutcome::Saved { version }
+            }
+            Err(Failure::Status { code: 409, body }) => {
+                let theirs = serde_json::from_value::<Conflict>(body)?.current;
+                // Another version of this login, by someone approved: not whatever
+                // the server would like kept in its place.
+                if theirs.id != current.id {
+                    bail!("the server answered with a different login");
+                }
+                if !self.profile.signed_by_author(&theirs) {
+                    bail!("the newer version isn't signed by an approved author");
+                }
+                if !self.profile.author_could_save(&theirs) {
+                    bail!(
+                        "the newer version is by someone who can only view this \
                              folder. Don't trust this server"
-                        );
-                    }
-                    let outcome = EditOutcome::Conflict {
-                        version: theirs.version,
-                        author: self.profile.user_name(theirs.author),
-                    };
-                    self.profile.items.insert(theirs.id, theirs);
-                    outcome
+                    );
                 }
-                Err(error) => return Err(error.into()),
-            },
-        )
+                let outcome = EditOutcome::Conflict {
+                    version: theirs.version,
+                    author: self.profile.user_name(theirs.author),
+                };
+                self.profile.items.insert(theirs.id, theirs);
+                outcome
+            }
+            Err(error) => return Err(error.into()),
+        })
     }
 
     /// Whether a folder's record from the server may be kept: its key opens, and it's one
@@ -3485,6 +3538,10 @@ impl Vault {
                     via_group,
                     entries,
                 };
+                if self.older_folder(folder_id, &record) {
+                    summary.older += 1;
+                    return;
+                }
                 if !self.accepts_members(folder_id, &record)
                     || !self.accepts_folder(folder_id, &record)
                 {
@@ -3492,6 +3549,7 @@ impl Vault {
                     return;
                 }
                 self.profile.folders.insert(folder_id, record);
+                self.profile.seen.folders.remove(&folder_id);
                 self.could_save.clear();
                 for item in items {
                     self.apply_item(item, summary);
@@ -3518,6 +3576,10 @@ impl Vault {
                     entries,
                 };
                 if self.profile.folders.contains_key(&folder_id)
+                    && self.older_folder(folder_id, &record)
+                {
+                    summary.older += 1;
+                } else if self.profile.folders.contains_key(&folder_id)
                     && self.accepts_members(folder_id, &record)
                     && self.accepts_folder(folder_id, &record)
                 {
@@ -3539,6 +3601,13 @@ impl Vault {
                     wrapped_secret,
                     chain,
                 };
+                let held = self.profile.groups.get(&group_id);
+                if group_revision(&record.entries) < self.group_seen(group_id)
+                    || held.is_some_and(|held| record.generation < held.generation)
+                {
+                    summary.older += 1;
+                    return;
+                }
                 let mut keyring = GroupKeyring::default();
                 if self
                     .profile
@@ -3565,8 +3634,8 @@ impl Vault {
                         item.folder_id
                             .is_some_and(|folder_id| self.profile.folders.contains_key(&folder_id))
                     });
-                if !in_folder {
-                    self.profile.items.remove(&item_id);
+                if !in_folder && let Some(item) = self.profile.items.remove(&item_id) {
+                    self.profile.seen.items.insert(item_id, item.version);
                 }
             }
         }
@@ -3575,6 +3644,15 @@ impl Vault {
     fn apply_item(&mut self, item: EncryptedItem, summary: &mut SyncSummary) {
         if !self.profile.signed_by_author(&item) {
             summary.rejected += 1;
+            return;
+        }
+        // Not older than this device has seen, whether it holds the login or did.
+        let seen = match self.profile.items.get(&item.id) {
+            Some(local) => Some(local.version),
+            None => self.profile.seen.items.get(&item.id).copied(),
+        };
+        if seen.is_some_and(|seen| item.version < seen) {
+            summary.older += 1;
             return;
         }
         // By the folder's signed roles, not the server's word: worked out once for each
@@ -3599,8 +3677,82 @@ impl Vault {
             .get(&item.id)
             .is_none_or(|local| local.version < item.version)
         {
+            self.profile.seen.items.remove(&item.id);
             self.profile.items.insert(item.id, item);
         }
+    }
+
+    /// Whether a folder's record from the server goes less far than this device has
+    /// seen of the folder: an earlier key, or fewer signed entries.
+    fn older_folder(&self, folder_id: FolderId, record: &FolderRecord) -> bool {
+        let seen = match self.profile.folders.get(&folder_id) {
+            Some(held) => held.reach(),
+            None => self
+                .profile
+                .seen
+                .folders
+                .get(&folder_id)
+                .copied()
+                .unwrap_or_default(),
+        };
+        let (generation, revision) = record.reach();
+        generation < seen.0 || revision < seen.1
+    }
+
+    /// How far this device has seen a group: its latest entry's revision, in the team's
+    /// list, in its keys if this account is in it, or from before it was deleted.
+    fn group_seen(&self, group_id: GroupId) -> u32 {
+        let listed = self
+            .profile
+            .team_groups
+            .iter()
+            .find(|info| info.entries.first().is_some_and(|e| e.group_id == group_id))
+            .map(|info| group_revision(&info.entries));
+        let held = self
+            .profile
+            .groups
+            .get(&group_id)
+            .map(|record| group_revision(&record.entries));
+        let gone = self.profile.seen.groups.get(&group_id).copied();
+        listed.max(held).max(gone).unwrap_or(0)
+    }
+
+    /// The team's groups as the server lists them, except that a group listed less far
+    /// than this device has seen it keeps the copy this device has, and one this device
+    /// saw deleted can't come back as it was. A group that leaves the list is remembered.
+    fn newest_groups(
+        &mut self,
+        listed: Vec<GroupInfo>,
+        summary: &mut SyncSummary,
+    ) -> Vec<GroupInfo> {
+        let id = |info: &GroupInfo| info.entries.first().map(|entry| entry.group_id);
+        let mut newest = Vec::with_capacity(listed.len());
+        for info in listed {
+            let Some(group_id) = id(&info) else {
+                continue;
+            };
+            if group_revision(&info.entries) >= self.group_seen(group_id) {
+                self.profile.seen.groups.remove(&group_id);
+                newest.push(info);
+                continue;
+            }
+            summary.older += 1;
+            let held = self
+                .profile
+                .team_groups
+                .iter()
+                .find(|held| id(held) == Some(group_id));
+            newest.extend(held.cloned());
+        }
+        for held in &self.profile.team_groups {
+            if let Some(group_id) = id(held)
+                && !newest.iter().any(|info| id(info) == Some(group_id))
+            {
+                let revision = group_revision(&held.entries);
+                self.profile.seen.groups.insert(group_id, revision);
+            }
+        }
+        newest
     }
 
     /// Runs a request, signing in first when there's no valid session and once more if

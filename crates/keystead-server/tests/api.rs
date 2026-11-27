@@ -3374,3 +3374,45 @@ async fn a_folders_roles_are_signed_once_an_entry_has_them() {
     assert_eq!(put(&alice, &with).await, StatusCode::NO_CONTENT);
     assert_eq!(put(&alice, &with).await, StatusCode::CONFLICT);
 }
+
+/// A saved version may skip ahead of the one after its base, within a bound: a device
+/// that saw newer versions than a server restored from a backup has saves past them. And
+/// a cursor past the newest change, after the server went back, gets the newest one.
+#[tokio::test]
+async fn versions_may_skip_ahead_and_the_cursor_follows_a_server_that_went_back() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let (folder_id, key) = create_folder(&server, &alice, "Production").await;
+    let item = new_item(&alice, folder_id, &key, "AWS root");
+    let (status, body) = alice.put(&server, &item, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let at = |version| ItemVersion {
+        id: item.id,
+        folder_id: Some(folder_id),
+        owner: None,
+        version,
+        author: alice.user_id,
+    };
+
+    // On top of version 1: version 5 is taken, one too far past isn't, and an earlier
+    // one never was.
+    let too_far = seal(&alice, &key, at(1_000_003), "AWS root", "pw");
+    let (status, _) = alice.put(&server, &too_far, Some(1)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let fifth = seal(&alice, &key, at(5), "AWS root", "pw");
+    let (status, body) = alice.put(&server, &fifth, Some(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let same = seal(&alice, &key, at(5), "AWS root", "pw");
+    let (status, _) = alice.put(&server, &same, Some(5)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // A base that isn't the current version is still a conflict.
+    let stale = seal(&alice, &key, at(9), "AWS root", "pw");
+    let (status, _) = alice.put(&server, &stale, Some(1)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // A cursor past the newest change number gets the newest one back, lower.
+    let newest = alice.sync(&server, 0, 100).await.cursor;
+    let page = alice.sync(&server, newest + 50, 100).await;
+    assert_eq!((page.cursor, page.more), (newest, false));
+    assert!(page.entries.is_empty());
+}

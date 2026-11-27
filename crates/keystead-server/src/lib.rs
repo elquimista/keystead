@@ -538,9 +538,16 @@ async fn migrate(writer: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// The next change number: one more than the last, and never behind the clock, in
+/// milliseconds since 1970 (0.17.0 and later). A server restored from a backup then goes
+/// on from now, past every number a device saw before the restore, instead of handing out
+/// the same numbers again for other changes, which devices would skip.
 async fn next_seq(conn: &mut SqliteConnection) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
-        "UPDATE feed_counter SET last_seq = last_seq + 1 WHERE id = 1 RETURNING last_seq",
+        "UPDATE feed_counter
+         SET last_seq = MAX(last_seq + 1,
+                            CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+         WHERE id = 1 RETURNING last_seq",
     )
     .fetch_one(conn)
     .await

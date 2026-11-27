@@ -324,6 +324,10 @@ A new device's first sync, and a big folder shared with someone, used to fail on
 was more than about 10 MB to send. Both now arrive in parts. This needs the server and
 the app on 0.17.0; an app from before still can't take a folder that big.
 
+Apps now keep the newest copy they've seen of every login, folder and group, and say so if
+the server hands them an older one, as a server restored from a backup does (see
+Backups).
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
@@ -349,8 +353,11 @@ docker run --rm -v keystead_keystead-data:/data -v "$PWD":/backup busybox sh -c 
 docker compose start server
 ```
 
-Macs that synced after the backup was made keep their newer copies, but the server won't
-know about changes made since. Have people re-add anything they changed.
+The server then knows nothing of what changed after the backup was made. Macs that synced
+since keep their newer copies, and most say the server has older ones than they've seen; with a
+0.17.0 server and apps, they pick up what changes from then on. Have people save again what
+they changed since the backup: editing a login saves it past what anyone saw, so everyone
+gets it. A login added since the backup has to be added again.
 
 ## Good to know
 

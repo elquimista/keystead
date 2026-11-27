@@ -36,6 +36,11 @@ use crate::groups::{group_key_state, group_member_ids, group_state, parse_group}
 use crate::{ApiError, AppState, next_seq, user_entry};
 
 const DEFAULT_PAGE: i64 = 500;
+/// How far a saved version may skip ahead of the one after its base (0.17.0 and later).
+/// A device that saw newer versions than a server restored from a backup has saves its
+/// edit past them, so every app takes it; the bound keeps anyone from pushing a login's
+/// version so high that nobody can save after them.
+const MAX_VERSION_SKIP: u64 = 1_000_000;
 const MAX_PAGE: i64 = 1_000;
 /// How much of items a sync page holds, in bytes of their stored form. A page takes one
 /// entry whatever its size, and an item is at most 2 MB, so an answer stays well under
@@ -1086,7 +1091,13 @@ pub(crate) async fn put_item(
             (role, base + 1)
         }
     };
-    if item.version != expected_version {
+    // A new login starts at 1; a version after another may skip ahead.
+    let skip = if request.base_version.is_some() {
+        MAX_VERSION_SKIP
+    } else {
+        0
+    };
+    if item.version < expected_version || item.version > expected_version + skip {
         return Err(ApiError::BadRequest(format!(
             "expected version {expected_version}"
         )));
@@ -1653,9 +1664,12 @@ pub(crate) async fn sync(
     }
     more |= fits < rows.len();
     rows.truncate(fits);
+    // Caught up: the newest change number, also when the cursor asked with is past it.
+    // That happens only if the server went back, as when restored from a backup; the
+    // client then follows the lower number and gets what changes from there.
     let next_cursor = match (more, rows.last()) {
         (true, Some(last)) => last.0,
-        _ => high_water.max(cursor),
+        _ => high_water,
     };
 
     // Current access that began inside this page, with what its join entries carry.

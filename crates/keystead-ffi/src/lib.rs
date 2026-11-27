@@ -579,6 +579,11 @@ pub struct SyncResult {
     /// Why a folder or group you manage didn't get the new key it needs; the next sync
     /// retries.
     pub rekey_problems: Vec<String>,
+    /// Logins, folders and groups the server sent older than this Mac had already seen;
+    /// it kept its own.
+    pub older: u32,
+    /// The server's change numbers went back, as when it's restored from a backup.
+    pub server_went_back: bool,
 }
 
 impl From<SyncSummary> for SyncResult {
@@ -587,6 +592,8 @@ impl From<SyncSummary> for SyncResult {
             received: summary.received.try_into().unwrap_or(u32::MAX),
             rejected: summary.rejected.try_into().unwrap_or(u32::MAX),
             rekey_problems: summary.rekey_problems,
+            older: summary.older.try_into().unwrap_or(u32::MAX),
+            server_went_back: summary.server_went_back,
         }
     }
 }

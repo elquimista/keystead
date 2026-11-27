@@ -934,7 +934,15 @@ final class AppModel {
             // The sync fetched the directory already.
             update(\.users, to: try await perform { try $0.knownUsers() })
             update(\.identity, to: try await perform { try $0.identity() })
-            if result.rejected > 0 {
+            if result.older > 0 || result.serverWentBack {
+                // A server restored from a backup looks like this; so does one that lies.
+                message = (result.older > 0
+                    ? "The server sent older copies of \(result.older) login(s), folder(s) or "
+                        + "group(s) than this Mac has already seen; it kept its own."
+                    : "The server went back to an earlier point.")
+                    + " If it was restored from a backup, save your recent changes again. "
+                    + "If not, don't trust it."
+            } else if result.rejected > 0 {
                 message = "Ignored \(result.rejected) change(s) by someone who isn't approved, or who can "
                     + "only view the folder."
             } else if let problem = result.rekeyProblems.first {

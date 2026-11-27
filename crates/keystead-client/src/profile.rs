@@ -154,6 +154,47 @@ pub struct Profile {
     /// their members signed are still checked against them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub former_groups: Vec<Vec<GroupEntry>>,
+    /// How far this device had seen logins, folders and groups it no longer holds.
+    #[serde(default, skip_serializing_if = "Seen::is_empty")]
+    pub seen: Seen,
+}
+
+/// The newest this device has seen of what it no longer holds: a login it lost, a folder
+/// it left, a group it was taken out of. Every copy the server hands it is signed, but an
+/// older copy is signed too. What a device holds says how far it has seen; this keeps
+/// that after it's dropped, so the server can't hand back an older copy as the current
+/// one if it comes back. Each is dropped again once the device holds something at least
+/// that new.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seen {
+    /// Each login's version.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub items: BTreeMap<ItemId, u64>,
+    /// Each folder's key generation and the revision of its latest signed entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub folders: BTreeMap<FolderId, (u32, u32)>,
+    /// The revision of each group's latest entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<GroupId, u32>,
+}
+
+impl Seen {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.folders.is_empty() && self.groups.is_empty()
+    }
+}
+
+impl FolderRecord {
+    /// How far this record goes: its key generation and its latest entry's revision.
+    pub fn reach(&self) -> (u32, u32) {
+        let revision = self.entries.last().map_or(0, |entry| entry.revision);
+        (self.generation, revision)
+    }
+}
+
+/// The revision of a group's latest entry, in a list of them; 0 for none.
+pub fn group_revision(entries: &[GroupEntry]) -> u32 {
+    entries.last().map_or(0, |entry| entry.revision)
 }
 
 impl Profile {
@@ -185,6 +226,7 @@ impl Profile {
             membership: false,
             signed_roles: false,
             former_groups: Vec::new(),
+            seen: Seen::default(),
         }
     }
 
