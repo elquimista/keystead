@@ -11,8 +11,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use keystead_core::api::{
     ApproveRecoveryRequest, ClaimRecoveryRequest, Directory, EscrowRequest, EscrowedFolder,
-    FolderEscrowRequest, RecoveryClaimed, RecoveryInProgress, RecoveryStarted, RecoveryState,
-    RecoveryTokenRequest, Restore, RestoreFolderKeyRequest, RestoreGroupSecretRequest,
+    FolderEscrowRequest, Health, RecoveryClaimed, RecoveryInProgress, RecoveryStarted,
+    RecoveryState, RecoveryTokenRequest, Restore, RestoreFolderKeyRequest,
+    RestoreGroupSecretRequest,
 };
 use keystead_core::directory::{DirectoryEntry, SignedBefore, escrow_consent};
 use keystead_core::groups::GroupEntry;
@@ -357,6 +358,12 @@ impl Vault {
             self.sync()?;
             return Ok(());
         }
+        // From now on the agreement being withdrawn, and any before it, count for nothing
+        // here, whatever the server shows. Remembered first: if the server never hears,
+        // this device has still stopped putting anything in escrow.
+        let withdrawn = self.own_escrow_sequence();
+        self.profile.escrow_off_at = Some(withdrawn.max(self.profile.escrow_off_at.unwrap_or(0)));
+        self.save()?;
         match self.call(|client| client.delete::<()>("/v1/escrow"))? {
             Ok(()) => {}
             Err(Failure::Status {
@@ -366,6 +373,13 @@ impl Vault {
         }
         self.users()?;
         Ok(())
+    }
+
+    /// The number of this account's latest agreement to escrow, as the directory says.
+    fn own_escrow_sequence(&self) -> u64 {
+        self.profile
+            .trusted_entry(self.profile.user_id)
+            .map_or(0, |entry| entry.escrow_sequence)
     }
 
     /// Wraps this account's personal key for the owner, and turns escrow on.
@@ -380,11 +394,23 @@ impl Vault {
             .profile
             .trusted_entry(self.profile.user_id)
             .map_or(0, |entry| entry.revision);
+        // A server on 0.18.0 or later takes an agreement that signs a number past every
+        // one before, so this device can tell it from one it withdrew. An older server
+        // takes only one without a number; then this device can't tell them apart, and
+        // takes the server's word again, as before.
+        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let sequence = if health.escrow >= 2 {
+            self.own_escrow_sequence()
+                .max(self.profile.escrow_off_at.unwrap_or(0))
+                + 1
+        } else {
+            0
+        };
+        let me = self.profile.user_id;
         let request = EscrowRequest {
-            wrapped_key: self
-                .keys
-                .wrap_personal_key_for(&self.profile.owner, self.profile.user_id)?,
-            consent: escrow_consent(&self.keys, self.profile.user_id, revision),
+            wrapped_key: self.keys.wrap_personal_key_for(&self.profile.owner, me)?,
+            consent: escrow_consent(&self.keys, me, (revision, sequence)),
+            sequence,
         };
         match self.call(|client| client.put::<_, ()>("/v1/escrow", &request))? {
             Ok(()) => {}
@@ -392,6 +418,9 @@ impl Vault {
                 code: 404 | 405, ..
             }) => bail!(NEEDS_0_13),
             Err(error) => return Err(error.into()),
+        }
+        if sequence == 0 {
+            self.profile.escrow_off_at = None;
         }
         self.users()?;
         Ok(())
@@ -554,11 +583,18 @@ impl Vault {
     }
 
     /// Whether this account agreed to escrow with its current keys: its own signature, which
-    /// a server can't make. What a sync asks for escrow is done only then.
+    /// a server can't make, and a later one than any this device withdrew. What a sync asks
+    /// for escrow is done only then.
     pub(super) fn escrow_on(&self) -> bool {
         self.profile
             .trusted_entry(self.profile.user_id)
-            .is_some_and(DirectoryEntry::consented_to_escrow)
+            .is_some_and(|entry| {
+                entry.consented_to_escrow()
+                    && self
+                        .profile
+                        .escrow_off_at
+                        .is_none_or(|withdrawn| entry.escrow_sequence > withdrawn)
+            })
     }
 
     /// Gives this account back a folder only it could open, from the copy of its key it put

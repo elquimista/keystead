@@ -235,14 +235,38 @@ with HPKE, info `keystead/personal-key/v1` and associated data
 signed with their account key, as `consent`:
 
 ```
-transcript("keystead/escrow-consent/v1", user id, revision)
+transcript("keystead/escrow-consent/v2", user id, revision, sequence (8 bytes))
 ```
 
-The server keeps it in their directory entry (`escrow_consent`), and apps do what a sync
-asks for escrow (`escrow_needed`, `escrow_folders`) only when it verifies against the
-account's current keys, so a server can't turn escrow on for anyone. The server refuses
-escrow changes while a recovery of the account is waiting for approval, so a lost device
-can't take escrow away or swap it just before.
+`sequence` is how many times the account has turned escrow on, sent beside it
+(`EscrowRequest.sequence`, 0.18.0 and later; `"escrow": 2` in `GET /v1/health`). Before
+then the agreement signed no number: `transcript("keystead/escrow-consent/v1", user id,
+revision)`, which counts as sequence 0.
+
+The server keeps it in their directory entry (`escrow_consent`, with `escrow_sequence`),
+and apps do what a sync asks for escrow (`escrow_needed`, `escrow_folders`) only when it
+verifies against the account's current keys, so a server can't turn escrow on for anyone.
+The server refuses escrow changes while a recovery of the account is waiting for
+approval, so a lost device can't take escrow away or swap it just before.
+
+**Turning escrow off is the last word.** An agreement stays valid once signed, so a server
+could show one that was withdrawn again, and the person's app would go back to putting
+folder keys in escrow. So:
+
+- A device that turns escrow off remembers the sequence of the agreement it withdrew,
+  before telling the server, and from then on takes only an agreement with a higher one.
+  Turning escrow on again signs the next number past both what it remembers and what the
+  directory shows.
+- The server keeps the last sequence after escrow is turned off, and refuses an agreement
+  that doesn't go past it (409): one sent again from a copied session can't turn escrow
+  back on. It takes one without a number, from apps before 0.18.0, only while the account
+  has never sent a numbered one; after that it tells those apps to update.
+- Apps before 0.18.0 can't check a numbered agreement and show escrow as off.
+- With a server before 0.18.0 a device signs no number, as before, and can't tell a
+  withdrawn agreement from a new one.
+
+A device that never saw escrow turned off, such as a new one, can still be shown a
+withdrawn agreement as standing.
 
 When approving, the owner's app opens the escrowed key and wraps it the same way for the
 new keys; the person's sync gets it as `recovered_key`, opens their own items with it
@@ -251,8 +275,8 @@ account escrows a key for its new revision, so a recovery the new device never f
 can be done again without losing anything. The new device agrees to escrow again with its
 new keys, and escrows its new personal key (`escrow_needed`), only if the person's earlier
 keys had agreed: from 0.15.0 the server keeps the `escrow_consent` that stood with each set
-of retired keys (see Directory), and the device checks that signature against keys the
-owner approved. Otherwise escrow stays off until the person turns it on. What comes back
+of retired keys (with its `escrow_sequence` from 0.18.0; see Directory), and the device
+checks that signature against keys the owner approved. Otherwise escrow stays off until the person turns it on. What comes back
 from escrow doesn't count, as that is the server's say: anyone can wrap a key for an
 account and call it its earlier personal key. Turning escrow off also drops the
 agreements kept with earlier keys.

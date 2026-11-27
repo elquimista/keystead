@@ -157,6 +157,11 @@ pub struct Profile {
     /// How far this device had seen logins, folders and groups it no longer holds.
     #[serde(default, skip_serializing_if = "Seen::is_empty")]
     pub seen: Seen,
+    /// The number of the agreement to escrow this account withdrew last, from this device
+    /// (0 for one from before numbers). An agreement at or below it doesn't count here, so
+    /// the server can't turn escrow back on by showing the old one again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escrow_off_at: Option<u64>,
 }
 
 /// The newest this device has seen of what it no longer holds: a login it lost, a folder
@@ -227,6 +232,7 @@ impl Profile {
             signed_roles: false,
             former_groups: Vec::new(),
             seen: Seen::default(),
+            escrow_off_at: None,
         }
     }
 

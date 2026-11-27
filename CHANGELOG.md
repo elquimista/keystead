@@ -2,6 +2,16 @@
 
 What each release changes, newest first. The release workflow puts a version's section at the top of its GitHub release, above the install notes. GitHub shows line breaks there as they are, so each paragraph and item is one line. Releases before 0.16.0 have their notes on the [releases page](https://github.com/elquimista/keystead/releases).
 
+## 0.18.0
+
+Update the server, then the apps, in any order; older apps keep working.
+
+**Security**
+
+- Turning escrow off is now the last word: your app remembers it, and doesn't take your earlier agreement if the server shows it again. Turning escrow on again later works as before. Needs the server and the app on 0.18.0.
+- The server refuses an agreement to escrow that was already used, as from a copied session.
+- Once someone has turned escrow on with 0.18.0, their older apps show it as off and can't turn it on again; they're told to update.
+
 ## 0.17.0
 
 Update the server first, then every app and CLI soon after, starting with the owner and the folders' managers.

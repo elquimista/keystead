@@ -64,6 +64,10 @@ pub struct Health {
     /// keeps its own lists.
     #[serde(default)]
     pub membership: u8,
+    /// 2 if agreements to escrow sign a number that only goes up (0.18.0 and later); 0, or
+    /// left out, before.
+    #[serde(default)]
+    pub escrow: u8,
 }
 
 fn item_format_1() -> u8 {
@@ -289,6 +293,14 @@ pub struct ApproveRecoveryRequest {
 pub struct EscrowRequest {
     pub wrapped_key: WrappedKey,
     pub consent: Bytes,
+    /// The number the agreement signs (0.18.0 and later): past the last one this account
+    /// used. 0, or left out, for an agreement that signs none, from apps before then.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub sequence: u64,
+}
+
+fn is_zero_u64(number: &u64) -> bool {
+    *number == 0
 }
 
 /// `PUT /v1/folders/{folder_id}/members/{user_id}/key`: a folder member gives someone

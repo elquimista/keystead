@@ -268,6 +268,10 @@ const MIGRATIONS: &[&str] = &[
          expires_at = CAST(strftime('%s', 'now') AS INTEGER) + 604800
      WHERE used = 0;
      CREATE UNIQUE INDEX invites_id ON invites (id);",
+    // 16 (0.18.0): agreements to escrow sign a number that only goes up, kept with the
+    // account (also once escrow is off) and with its retired keys.
+    "ALTER TABLE users ADD COLUMN escrow_sequence INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE retired_keys ADD COLUMN escrow_sequence INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -499,6 +503,7 @@ async fn health() -> Json<Health> {
         version: keystead_core::VERSION.into(),
         item_format: keystead_core::items::ITEM_FORMAT,
         membership: 2,
+        escrow: 2,
     })
 }
 
@@ -563,17 +568,28 @@ type UserRow = (
     u32,
     bool,
     Option<Vec<u8>>,
+    i64,
     bool,
 );
 
 const USER_COLUMNS: &str = "SELECT id, name, encryption_key, signing_key, approval, \
                             removed_at IS NOT NULL, revision, escrow_on, escrow_consent, \
+                            escrow_sequence, \
                             EXISTS (SELECT 1 FROM recoveries r WHERE r.user_id = users.id \
                                     AND NOT r.approved \
                                     AND r.expires_at > CAST(strftime('%s', 'now') AS INTEGER)) \
                             FROM users";
 
-type RetiredRow = (i64, u32, String, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+type RetiredRow = (
+    i64,
+    u32,
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    i64,
+);
 
 async fn user_entry(
     conn: &mut SqliteConnection,
@@ -587,7 +603,8 @@ async fn user_entry(
         return Ok(None);
     };
     let retired: Vec<RetiredRow> = sqlx::query_as(
-        "SELECT user_id, revision, name, encryption_key, signing_key, approval, escrow_consent
+        "SELECT user_id, revision, name, encryption_key, signing_key, approval, escrow_consent,
+                escrow_sequence
          FROM retired_keys WHERE user_id = ? ORDER BY revision",
     )
     .bind(user.0)
@@ -601,7 +618,8 @@ async fn all_retired(
     conn: &mut SqliteConnection,
 ) -> Result<HashMap<i64, Vec<RetiredRow>>, ApiError> {
     let rows: Vec<RetiredRow> = sqlx::query_as(
-        "SELECT user_id, revision, name, encryption_key, signing_key, approval, escrow_consent
+        "SELECT user_id, revision, name, encryption_key, signing_key, approval, escrow_consent,
+                escrow_sequence
          FROM retired_keys ORDER BY user_id, revision",
     )
     .fetch_all(conn)
@@ -631,6 +649,7 @@ fn entry_from_row(
         revision,
         escrow,
         escrow_consent,
+        escrow_sequence,
         recovering,
     ): UserRow,
     retired: Vec<RetiredRow>,
@@ -648,7 +667,7 @@ fn entry_from_row(
         retired: retired
             .into_iter()
             .map(
-                |(_, revision, name, encryption, signing, approval, consent)| {
+                |(_, revision, name, encryption, signing, approval, consent, sequence)| {
                     Ok(RetiredKeys {
                         revision,
                         name,
@@ -658,12 +677,14 @@ fn entry_from_row(
                         },
                         approval: approval.into(),
                         escrow_consent: consent.map(Into::into),
+                        escrow_sequence: sequence as u64,
                     })
                 },
             )
             .collect::<Result<_, ApiError>>()?,
         escrow,
         escrow_consent: escrow_consent.map(Into::into),
+        escrow_sequence: escrow_sequence as u64,
         recovering,
     })
 }

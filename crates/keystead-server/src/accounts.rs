@@ -1306,8 +1306,8 @@ pub(crate) async fn approve_recovery(
     sqlx::query(
         "INSERT INTO retired_keys
              (user_id, revision, name, encryption_key, signing_key, approval, signed_before,
-              escrow_consent)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              escrow_consent, escrow_sequence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(user.0)
     .bind(entry.revision)
@@ -1318,6 +1318,7 @@ pub(crate) async fn approve_recovery(
     .bind(serde_json::to_string(signed)?)
     // Their agreement to escrow goes with the keys that made it.
     .bind(entry.escrow_consent.as_ref().map(Bytes::as_slice))
+    .bind(entry.escrow_sequence as i64)
     .execute(&mut *tx)
     .await?;
     // The escrowed personal key stays until the new device puts its own in escrow, so if
@@ -1396,15 +1397,32 @@ pub(crate) async fn put_escrow(
     let me = user_entry(&mut tx, auth.user_id)
         .await?
         .ok_or(ApiError::Unauthorized)?;
-    verify_escrow_consent(&me.keys, me.user_id, me.revision, &request.consent)
+    let at = (me.revision, request.sequence);
+    verify_escrow_consent(&me.keys, me.user_id, at, &request.consent)
         .map_err(|_| ApiError::BadRequest("the agreement to escrow doesn't verify".into()))?;
+    // Each agreement goes past the last one this account made, so one that was withdrawn
+    // can't be sent again to turn escrow back on, as with a copied session token. One that
+    // signs no number, from an app before 0.18.0, only until the account has numbered one.
+    if request.sequence <= me.escrow_sequence && (request.sequence > 0 || me.escrow_sequence > 0) {
+        return Err(ApiError::Conflict(if request.sequence == 0 {
+            "this account turns escrow on with a newer Keystead; update this app".into()
+        } else {
+            format!(
+                "this agreement to escrow is older than the last one, number {}; sync and try \
+                 again",
+                me.escrow_sequence
+            )
+        }));
+    }
     sqlx::query(
-        "UPDATE users SET escrow = ?, escrow_on = 1, escrow_consent = ?, escrow_revision = ?
+        "UPDATE users SET escrow = ?, escrow_on = 1, escrow_consent = ?, escrow_revision = ?,
+             escrow_sequence = ?
          WHERE id = ?",
     )
     .bind(serde_json::to_string(&request.wrapped_key)?)
     .bind(request.consent.as_slice())
     .bind(me.revision)
+    .bind(request.sequence as i64)
     .bind(auth.user_id.0)
     .execute(&mut *tx)
     .await?;
@@ -1435,7 +1453,7 @@ pub(crate) async fn refuse_while_recovering(
 }
 
 /// `DELETE /v1/escrow`: turns escrow off and forgets the escrowed key, and the folder
-/// keys sealed with it.
+/// keys sealed with it. The number of the last agreement stays, for the next to go past.
 pub(crate) async fn delete_escrow(
     State(state): State<AppState>,
     auth: Auth,

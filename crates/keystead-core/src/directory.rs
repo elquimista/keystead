@@ -46,6 +46,12 @@ pub struct DirectoryEntry {
     /// act on escrow only with it, so a server can't turn escrow on for anyone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escrow_consent: Option<Bytes>,
+    /// The number `escrow_consent` signs (0.18.0 and later), one more each time they turn
+    /// escrow on; 0 for an agreement from before, which signs none. Kept when they turn it
+    /// off, so the next agreement goes past it. A device that saw escrow turned off takes
+    /// only a later agreement, so an old one can't turn it back on.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub escrow_sequence: u64,
     /// The owner has started a recovery for them that isn't approved yet. Not signed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovering: bool,
@@ -62,10 +68,17 @@ pub struct RetiredKeys {
     /// replaced (0.15.0 and later). It's how their next device knows they had agreed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escrow_consent: Option<Bytes>,
+    /// The number it signs (see [`DirectoryEntry::escrow_sequence`]).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub escrow_sequence: u64,
 }
 
 fn is_zero(revision: &u32) -> bool {
     *revision == 0
+}
+
+fn is_zero_u64(number: &u64) -> bool {
+    *number == 0
 }
 
 /// What the owner signs to approve `keys` for a user at a revision: revision 0 as it
@@ -113,6 +126,7 @@ impl DirectoryEntry {
             retired: Vec::new(),
             escrow: false,
             escrow_consent: None,
+            escrow_sequence: 0,
             recovering: false,
         }
     }
@@ -135,7 +149,8 @@ impl DirectoryEntry {
     /// Whether the person agreed to escrow with their current keys.
     pub fn consented_to_escrow(&self) -> bool {
         self.escrow_consent.as_ref().is_some_and(|consent| {
-            verify_escrow_consent(&self.keys, self.user_id, self.revision, consent).is_ok()
+            let at = (self.revision, self.escrow_sequence);
+            verify_escrow_consent(&self.keys, self.user_id, at, consent).is_ok()
         })
     }
 
@@ -148,8 +163,8 @@ impl DirectoryEntry {
     pub fn earlier_keys_consented(&self, owner: &AccountPublicKeys) -> bool {
         self.retired_keys(owner).into_iter().any(|retired| {
             retired.escrow_consent.as_ref().is_some_and(|consent| {
-                verify_escrow_consent(&retired.keys, self.user_id, retired.revision, consent)
-                    .is_ok()
+                let at = (retired.revision, retired.escrow_sequence);
+                verify_escrow_consent(&retired.keys, self.user_id, at, consent).is_ok()
             })
         })
     }
@@ -178,27 +193,38 @@ impl DirectoryEntry {
     }
 }
 
-/// Someone's agreement to escrow, signed with their keys at `revision`.
-pub fn escrow_consent(keys: &AccountKeys, user_id: UserId, revision: u32) -> Bytes {
-    keys.sign(&escrow_consent_message(user_id, revision))
+/// Someone's agreement to escrow, signed with their keys at `revision`, as the
+/// `sequence`th time they turn it on (0.18.0 and later), or with `sequence` 0 as before,
+/// signing no number.
+pub fn escrow_consent(
+    keys: &AccountKeys,
+    user_id: UserId,
+    (revision, sequence): (u32, u64),
+) -> Bytes {
+    keys.sign(&escrow_consent_message(user_id, revision, sequence))
 }
 
+/// Checks an agreement to escrow made with `keys` at `revision`, signing `sequence`.
 pub fn verify_escrow_consent(
     keys: &AccountPublicKeys,
     user_id: UserId,
-    revision: u32,
+    (revision, sequence): (u32, u64),
     consent: &Bytes,
 ) -> Result<(), Error> {
     keys.verify(
-        &escrow_consent_message(user_id, revision),
+        &escrow_consent_message(user_id, revision, sequence),
         consent.as_slice(),
     )
 }
 
-fn escrow_consent_message(user_id: UserId, revision: u32) -> Vec<u8> {
+fn escrow_consent_message(user_id: UserId, revision: u32, sequence: u64) -> Vec<u8> {
+    let (user, revision) = (user_id.to_be_bytes(), revision.to_be_bytes());
+    if sequence == 0 {
+        return transcript("keystead/escrow-consent/v1", &[&user, &revision]);
+    }
     transcript(
-        "keystead/escrow-consent/v1",
-        &[&user_id.to_be_bytes(), &revision.to_be_bytes()],
+        "keystead/escrow-consent/v2",
+        &[&user, &revision, &sequence.to_be_bytes()],
     )
 }
 
@@ -285,6 +311,7 @@ mod tests {
                     Bytes(vec![0; 64])
                 },
                 escrow_consent: consent,
+                escrow_sequence: 0,
             });
             entry.keys = new.public();
             entry.revision = 1;
@@ -292,19 +319,31 @@ mod tests {
             entry.earlier_keys_consented(&owner.public())
         };
         // Their earlier keys' own signature, for the revision those keys had.
-        assert!(recovered(Some(escrow_consent(&old, bob.user_id, 0)), true));
+        assert!(recovered(
+            Some(escrow_consent(&old, bob.user_id, (0, 0))),
+            true
+        ));
         assert!(!recovered(None, true));
         // Not someone else's signature, the owner's included; not one for another
         // revision or person; and not from keys the owner never approved.
         assert!(!recovered(
-            Some(escrow_consent(&owner, bob.user_id, 0)),
+            Some(escrow_consent(&owner, bob.user_id, (0, 0))),
             true
         ));
-        assert!(!recovered(Some(escrow_consent(&new, bob.user_id, 0)), true));
-        assert!(!recovered(Some(escrow_consent(&old, bob.user_id, 1)), true));
-        assert!(!recovered(Some(escrow_consent(&old, UserId(3), 0)), true));
         assert!(!recovered(
-            Some(escrow_consent(&old, bob.user_id, 0)),
+            Some(escrow_consent(&new, bob.user_id, (0, 0))),
+            true
+        ));
+        assert!(!recovered(
+            Some(escrow_consent(&old, bob.user_id, (1, 0))),
+            true
+        ));
+        assert!(!recovered(
+            Some(escrow_consent(&old, UserId(3), (0, 0))),
+            true
+        ));
+        assert!(!recovered(
+            Some(escrow_consent(&old, bob.user_id, (0, 0))),
             false
         ));
     }
@@ -322,6 +361,7 @@ mod tests {
             keys: bob.keys.clone(),
             approval: bob.approval.clone().unwrap(),
             escrow_consent: None,
+            escrow_sequence: 0,
         });
         recovered.keys = new.public();
         recovered.revision = 1;
@@ -348,18 +388,33 @@ mod tests {
     fn only_the_person_can_agree_to_escrow_and_only_for_their_current_keys() {
         let (mut bob, keys) = entry("Bob");
         assert!(!bob.consented_to_escrow());
-        bob.escrow_consent = Some(escrow_consent(&keys, bob.user_id, 0));
+        bob.escrow_consent = Some(escrow_consent(&keys, bob.user_id, (0, 0)));
         assert!(bob.consented_to_escrow());
 
         let server = AccountKeys::derive(&AccountSecret::generate());
         let mut forged = bob.clone();
-        forged.escrow_consent = Some(escrow_consent(&server, bob.user_id, 0));
+        forged.escrow_consent = Some(escrow_consent(&server, bob.user_id, (0, 0)));
         assert!(!forged.consented_to_escrow());
         // Agreement given with earlier keys doesn't carry over to new ones.
         let mut recovered = bob.clone();
         recovered.keys = server.public();
         recovered.revision = 1;
         assert!(!recovered.consented_to_escrow());
+
+        // From 0.18.0 an agreement signs the how-manyth time escrow is turned on, and only
+        // that number goes with it: not another, nor none, nor one from before numbers.
+        let second = escrow_consent(&keys, bob.user_id, (0, 2));
+        let mut numbered = bob.clone();
+        numbered.escrow_consent = Some(second.clone());
+        numbered.escrow_sequence = 2;
+        assert!(numbered.consented_to_escrow());
+        for sequence in [0, 1, 3] {
+            numbered.escrow_sequence = sequence;
+            assert!(!numbered.consented_to_escrow(), "{sequence}");
+        }
+        let mut before = bob.clone();
+        before.escrow_sequence = 1;
+        assert!(!before.consented_to_escrow());
     }
 
     #[test]

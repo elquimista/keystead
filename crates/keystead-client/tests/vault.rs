@@ -2375,7 +2375,8 @@ fn escrow_and_approvals_take_the_right_signatures() {
         wrapped_key: bob_keys
             .wrap_personal_key_for(&alice_keys.public(), bob_id)
             .unwrap(),
-        consent: escrow_consent(&alice_keys, bob_id, 0),
+        consent: escrow_consent(&alice_keys, bob_id, (0, 1)),
+        sequence: 1,
     };
     assert!(as_bob.put::<_, ()>("/v1/escrow", &forged).is_err());
     bob.sync().unwrap();
@@ -3362,4 +3363,108 @@ fn devices_get_what_changes_on_a_server_that_went_back() {
     assert!(alice.profile().cursor > before);
     assert!(!summary.server_went_back);
     assert_eq!(alice.open_item(aws).unwrap().1.password, "second");
+}
+
+/// Turning escrow off is the person's last word on it: their app doesn't take the server
+/// showing their earlier agreement again, as a server working with the owner could, to
+/// have the keys of folders made since put in escrow. Turning it on again later counts.
+/// And the server itself refuses an agreement that doesn't go past the last one, as from
+/// someone with a copied session.
+#[test]
+fn an_agreement_to_escrow_that_was_withdrawn_cant_turn_it_back_on() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        alice_secret,
+        bob_secret,
+        bob_signer,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let bob_keys = AccountKeys::derive(&bob_secret);
+    let owner = AccountKeys::derive(&alice_secret).public();
+    let escrowed = |fixture: &Fixture, folder: keystead_core::ids::FolderId| {
+        // Whether the server holds a copy of the folder's key for escrow.
+        let path = fixture.root.join("server.sqlite");
+        fixture._runtime.block_on(async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
+            let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM folder_escrow WHERE user_id = ? AND folder_id = ?",
+            )
+            .bind(bob_id.0)
+            .bind(folder.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+            count > 0
+        })
+    };
+
+    // On, as the first numbered agreement; a folder of his goes in escrow.
+    bob.set_escrow(true).unwrap();
+    assert!(bob.whoami().escrow);
+    let first = bob.create_folder("Personal").unwrap();
+    bob.sync().unwrap();
+    assert!(escrowed(&fixture, first));
+
+    // Off. The server then shows the agreement again, as it was.
+    bob.set_escrow(false).unwrap();
+    assert!(!bob.whoami().escrow);
+    let replayed = escrow_consent(&bob_keys, bob_id, (0, 1));
+    let wrapped = bob_keys.wrap_personal_key_for(&owner, bob_id).unwrap();
+    fixture.lie(&format!(
+        "UPDATE users SET escrow_on = 1, escrow_consent = x'{}', escrow = '{}'
+         WHERE id = {bob_id}",
+        replayed
+            .0
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        serde_json::to_string(&wrapped).unwrap()
+    ));
+    bob.sync().unwrap();
+    // The owner's app is shown it; Bob's own doesn't go by it, and puts nothing more in
+    // escrow: not a folder made now.
+    alice.sync().unwrap();
+    let second = bob.create_folder("Diary").unwrap();
+    bob.sync().unwrap();
+    bob.sync().unwrap();
+    assert!(!bob.whoami().escrow);
+    assert!(!escrowed(&fixture, second));
+
+    // The server refuses the old agreement, sent again as from a copied session; and one
+    // without a number, as from an app before 0.18.0.
+    let mut as_bob = Client::new(&fixture.url);
+    as_bob
+        .sign_in(bob.profile().device_id, bob_signer.as_ref())
+        .unwrap();
+    let again = EscrowRequest {
+        wrapped_key: wrapped.clone(),
+        consent: replayed,
+        sequence: 1,
+    };
+    assert!(as_bob.put::<_, ()>("/v1/escrow", &again).is_err());
+    let unnumbered = EscrowRequest {
+        wrapped_key: wrapped,
+        consent: escrow_consent(&bob_keys, bob_id, (0, 0)),
+        sequence: 0,
+    };
+    assert!(as_bob.put::<_, ()>("/v1/escrow", &unnumbered).is_err());
+
+    // Bob turns it on again: a later agreement, which counts, and the folder goes in.
+    bob.set_escrow(true).unwrap();
+    assert!(bob.whoami().escrow);
+    let latest = bob
+        .profile()
+        .directory
+        .iter()
+        .find(|entry| entry.user_id == bob_id)
+        .unwrap()
+        .escrow_sequence;
+    assert_eq!(latest, 2);
+    bob.sync().unwrap();
+    assert!(escrowed(&fixture, second));
 }
