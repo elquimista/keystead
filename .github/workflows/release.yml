@@ -20,6 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # All of main, to check the tag is on it.
+          fetch-depth: 0
+      - name: Check the tag is on main
+        run: |
+          # Releases come from main: a tag on a commit main doesn't have publishes nothing.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME isn't on main; tag a commit that main has."
+            exit 1
+          fi
       - name: Check the tag matches the version everywhere it's kept
         run: |
           VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
@@ -122,14 +132,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          # Notes written by hand before this ran are kept; only the files are replaced.
+          # Notes written by hand before this ran are kept.
           if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             flags=()
             if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
             gh release create "$GITHUB_REF_NAME" --verify-tag --title "Keystead $VERSION" \
               --notes-file notes.md "${flags[@]}"
           fi
-          gh release upload "$GITHUB_REF_NAME" mac-app/* --clobber
+          # Files already on the release stay as they are, so running this tag again can't
+          # replace an app people may have downloaded. To replace them on purpose, delete
+          # them from the release first.
+          gh release upload "$GITHUB_REF_NAME" mac-app/*
           gh release view "$GITHUB_REF_NAME" --json url,assets --jq '.url, .assets[].name'
 
   # Each platform builds natively on its own runner (emulating ARM to compile Rust is very

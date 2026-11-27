@@ -11,12 +11,22 @@ name: keystead
 
 services:
   server:
-    image: ghcr.io/elquimista/keystead-server:${KEYSTEAD_VERSION:-latest}
+    # The release in .env, never whatever is newest: an update is a choice.
+    image: ghcr.io/elquimista/keystead-server:${KEYSTEAD_VERSION:?set KEYSTEAD_VERSION in .env, as in .env.example}
     ports:
       - "127.0.0.1:${KEYSTEAD_PORT:-8080}:8080"
     volumes:
       - keystead-data:/data
     restart: unless-stopped
+    # Nothing on the image changes while it runs: it writes only its database, in the
+    # volume. It needs no Linux capabilities, and can't gain any.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   keystead-data:

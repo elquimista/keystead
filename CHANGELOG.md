@@ -31,6 +31,7 @@ What each release changes, newest first. The release workflow puts a version's s
 
 **Deployment**
 
+- `deploy/compose.yaml` runs the server with a read-only file system (it writes only its database, in the volume), no Linux capabilities and no way to gain any, and won't start without `KEYSTEAD_VERSION` in `.env` rather than run whatever is newest. The `git pull` in the guide's update steps brings it. The server image is built from base images pinned by digest, with a pinned Rust.
 - `deploy/keystead.nginx.conf` refuses requests for any domain name but yours, so another Cloudflare customer can't reach your server, past your Cloudflare rules, by pointing their own domain at it. It also keeps its connections to the server open between requests, and lets Cloudflare resume TLS sessions. Copy it over yours as in step 3 of `deploy/README.md`; nothing else changes. The guide also covers Authenticated Origin Pulls with a certificate of your own, which closes the rest of that gap.
 
 ## 0.18.0

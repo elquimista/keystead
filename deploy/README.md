@@ -401,6 +401,12 @@ it over yours as in step 3, putting your domain (and port) back in; the server a
 apps don't change. Authenticated Origin Pulls, which closes the rest of that gap, is
 optional (end of step 4).
 
+**`compose.yaml`, after 0.18.0.** The `git pull` above brings a `compose.yaml` that runs
+the server with a read-only file system (it writes only its database, in the volume), no
+Linux capabilities and no way to gain any, and that won't start without
+`KEYSTEAD_VERSION` in `.env` rather than run whatever is newest. `.env` from
+`.env.example` has it already.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`
@@ -410,7 +416,8 @@ server briefly so the copy is consistent:
 
 ```sh
 docker compose stop server
-docker run --rm -v keystead_keystead-data:/data:ro -v "$PWD":/backup busybox \
+docker run --rm -v keystead_keystead-data:/data:ro -v "$PWD":/backup \
+    busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec \
     tar czf "/backup/keystead-$(date +%F).tgz" -C /data .
 docker compose start server
 ```
@@ -421,7 +428,8 @@ To restore one, replacing what's on the server now:
 
 ```sh
 docker compose stop server
-docker run --rm -v keystead_keystead-data:/data -v "$PWD":/backup busybox sh -c \
+docker run --rm -v keystead_keystead-data:/data -v "$PWD":/backup \
+    busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec sh -c \
     'rm -rf /data/* && tar xzf /backup/keystead-2026-11-23.tgz -C /data && chown -R 65532:65532 /data'
 docker compose start server
 ```

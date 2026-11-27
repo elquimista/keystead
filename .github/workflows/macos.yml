@@ -20,6 +20,11 @@ on:
         default: false
   workflow_dispatch:
 
+# Read-only: the zip for a release goes to the release workflow as an artifact, which
+# needs no permission; that workflow attaches it.
+permissions:
+  contents: read
+
 jobs:
   macos-app:
     runs-on: macos-15

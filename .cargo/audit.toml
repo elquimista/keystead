@@ -1,0 +1,15 @@
+# Read by `cargo audit`, CI's dependency check. Each advisory allowed here says why it doesn't
+# reach Keystead today and what removes it; take it out once that's done.
+[advisories]
+ignore = [
+    # crypto-bigint 0.5: timing differences in operations meant to be constant-time.
+    # Through p256 0.13 (keystead-core, and hpke 0.12): the secret-key operations it's in
+    # (opening a wrapped key, the CLI signing in) run on the user's own device, where only
+    # something already running there could time them; the server holds no private keys.
+    # Fixed with p256 0.14 and hpke 0.15, which change their APIs.
+    "RUSTSEC-2026-0387",
+    # The SQLite that libsqlite3-sys 0.30 bundles, through sqlx 0.8: it takes a crafted
+    # database and WAL file opened together, and the server opens only its own. Fixed
+    # with sqlx 0.9.
+    "RUSTSEC-2026-0459",
+]

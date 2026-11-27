@@ -1,3 +1,7 @@
+# Pinned, so CI, the server image and every build use the same compiler and the same lints.
+# Move it on purpose, with the Rust image in the Dockerfile.
 [toolchain]
-channel = "stable"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]
+# The Mac app is built for both kinds of Mac (apps/macos/scripts/build-core.sh).
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

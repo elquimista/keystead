@@ -6,3 +6,6 @@ apps/
 docs/
 prototypes/secure-enclave/
 **/keystead-data/
+# The image builds with its own Rust, the same pinned version, so rustup doesn't fetch a
+# toolchain or the components the file lists in the middle of a build.
+rust-toolchain.toml

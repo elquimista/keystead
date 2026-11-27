@@ -8,6 +8,10 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# Read-only: nothing here writes to the repository or publishes anything.
+permissions:
+  contents: read
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -17,6 +21,18 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # The locked dependencies against the RustSec advisory database as it is on the day, so a
+  # new advisory stops the next pull request or release until it's dealt with.
+  # .cargo/audit.toml lists the few known ones allowed, and why.
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Also keeps the installed cargo-audit, so it's built once, not on every run.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo install cargo-audit --locked --version 0.23.0
+      - run: cargo audit
 
   server-image:
     runs-on: ubuntu-latest
