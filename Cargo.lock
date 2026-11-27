@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "keystead-cli"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "keystead-client"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "keystead-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "base64 0.22.1",
  "bip39",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "keystead-ffi"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "keystead-proto-change-feed"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "rand",
  "sqlx",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "keystead-proto-unlock-search"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "keystead-server"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "keystead-uniffi-bindgen"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "uniffi",
 ]
