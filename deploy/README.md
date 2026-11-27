@@ -94,6 +94,15 @@ sudo nginx -t && sudo systemctl reload nginx
 On distributions without `sites-available`, copy it to `/etc/nginx/conf.d/keystead.conf`
 instead.
 
+The configuration also answers HTTPS for any other domain name, closing the connection
+without a reply, so a domain someone else points at this machine reaches nothing. If
+`nginx -t` reports a duplicate default server, another site already claims port 443 with
+`default_server`: remove that word from one of them. To check, from the server:
+
+```sh
+curl -sk --resolve other.example:443:127.0.0.1 https://other.example/v1/health   # Empty reply from server
+```
+
 ## 4. Let only Cloudflare in
 
 Allow SSH, and HTTPS only from [Cloudflare's addresses](https://www.cloudflare.com/ips/):
@@ -116,6 +125,49 @@ Check from your Mac:
 ```sh
 curl https://keys.example.com/v1/health
 ```
+
+### Optional: only through your own Cloudflare zone
+
+The firewall lets in every Cloudflare customer, not only you. Step 3's configuration
+already refuses their domains; only Cloudflare's Enterprise plan could make Cloudflare
+send yours instead. **Authenticated Origin Pulls** closes that too: Cloudflare shows a
+client certificate of your own on every connection, and nginx turns away connections
+without it. Don't use Cloudflare's own certificate for this: every Cloudflare customer
+shares it.
+
+1. Make a certificate authority and, signed by it, the client certificate Cloudflare will
+   show (replace `keys.example.com`):
+
+   ```sh
+   cd /etc/ssl/keystead
+   sudo openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=Keystead origin pull CA" \
+       -keyout origin-pull-ca.key -out origin-pull-ca.pem
+   sudo openssl req -newkey rsa:2048 -nodes -subj "/CN=keys.example.com" \
+       -keyout origin-pull.key -out origin-pull.csr
+   printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth\n' \
+       | sudo tee origin-pull.ext > /dev/null
+   sudo openssl x509 -req -in origin-pull.csr -CA origin-pull-ca.pem -CAkey origin-pull-ca.key \
+       -CAcreateserial -days 3650 -extfile origin-pull.ext -out origin-pull.pem
+   ```
+
+2. In Cloudflare, **SSL/TLS > Origin Server > Authenticated Origin Pulls**, under
+   **Zone-level**, choose **Upload certificate** and paste `origin-pull.pem` and
+   `origin-pull.key`. Leave the switch off for now.
+3. In `/etc/nginx/sites-available/keystead`, uncomment the two `ssl_client_certificate`
+   and `ssl_verify_client` lines, with `optional` in place of `on`, and reload nginx.
+4. Turn on **Zone-level** in Cloudflare, and check Keystead still syncs.
+5. Change `optional` to `on` and reload nginx. Keystead should still sync, and a request
+   without the certificate should be refused, from the server:
+
+   ```sh
+   curl -sk -o /dev/null -w '%{http_code}\n' --resolve keys.example.com:443:127.0.0.1 https://keys.example.com/v1/health   # 400
+   ```
+
+6. Cloudflare has the client key now: delete `origin-pull.key`, `origin-pull.csr` and
+   `origin-pull.ext`, and move `origin-pull-ca.key` off the server. You need it only to make
+   a new client certificate in ten years; without it, make a new authority then.
+
+To undo it, turn **Zone-level** off in Cloudflare after commenting the two lines out again.
 
 ## 5. Claim the server, right away
 
@@ -340,6 +392,12 @@ Apps now set up, join and recover only with an `https://` address, or `http://` 
 server on the same computer; devices already set up with an `http://` address keep it and
 show a warning. A certificate from your own certificate authority works once the Mac, or
 the machine running the CLI, trusts it.
+
+**The nginx configuration, after 0.18.0.** `keystead.nginx.conf` now refuses requests for
+any domain name but yours, so another Cloudflare customer can't reach your server by
+pointing their domain at it. Copy it over yours as in step 3, putting your domain (and
+port) back in; the server and the apps don't change. Authenticated Origin Pulls, which
+closes the rest of that gap, is optional (end of step 4).
 
 ## Backups
 

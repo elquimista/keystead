@@ -2,6 +2,12 @@
 
 What each release changes, newest first. The release workflow puts a version's section at the top of its GitHub release, above the install notes. GitHub shows line breaks there as they are, so each paragraph and item is one line. Releases before 0.16.0 have their notes on the [releases page](https://github.com/elquimista/keystead/releases).
 
+## Unreleased
+
+**Deployment**
+
+- `deploy/keystead.nginx.conf` refuses requests for any domain name but yours, so another Cloudflare customer can't reach your server, past your Cloudflare rules, by pointing their own domain at it. Copy it over yours as in step 3 of `deploy/README.md`; nothing else changes. The guide also covers Authenticated Origin Pulls with a certificate of your own, which closes the rest of that gap.
+
 ## 0.18.0
 
 Update the server and the apps in any order; older apps keep working with a 0.18.0 server. People joining with a new invite need Keystead 0.18.0.
