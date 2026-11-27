@@ -4,6 +4,14 @@ What each release changes, newest first. The release workflow puts a version's s
 
 ## Unreleased
 
+**Security**
+
+- An error about a login whose content doesn't read right says where, but no longer quotes what it says, so its content never shows up in a message.
+- Importing a KeePass file refuses one that asks for more than 1 GB of memory, or hours of work, to open, before trying; a file made to harm could otherwise stall or crash Keystead. KeePassXC's and Keystead's own exports are far inside that.
+- The apps read at most 4 MB of a server's error answer, so a server can't make them read without end.
+- In the CLI, `--otp -` asks for a one-time code setup instead of taking it in the command, where others on the computer could see it in `ps` and it stayed in your shell's history; a setup code can be left out to be asked for too. Passphrases and recovery words are wiped from memory once used, and so is the account secret the Mac app hands to Keystead's core.
+- A server that says it has no groups no longer makes the next save of a login drop its groups' copies; the groups stay as they were.
+
 **Speed**
 
 - Saves no longer wait while the server tidies Recently Deleted: what logins deleted over 30 days ago kept is forgotten once an hour instead, and the list is read without holding up anyone's saves. With 30,000 logins, that's about 60 ms off every save, and a list that kept everyone's saves waiting about 100 ms now takes about 6 ms and keeps nobody waiting.

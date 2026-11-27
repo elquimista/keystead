@@ -33,8 +33,13 @@ pub enum Error {
     UnsupportedFormat(u8),
     /// An item whose fields don't fit its format, and how.
     InvalidItem(&'static str),
-    /// Plaintext inside a ciphertext wasn't valid.
-    Encoding(serde_json::Error),
+    /// Plaintext inside a ciphertext wasn't valid: what kind of problem and where, but
+    /// never what it said, as serde's own message quotes the content.
+    Encoding {
+        kind: &'static str,
+        line: usize,
+        column: usize,
+    },
     /// Recovery kit words that don't make up an account secret, and why.
     RecoveryWords(String),
     /// A group's signed entries or keys don't check out, and why.
@@ -57,7 +62,12 @@ impl fmt::Display for Error {
                 "this item is in format {format}, from a newer Keystead; update to open it"
             ),
             Self::InvalidItem(reason) => f.write_str(reason),
-            Self::Encoding(error) => write!(f, "invalid plaintext: {error}"),
+            Self::Encoding { kind, line, column } => {
+                write!(
+                    f,
+                    "invalid plaintext: {kind} at line {line}, column {column}"
+                )
+            }
             Self::RecoveryWords(reason) => f.write_str(reason),
             Self::InvalidGroup(reason) => write!(f, "this group can't be trusted: {reason}"),
             Self::InvalidFolder(reason) => {
@@ -75,6 +85,16 @@ impl std::error::Error for Error {}
 
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
-        Self::Encoding(error)
+        use serde_json::error::Category;
+        Self::Encoding {
+            kind: match error.classify() {
+                Category::Io => "unreadable",
+                Category::Syntax => "not JSON",
+                Category::Data => "unexpected content",
+                Category::Eof => "cut short",
+            },
+            line: error.line(),
+            column: error.column(),
+        }
     }
 }

@@ -12,6 +12,7 @@ use keystead_cli::commands::{self, EditOutcome};
 use keystead_cli::default_home;
 use keystead_core::ids::UserId;
 use keystead_core::items::{Details, Overview};
+use zeroize::Zeroizing;
 
 /// Team password manager, from the terminal.
 #[derive(Parser)]
@@ -23,10 +24,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Claim a new server with its setup code and become your team's owner
+    /// Claim a new server with its setup code and become your team's owner. Leave the code
+    /// out to be asked for it
     Setup {
         server: String,
-        setup_code: String,
+        setup_code: Option<String>,
         #[arg(long)]
         name: String,
     },
@@ -138,8 +140,9 @@ enum Command {
         #[arg(long)]
         generate: bool,
         /// Its one-time codes: the otpauth:// link from the site's QR code, or the setup key
-        /// the site shows for typing in
-        #[arg(long, value_name = "LINK_OR_KEY")]
+        /// the site shows for typing in. Give - to be asked for it, which keeps it out of
+        /// `ps` and your shell's history
+        #[arg(long, value_name = "LINK_OR_KEY", allow_hyphen_values = true)]
         otp: Option<String>,
     },
     /// Share one login with an approved user or a group, without the rest of its folder
@@ -205,8 +208,14 @@ enum Command {
         #[arg(long)]
         generate: bool,
         /// Set up one-time codes: the otpauth:// link from the site's QR code, or the setup
-        /// key the site shows for typing in
-        #[arg(long, value_name = "LINK_OR_KEY", conflicts_with = "no_otp")]
+        /// key the site shows for typing in. Give - to be asked for it, which keeps it out
+        /// of `ps` and your shell's history
+        #[arg(
+            long,
+            value_name = "LINK_OR_KEY",
+            conflicts_with = "no_otp",
+            allow_hyphen_values = true
+        )]
         otp: Option<String>,
         /// Stop keeping one-time codes for it
         #[arg(long)]
@@ -498,6 +507,10 @@ fn run(cli: Cli) -> Result<()> {
             setup_code,
             name,
         } => {
+            let setup_code = match setup_code {
+                Some(code) => code,
+                None => secret_line("Setup code, from the server's log (hidden): ")?,
+            };
             let me = commands::setup(&home, &server, &setup_code, &name)?;
             println!("You're now your team's owner on {}.", me.server);
             println!("Your fingerprint: {}", me.fingerprint);
@@ -728,13 +741,14 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Recover { server, owner } => {
-            let words = if std::io::stdin().is_terminal() {
+            // The account secret itself, as words: wiped from memory once used.
+            let words = Zeroizing::new(if std::io::stdin().is_terminal() {
                 rpassword::prompt_password("The 24 words from your recovery kit (hidden): ")?
             } else {
                 let mut text = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
                 text
-            };
+            });
             let me = commands::recover(&home, &server, owner.as_deref(), &words)?;
             println!(
                 "Recovered {} (user {}) on {}.",
@@ -1111,7 +1125,7 @@ fn run(cli: Cli) -> Result<()> {
             let details = Details {
                 password: password(generate)?,
                 notes: String::new(),
-                otp: otp.unwrap_or_default(),
+                otp: one_time_code(otp)?.unwrap_or_default(),
             };
             let overview = Overview {
                 name: name.clone(),
@@ -1239,7 +1253,11 @@ fn run(cli: Cli) -> Result<()> {
             otp,
             no_otp,
         } => {
-            let otp = if no_otp { Some(String::new()) } else { otp };
+            let otp = if no_otp {
+                Some(String::new())
+            } else {
+                one_time_code(otp)?
+            };
             let other_fields = rename.is_some()
                 || username.is_some()
                 || url.is_some()
@@ -1346,19 +1364,19 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Export { file } => {
             let passphrase = if std::io::stdin().is_terminal() {
-                let passphrase = rpassword::prompt_password(format!(
+                let passphrase = Zeroizing::new(rpassword::prompt_password(format!(
                     "A passphrase for {}, at least {} characters (hidden): ",
                     file.display(),
                     keystead_client::MIN_EXPORT_PASSPHRASE
-                ))?;
-                if rpassword::prompt_password("The same passphrase again: ")? != passphrase {
+                ))?);
+                let again =
+                    Zeroizing::new(rpassword::prompt_password("The same passphrase again: ")?);
+                if again != passphrase {
                     anyhow::bail!("the passphrases don't match");
                 }
                 passphrase
             } else {
-                let mut line = String::new();
-                std::io::stdin().lock().read_line(&mut line)?;
-                line.trim_end_matches(['\r', '\n']).to_owned()
+                Zeroizing::new(secret_line("")?)
             };
             let export = commands::export(&home, &file, &passphrase)?;
             let logins = if export.logins == 1 {
@@ -1385,16 +1403,10 @@ fn run(cli: Cli) -> Result<()> {
             unfiled_folder,
             yes,
         } => {
-            let passphrase = if std::io::stdin().is_terminal() {
-                rpassword::prompt_password(format!(
-                    "The passphrase {} was exported with (hidden): ",
-                    file.display()
-                ))?
-            } else {
-                let mut line = String::new();
-                std::io::stdin().lock().read_line(&mut line)?;
-                line.trim_end_matches(['\r', '\n']).to_owned()
-            };
+            let passphrase = Zeroizing::new(secret_line(&format!(
+                "The passphrase {} was exported with (hidden): ",
+                file.display()
+            ))?);
             let logins = commands::read_export(&file, &passphrase)?;
             let plan = commands::plan_import(&home, &logins, unfiled_folder.as_deref())?;
             println!("{} has {} login(s):", file.display(), logins.len());
@@ -1589,6 +1601,36 @@ fn note_where_keys_are(home: &std::path::Path) {
     }
 }
 
+/// A secret asked for: a hidden prompt on a terminal, or one line from piped input.
+fn secret_line(prompt: &str) -> Result<String> {
+    if std::io::stdin().is_terminal() {
+        return Ok(rpassword::prompt_password(prompt)?);
+    }
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+/// The one-time code setup given with `--otp`: asked for with `-` (piped, the line after
+/// the password), else as given, which other people on this computer can see in `ps`,
+/// and which stays in the shell's history.
+fn one_time_code(given: Option<String>) -> Result<Option<String>> {
+    match given.as_deref() {
+        None => Ok(None),
+        Some("-") => Ok(Some(secret_line(
+            "One-time code setup, the otpauth:// link or setup key (hidden): ",
+        )?)),
+        Some(_) => {
+            eprintln!(
+                "Note: a one-time code setup typed in the command can be seen by others on \
+                 this computer and stays in your shell's history; give --otp - to be asked \
+                 for it instead."
+            );
+            Ok(given)
+        }
+    }
+}
+
 /// A generated password, a hidden prompt on a terminal, or one line from piped input.
 fn password(generate: bool) -> Result<String> {
     if generate {
@@ -1701,6 +1743,32 @@ mod tests {
             ];
             assert!(Cli::try_parse_from(args).is_ok(), "{command}");
         }
+    }
+
+    /// Secrets can be asked for rather than typed into the command: `--otp -`, and a setup
+    /// command without its code.
+    #[test]
+    fn secrets_can_be_left_out_of_the_command() {
+        for command in ["add", "edit"] {
+            let cli = Cli::try_parse_from(["keystead", command, "GitHub", "--otp", "-"]).unwrap();
+            let otp = match cli.command {
+                Command::Add { otp, .. } | Command::Edit { otp, .. } => otp,
+                _ => panic!("not {command}"),
+            };
+            assert_eq!(otp.as_deref(), Some("-"), "{command}");
+        }
+        let cli = Cli::try_parse_from([
+            "keystead",
+            "setup",
+            "https://keys.example.com",
+            "--name",
+            "Alice",
+        ])
+        .unwrap();
+        let Command::Setup { setup_code, .. } = cli.command else {
+            panic!("not a setup");
+        };
+        assert_eq!(setup_code, None);
     }
 
     #[test]

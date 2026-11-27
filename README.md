@@ -135,7 +135,7 @@ link from the site's QR code, or the setup key it shows for typing in (needs a 0
 server).
 
 ```sh
-keystead edit GitHub --otp "JBSW Y3DP EHPK 3PXP"   # or --otp 'otpauth://totp/…'; --no-otp removes it
+keystead edit GitHub --otp -    # asks for the setup key or otpauth:// link; --no-otp removes it
 keystead otp GitHub                               # the current code
 ```
 

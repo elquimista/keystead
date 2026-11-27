@@ -238,6 +238,8 @@ impl Client {
 /// few megabytes; an older one sends a folder someone just joined in one piece, however
 /// big, so this is far above any real one and only stops a server sending without end.
 const MAX_RESPONSE: u64 = 256 * 1024 * 1024;
+/// The most this reads of an error's answer: a conflict carries a login, up to 2 MB.
+const MAX_ERROR_BODY: u64 = 4 * 1024 * 1024;
 
 /// Decodes a response body. Empty bodies (201, 204) decode as `()`.
 fn read<T: DeserializeOwned>(result: Result<ureq::Response, ureq::Error>) -> Result<T, Failure> {
@@ -262,10 +264,22 @@ fn read<T: DeserializeOwned>(result: Result<ureq::Response, ureq::Error>) -> Res
                 serde_json::from_slice(&body).map_err(unexpected)
             }
         }
-        Err(ureq::Error::Status(code, response)) => Err(Failure::Status {
-            code,
-            body: response.into_json().unwrap_or(Value::Null),
-        }),
+        Err(ureq::Error::Status(code, response)) => {
+            // An error is a line or two, or for a conflict the login as the server has it,
+            // under the 2 MB a request can be; more isn't read.
+            let mut body = Vec::new();
+            let read = response
+                .into_reader()
+                .take(MAX_ERROR_BODY + 1)
+                .read_to_end(&mut body);
+            let body = match read {
+                Ok(_) if body.len() as u64 <= MAX_ERROR_BODY => {
+                    serde_json::from_slice(&body).unwrap_or(Value::Null)
+                }
+                _ => Value::Null,
+            };
+            Err(Failure::Status { code, body })
+        }
         Err(error) => Err(Failure::Transport(error.to_string())),
     }
 }

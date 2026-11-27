@@ -1422,11 +1422,10 @@ impl Vault {
                     .replace(|profile| &mut profile.former_groups, groups.former);
                 tags.groups = tag;
             }
-            Some(Fresh::Changed { value: None, .. }) => {
-                self.profile
-                    .replace(|profile| &mut profile.team_groups, Vec::new());
-                tags.groups = None;
-            }
+            // No groups on this server: one before 0.4.0, which never had any, so the
+            // list is empty already. A newer one saying so (a broken or lying one) leaves
+            // the groups as they were, so a save doesn't drop their copies of a login.
+            Some(Fresh::Changed { value: None, .. }) => tags.groups = None,
             Some(Fresh::Same) | None => {}
         }
         if let Some(Fresh::Changed { value, tag }) = exposures {

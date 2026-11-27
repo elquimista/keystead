@@ -9,6 +9,8 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use zeroize::Zeroizing;
+
 use keystead_client::{EditOutcome, GroupShareRow, InviteInfo, MemberRow, NewAccount, SyncSummary};
 use keystead_core::api::Role as CoreRole;
 use keystead_core::encoding::Bytes;
@@ -1791,11 +1793,16 @@ pub fn parse_invite(text: String) -> Result<Invitation, CoreError> {
         })
 }
 
+/// The account secret from Swift's bytes, which are wiped here once copied: the secret
+/// opens everything. (`AccountSecret` wipes itself in turn.)
 fn account_secret_from(bytes: Vec<u8>) -> Result<AccountSecret, CoreError> {
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| invalid("an account secret is 32 bytes"))?;
-    Ok(AccountSecret::from_bytes(bytes))
+    let bytes = Zeroizing::new(bytes);
+    if bytes.len() != 32 {
+        return Err(invalid("an account secret is 32 bytes"));
+    }
+    let mut secret = Zeroizing::new([0u8; 32]);
+    secret.copy_from_slice(&bytes);
+    Ok(AccountSecret::from_bytes(*secret))
 }
 
 fn device_id_from(text: &str) -> Result<DeviceId, CoreError> {

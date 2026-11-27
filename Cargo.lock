@@ -1698,6 +1698,7 @@ dependencies = [
  "p256",
  "tokio",
  "uniffi",
+ "zeroize",
 ]
 
 [[package]]

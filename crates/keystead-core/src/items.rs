@@ -1175,4 +1175,54 @@ mod tests {
     fn details_never_print() {
         assert_eq!(format!("{:?}", fixture().details), "Details(redacted)");
     }
+    /// An item whose content doesn't decode says where, never what it said: serde's own
+    /// message would quote it.
+    #[test]
+    fn errors_about_decrypted_content_never_quote_it() {
+        let keys = AccountKeys::derive(&AccountSecret::generate());
+        let key = ItemKey::generate();
+        let at = ItemVersion {
+            id: ItemId::random(),
+            folder_id: None,
+            owner: Some(UserId(1)),
+            version: 1,
+            author: UserId(1),
+        };
+        let item_keys = ItemKeys {
+            owner: Some(key.seal_for_owner(at.id, UserId(1), &keys)),
+            ..ItemKeys::default()
+        };
+        let overview = Overview {
+            name: "Bank".into(),
+            ..Overview::default()
+        };
+        let details = Details {
+            password: "pw".into(),
+            notes: String::new(),
+            otp: String::new(),
+        };
+        let mut item =
+            EncryptedItem::seal(at, &key, item_keys, &keys, &overview, &details).unwrap();
+        item.overview = seal_part(
+            &key.cipher(),
+            &item.part_aad("overview"),
+            br#"{"name": "Bank", "one_time_code": "hunter2-secret"}"#,
+        );
+        item.details = seal_part(
+            &key.cipher(),
+            &item.part_aad("details"),
+            br#"{"password": 7, "notes": "hunter2-secret"}"#,
+        );
+        for error in [
+            item.open_overview(&key).unwrap_err(),
+            item.open_details(&key).unwrap_err(),
+        ] {
+            let shown = format!("{error} {error:?}");
+            assert!(shown.contains("unexpected content"), "{shown}");
+            assert!(
+                !shown.contains("hunter2") && !shown.contains("`7`"),
+                "{shown}"
+            );
+        }
+    }
 }

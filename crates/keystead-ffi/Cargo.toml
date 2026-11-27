@@ -17,6 +17,7 @@ keystead-client = { path = "../keystead-client" }
 keystead-core.workspace = true
 anyhow.workspace = true
 uniffi.workspace = true
+zeroize.workspace = true
 
 # Not the workspace lints: UniFFI's generated scaffolding needs `unsafe`, so this is the
 # one crate allowed to use it. Our own code here stays safe.
