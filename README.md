@@ -314,9 +314,10 @@ very different schedules; until then they'd add a compatibility table to keep up
    git push origin main v0.2.1
    ```
 
-The tag must match the version in all three files, a final release needs its section in
-`CHANGELOG.md` (the workflow checks both), and CI (the Rust checks and the server image)
-must pass on the tagged commit. The
+The tag must be on `main` and match the version in all three files, a final release needs
+its section in `CHANGELOG.md` (the workflow checks these), and CI (the Rust checks, the
+dependency check and the server image) must pass on the tagged commit. Files already on the
+tag's GitHub release are never replaced; delete one there first to replace it on purpose. The
 [release workflow](.github/workflows/release.yml) then:
 
 - publishes `ghcr.io/elquimista/keystead-server` for `linux/amd64` and `linux/arm64`,

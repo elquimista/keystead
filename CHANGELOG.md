@@ -2,7 +2,9 @@
 
 What each release changes, newest first. The release workflow puts a version's section at the top of its GitHub release, above the install notes. GitHub shows line breaks there as they are, so each paragraph and item is one line. Releases before 0.16.0 have their notes on the [releases page](https://github.com/elquimista/keystead/releases).
 
-## Unreleased
+## 0.19.0
+
+Update the server and the apps in any order; each works with the other on an older version, without the new savings. Copy the new `deploy/keystead.nginx.conf` over yours, and `git pull` for the new `deploy/compose.yaml`, as in "Updating to 0.19.0" in `deploy/README.md`.
 
 **Security**
 

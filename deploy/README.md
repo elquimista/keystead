@@ -393,19 +393,21 @@ server on the same computer; devices already set up with an `http://` address ke
 show a warning. A certificate from your own certificate authority works once the Mac, or
 the machine running the CLI, trusts it.
 
-**The nginx configuration, after 0.18.0.** `keystead.nginx.conf` now refuses requests for
-any domain name but yours, so another Cloudflare customer can't reach your server by
-pointing their domain at it. It also keeps its connections to the server open between
-requests, and lets Cloudflare resume TLS sessions rather than start each one afresh. Copy
-it over yours as in step 3, putting your domain (and port) back in; the server and the
-apps don't change. Authenticated Origin Pulls, which closes the rest of that gap, is
-optional (end of step 4).
+**Updating to 0.19.0.** Update the server and the apps in any order; each works with the
+other on an older version, without the new savings. At its first start the server adds
+some indexes, which takes a moment on a big database. It's faster throughout: an idle sync
+downloads almost nothing, saves no longer wait on tidying Recently Deleted, and imports
+send logins 200 at a time.
 
-**`compose.yaml`, after 0.18.0.** The `git pull` above brings a `compose.yaml` that runs
-the server with a read-only file system (it writes only its database, in the volume), no
-Linux capabilities and no way to gain any, and that won't start without
-`KEYSTEAD_VERSION` in `.env` rather than run whatever is newest. `.env` from
-`.env.example` has it already.
+The `git pull` above brings a `compose.yaml` that runs the server with a read-only file
+system (it writes only its database, in the volume), no Linux capabilities and no way to
+gain any, and that won't start without `KEYSTEAD_VERSION` in `.env` rather than run
+whatever is newest; `.env` from `.env.example` has it already. Copy
+`keystead.nginx.conf` over yours as in step 3, putting your domain (and port) back in: it
+refuses requests for any domain name but yours, so another Cloudflare customer can't reach
+your server by pointing their domain at it, keeps its connections to the server open, and
+lets Cloudflare resume TLS sessions. Authenticated Origin Pulls, which closes the rest of
+that gap, is optional (end of step 4).
 
 ## Backups
 
