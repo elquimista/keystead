@@ -12,6 +12,8 @@ Update the server, then the apps, in any order; older apps keep working.
 - The server refuses an agreement to escrow that was already used, as from a copied session.
 - Once someone has turned escrow on with 0.18.0, their older apps show it as off and can't turn it on again; they're told to update.
 - An account has at most ten devices. Adding another from a device you have says to remove one you no longer use first; a Recovery Kit still brings your account back, in place of your oldest device.
+- Keystead connects only to `https://` servers when setting up, joining, recovering or adding a device; `http://` works only for a server on the same computer, so nobody on the network can read or change what it sends. Macs and CLIs already set up with an `http://` address keep it, and warn that it isn't private.
+- Server certificates are checked by the operating system, as browsers do: a certificate from your company's own authority works once your Mac trusts it, so a self-hosted server doesn't need `http://`.
 
 **Invites**
 

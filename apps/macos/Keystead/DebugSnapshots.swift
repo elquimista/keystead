@@ -57,6 +57,8 @@ enum DebugSnapshots {
                 ("5f-closed", { model.sheet = nil }),
                 ("5g-adding-this-mac", { model.showDemoJoining() }),
                 ("5h-back", { model.showDemoJoining(false) }),
+                ("5i-plain-http", { model.showDemoPlainHTTP() }),
+                ("5j-https-again", { model.showDemoPlainHTTP(false) }),
                 ("6-login", {
                     model.section = .allLogins
                     model.selectedItemID = model.items.first?.id

@@ -25,6 +25,10 @@ keepass = "0.17"
 p256 = { version = "0.13", features = ["ecdsa"] }
 rand = "0.8"
 rpassword = "7"
+# TLS as ureq already uses it (ring, no aws-lc), to verify servers with the operating
+# system's trust settings through rustls-platform-verifier.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
 # The Argon2 keepass uses, to choose its settings for exports.
 rust-argon2 = "3"
 serde = { version = "1", features = ["derive"] }
@@ -36,6 +40,7 @@ subtle = "2"
 totp-rs = { version = "5.7", features = ["otpauth", "zeroize"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
+url = "2"
 uniffi = "0.32"
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["serde", "v4"] }

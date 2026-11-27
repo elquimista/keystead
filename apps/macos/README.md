@@ -220,6 +220,11 @@ build/MeasureData/Build/Products/Debug/Keystead.app/Contents/MacOS/Keystead -dem
 The Rust core's side, opening and listing a vault with that many logins, is
 `cargo run --release -p keystead-client --example vault_bench -- 5000`.
 
+`-checkConnection` connects to a few servers on the internet from inside the app's
+sandbox, as the core does, prints whether macOS accepted each certificate (example.com
+should be accepted, badssl.com's self-signed, expired and wrong-host ones refused), and
+quits. It needs no server or Touch ID, and sends nothing about the Mac or its account.
+
 Release builds take a little over a minute longer than Debug ones: the core is built with
 link-time optimization (the `app` profile in `Cargo.toml`) and the app's symbols are
 stripped, which together halve its size.

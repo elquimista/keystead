@@ -38,7 +38,7 @@ use rand::rngs::OsRng;
 
 use crate::DeviceSigner;
 use crate::export::{KdbxWriter, MIN_EXPORT_PASSPHRASE};
-use crate::http::{Client, Failure};
+use crate::http::{Client, Failure, check_server_address, private_connection};
 use crate::import::ImportedLogin;
 use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile, group_revision};
 
@@ -140,6 +140,10 @@ pub struct Whoami {
     pub escrow: bool,
     /// The owner has started a recovery for this account. If it wasn't asked for, cancel it.
     pub recovering: bool,
+    /// False for a server at an http:// address on another machine, which devices added
+    /// before 0.18.0 could use: anyone on the network could read and change what goes to
+    /// it. Give the server an https:// address.
+    pub private_connection: bool,
 }
 
 /// An invite: everything a new user needs to join, including the owner's fingerprint so
@@ -283,6 +287,7 @@ pub struct JoiningDevice {
 
 impl JoiningDevice {
     pub fn start(line: DeviceSetupLine, device_name: &str) -> Result<Self> {
+        check_server_address(&line.server)?;
         let key = TransferKey::generate();
         let request = JoinDeviceTransferRequest {
             token: line.token.clone(),
@@ -615,6 +620,7 @@ pub struct NewAccount<'a> {
 
 /// Claims a new server with its setup code. The caller becomes user 1, the owner.
 pub fn setup(path: &Path, account: NewAccount<'_>, setup_code: &str, name: &str) -> Result<Vault> {
+    check_server_address(account.server)?;
     let keys = AccountKeys::derive(account.secret);
     let mut entry = DirectoryEntry::new(OWNER, name, keys.public());
     entry.approve(&keys);
@@ -652,6 +658,7 @@ pub fn join(
     owner_fingerprint: &str,
     key: Option<&str>,
 ) -> Result<Vault> {
+    check_server_address(account.server)?;
     let keys = AccountKeys::derive(account.secret);
     // Before anything reaches the server, so a mistyped key leaves no trace.
     let proof = key
@@ -708,6 +715,7 @@ pub fn recover(
     owner_fingerprint: Option<&str>,
 ) -> Result<Vault> {
     const ADVICE: &str = "check the owner's fingerprint on your recovery kit";
+    check_server_address(account.server)?;
     let keys = AccountKeys::derive(account.secret);
     let public = keys.public();
     let expected = match owner_fingerprint
@@ -951,6 +959,7 @@ impl Vault {
             owner_fingerprint: self.profile.owner.fingerprint(),
             escrow: self.escrow_on(),
             recovering: me.is_some_and(|entry| entry.recovering),
+            private_connection: private_connection(&self.profile.server),
         }
     }
 

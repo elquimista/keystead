@@ -177,8 +177,8 @@ struct WelcomeView: View {
                     TextField("Your name", text: $name, prompt: Text("As your team will see it"))
                 }
             }
-            if !server.trimmed.isEmpty && !hasScheme {
-                Footnote("Start the address with https://, or http:// for a server on this Mac.")
+            if let serverProblem {
+                Footnote(serverProblem)
                     .foregroundStyle(.orange)
             }
             Footnote("The server prints its setup code once, the first time it starts; with "
@@ -188,7 +188,7 @@ struct WelcomeView: View {
             Button("Set Up") {
                 Task { await model.setUp(server: server, setupCode: setupCode, name: name) }
             }
-            .disabled(!hasScheme || setupCode.trimmed.isEmpty || name.trimmed.isEmpty)
+            .disabled(!serverUsable || setupCode.trimmed.isEmpty || name.trimmed.isEmpty)
         }
     }
 
@@ -224,6 +224,10 @@ struct WelcomeView: View {
                         .autocorrectionDisabled()
                 }
             }
+            if let serverProblem {
+                Footnote(serverProblem)
+                    .foregroundStyle(.orange)
+            }
             Footnote("Leave the fingerprint empty if you're your team's owner.")
             HStack {
                 Text("The 24 words")
@@ -256,7 +260,7 @@ struct WelcomeView: View {
                         words: recoveryWords.joined(separator: " "))
                 }
             }
-            .disabled(!hasScheme || recoveryWords.contains { $0.trimmed.isEmpty })
+            .disabled(!serverUsable || recoveryWords.contains { $0.trimmed.isEmpty })
         }
     }
 
@@ -333,10 +337,16 @@ struct WelcomeView: View {
         }
     }
 
-    private var hasScheme: Bool {
-        let server = server.trimmed.lowercased()
-        return server.hasPrefix("https://") || server.hasPrefix("http://")
+    /// Why the address typed in can't be used, as the core checks it: https://, or
+    /// http:// for a server on this Mac. Nothing until something is typed.
+    private var serverProblem: String? {
+        guard !server.trimmed.isEmpty, let problem = serverAddressProblem(server: server) else {
+            return nil
+        }
+        return problem.prefix(1).uppercased() + problem.dropFirst() + "."
     }
+
+    private var serverUsable: Bool { !server.trimmed.isEmpty && serverProblem == nil }
 }
 
 /// One way to start: an icon, what it is, and a line about it.

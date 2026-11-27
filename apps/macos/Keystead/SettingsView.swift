@@ -212,6 +212,13 @@ private struct AccountSettings: View {
             if let identity = model.identity {
                 Section {
                     LabeledContent("Server", value: identity.server)
+                    if !identity.privateConnection {
+                        Label("Not private: anyone on your network can read and change what "
+                            + "\(appName) sends to an http:// address.",
+                              systemImage: "lock.open.fill")
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     LabeledContent("Fingerprint") {
                         Text(identity.fingerprint)
                             .font(.system(.body, design: .monospaced))

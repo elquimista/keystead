@@ -28,6 +28,7 @@ struct KeysteadApp: App {
             #if DEBUG
                 .task { await DebugSnapshots.runIfRequested(model) }
                 .task { await DebugMeasure.runIfRequested(model) }
+                .task { await DebugConnection.runIfRequested() }
             #endif
         }
         .defaultSize(width: 970, height: 580)

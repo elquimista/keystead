@@ -1886,6 +1886,26 @@ private struct Notices: View {
                 }
                 .notice()
             }
+            if let identity = model.identity, !identity.privateConnection, !model.hidesPlainHTTPNotice {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.open.fill")
+                        .foregroundStyle(.orange)
+                    Text("\(host(identity.server)) is an http:// address: anyone on your network "
+                        + "can read and change what \(appName) sends to it. "
+                        + (identity.isOwner
+                            ? "Give your server an https:// address."
+                            : "Ask your team's owner to give the server an https:// address."))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        model.dismissPlainHTTPNotice()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Hide until you next unlock")
+                }
+                .notice()
+            }
             if let message = model.message {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -1945,6 +1965,7 @@ private struct Notices: View {
         .animation(.default, value: model.copiedName)
         .animation(.default, value: model.message)
         .animation(.default, value: model.approvedNames)
+        .animation(.default, value: model.hidesPlainHTTPNotice)
         .animation(.default, value: model.updates.showsNotice)
     }
 }

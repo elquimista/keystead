@@ -786,11 +786,20 @@ pub fn older_note(summary: &SyncSummary) -> String {
 
 fn open(home: &Path) -> Result<Vault> {
     let device = DeviceFile::load(home)?;
-    Vault::open(
+    let vault = Vault::open(
         &profile_path(home),
         &device.secret()?,
         Arc::new(device.key()?),
-    )
+    )?;
+    let me = vault.whoami();
+    if !me.private_connection {
+        eprintln!(
+            "warning: {} is an http:// address, so anyone on the network can read and change \
+             what Keystead sends to it. Give the server an https:// address.",
+            me.server
+        );
+    }
+    Ok(vault)
 }
 
 /// Opens and syncs. If the server can't be reached, carries on with the local copy

@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use keystead_client::http::Client;
-use keystead_client::{DeviceSigner, EditOutcome, NewAccount, Vault, join, recover, setup};
+use keystead_client::{
+    DeviceSetupLine, DeviceSigner, EditOutcome, JoiningDevice, NewAccount, RecoveryLine, Vault,
+    claim_recovery, join, recover, setup,
+};
 use keystead_core::api::{ApprovalRequest, EscrowRequest, PutItemRequest, Role};
 use keystead_core::directory::{DirectoryEntry, escrow_consent};
 use keystead_core::encoding::Bytes;
@@ -3602,4 +3605,58 @@ fn the_owners_app_approves_whoever_joins_with_their_invites_key() {
             .iter()
             .all(|row| !row.invite_mismatch && row.approved == [1, sam.0].contains(&row.user_id.0))
     );
+}
+
+#[test]
+fn new_accounts_and_devices_refuse_http_to_another_machine() {
+    let fixture = Fixture::start();
+    let secret = AccountSecret::generate();
+    let account = |server| NewAccount {
+        server,
+        secret: &secret,
+        device_id: DeviceId::random(),
+        device_name: "Test device",
+        signer: Arc::new(SoftwareDeviceKey::generate()),
+    };
+    // A documentation address, where nothing answers: a refusal that comes at once was
+    // never sent.
+    let far = "http://192.0.2.10:8080";
+    let started = std::time::Instant::now();
+    let refusals = [
+        setup(
+            &fixture.profile("ana"),
+            account(far),
+            "ABCD-EFGH-JKLM",
+            "Ana",
+        )
+        .err(),
+        join(&fixture.profile("ana"), account(far), "token", "ab12", None).err(),
+        recover(&fixture.profile("ana"), account(far), None).err(),
+        JoiningDevice::start(
+            DeviceSetupLine::parse(&format!("{far} token --owner ab12")).unwrap(),
+            "Test device",
+        )
+        .err(),
+        claim_recovery(
+            &RecoveryLine::parse(&format!("{far} token --owner ab12")).unwrap(),
+            &account(far),
+        )
+        .err(),
+    ];
+    for refusal in refusals {
+        let message = format!("{:#}", refusal.unwrap());
+        assert!(message.contains("only to https://"), "{message}");
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!fixture.profile("ana").exists());
+
+    // A server on this computer, over http://, works as always.
+    let alice = setup(
+        &fixture.profile("alice"),
+        account(&fixture.url),
+        &fixture.setup_code,
+        "Alice",
+    )
+    .unwrap();
+    assert!(alice.whoami().private_connection);
 }

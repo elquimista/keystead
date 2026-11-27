@@ -92,6 +92,9 @@ pub struct Identity {
     pub escrow: bool,
     /// The owner has started a recovery for this account; cancel it if it wasn't asked for.
     pub recovering: bool,
+    /// False for a server at an http:// address on another machine, which Macs added before
+    /// 0.18.0 could use: anyone on the network could read and change what goes to it.
+    pub private_connection: bool,
 }
 
 /// A recovery the owner started, waiting for approval.
@@ -783,6 +786,7 @@ impl Vault {
             owner_fingerprint: whoami.owner_fingerprint,
             escrow: whoami.escrow,
             recovering: whoami.recovering,
+            private_connection: whoami.private_connection,
         })
     }
 
@@ -1760,6 +1764,15 @@ fn recovery_line(text: &str) -> Result<keystead_client::RecoveryLine, CoreError>
     keystead_client::RecoveryLine::parse(text).map_err(|error| CoreError::InvalidInput {
         message: format!("{error:#}"),
     })
+}
+
+/// Why a server address typed in can't be used for a new account or device, or none if it
+/// can: https://, or http:// for a server on this Mac.
+#[uniffi::export]
+pub fn server_address_problem(server: String) -> Option<String> {
+    keystead_client::http::check_server_address(&server)
+        .err()
+        .map(|error| format!("{error:#}"))
 }
 
 /// Reads an invite pasted from a message.

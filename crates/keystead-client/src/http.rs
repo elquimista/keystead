@@ -2,16 +2,82 @@
 
 use std::fmt;
 use std::io::Read;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use anyhow::bail;
 use keystead_core::api::{Challenge, ChallengeRequest, Session, SignInRequest};
 use keystead_core::ids::DeviceId;
 use keystead_core::keys::sign_in_message;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use url::{Host, Url};
 
 use crate::DeviceSigner;
+
+/// Whether what goes between this device and `server` is out of the network's reach:
+/// over https://, or over http:// to this computer only (localhost, 127.0.0.1, ::1).
+/// Over http:// to anywhere else, anyone on the way could read the session token and
+/// stand in for the server.
+pub fn private_connection(server: &str) -> bool {
+    let Ok(url) = Url::parse(server.trim()) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host() {
+            Some(Host::Domain(name)) => {
+                let name = name.to_ascii_lowercase();
+                name == "localhost" || name.ends_with(".localhost")
+            }
+            Some(Host::Ipv4(address)) => address.is_loopback(),
+            Some(Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Refuses a server address for a new account or device (0.18.0 and later): anything but
+/// https://, except http:// to this computer. Devices added before keep their address,
+/// and say it isn't private (see [`private_connection`]).
+pub fn check_server_address(server: &str) -> anyhow::Result<()> {
+    let web = Url::parse(server.trim())
+        .is_ok_and(|url| matches!(url.scheme(), "https" | "http") && url.host().is_some());
+    if !web {
+        bail!("a server address starts with https://, like https://keys.example.com");
+    }
+    if !private_connection(server) {
+        bail!(
+            "Keystead connects only to https:// addresses, so nobody on the network can read \
+             or change what it sends; http:// works only for a server on this computer. Use \
+             the server's https:// address"
+        );
+    }
+    Ok(())
+}
+
+/// TLS settings that leave the server's certificate to the operating system, as a browser
+/// does: certificates it trusts count, a company's own included, and revoked ones don't.
+/// Made once. `None` if the system's verifier can't be set up; then ureq's bundled roots
+/// are used, as before 0.18.0.
+fn tls_config() -> Option<Arc<rustls::ClientConfig>> {
+    static CONFIG: OnceLock<Option<Arc<rustls::ClientConfig>>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            use rustls_platform_verifier::BuilderVerifierExt;
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .ok()?
+                .with_platform_verifier()
+                .ok()?
+                .with_no_client_auth();
+            Some(Arc::new(config))
+        })
+        .clone()
+}
 
 /// Why a request failed: the server refused it, or it never got an answer.
 #[derive(Debug)]
@@ -42,10 +108,12 @@ pub struct Client {
 
 impl Client {
     pub fn new(server: &str) -> Self {
+        let mut agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(30));
+        if let Some(tls) = tls_config() {
+            agent = agent.tls_config(tls);
+        }
         Self {
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(30))
-                .build(),
+            agent: agent.build(),
             base: server.trim_end_matches('/').to_owned(),
             token: None,
         }
@@ -159,5 +227,66 @@ fn read<T: DeserializeOwned>(result: Result<ureq::Response, ureq::Error>) -> Res
             body: response.into_json().unwrap_or(Value::Null),
         }),
         Err(error) => Err(Failure::Transport(error.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Client, Failure, check_server_address, private_connection};
+
+    #[test]
+    fn only_https_or_this_computer_is_private() {
+        for server in [
+            "https://keys.example.com",
+            "https://192.168.1.10:8443/",
+            "HTTPS://Keys.Example.com",
+            "http://localhost:8080",
+            "http://LOCALHOST",
+            "http://keystead.localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://127.1.2.3",
+            "http://[::1]:8080",
+            " http://127.0.0.1:8080/ ",
+        ] {
+            assert!(private_connection(server), "{server}");
+            assert!(check_server_address(server).is_ok(), "{server}");
+        }
+        for server in [
+            "http://keys.example.com",
+            "http://192.168.1.10:8080",
+            "http://10.0.0.2",
+            "http://[fe80::1]:8080",
+            "http://localhost.example.com",
+            "http://127.0.0.1.example.com",
+            "http://user@127.0.0.1.evil.example",
+        ] {
+            assert!(!private_connection(server), "{server}");
+            let error = check_server_address(server).unwrap_err().to_string();
+            assert!(error.contains("only to https://"), "{server}: {error}");
+        }
+        for server in ["keys.example.com", "ftp://keys.example.com", "https://", ""] {
+            assert!(!private_connection(server), "{server}");
+            let error = check_server_address(server).unwrap_err().to_string();
+            assert!(error.contains("starts with https://"), "{server}: {error}");
+        }
+    }
+
+    /// Reaches real servers: run with `cargo test -p keystead-client -- --ignored`.
+    #[test]
+    #[ignore = "needs the internet"]
+    fn certificates_are_checked_by_the_operating_system() {
+        // A certificate the system trusts: the server answers, whatever it says.
+        let answer = Client::new("https://example.com").get::<serde_json::Value>("/v1/health", &[]);
+        if let Err(Failure::Transport(error)) = answer {
+            panic!("example.com: {error}");
+        }
+        for bad in [
+            "https://self-signed.badssl.com",
+            "https://expired.badssl.com",
+            "https://wrong.host.badssl.com",
+        ] {
+            let answer = Client::new(bad).get::<serde_json::Value>("/", &[]);
+            assert!(matches!(answer, Err(Failure::Transport(_))), "{bad}");
+        }
     }
 }

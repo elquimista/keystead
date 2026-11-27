@@ -24,7 +24,7 @@ use keystead_core::keys::{AccountKeys, ItemKey, WrappedKey};
 use super::{
     EditOutcome, NewAccount, Owner, People, SyncSummary, Vault, check_owner, normalize, owner_entry,
 };
-use crate::http::{Client, Failure};
+use crate::http::{Client, Failure, check_server_address};
 use crate::profile::{OWNER, Profile};
 
 /// How many earlier personal keys a device keeps after recoveries.
@@ -124,6 +124,7 @@ pub(super) struct RecoveryDuties {
 /// Sends a new account's keys and this device's key for a recovery the owner started.
 /// Nothing changes until the owner approves; sending again from the same device is fine.
 pub fn claim_recovery(line: &RecoveryLine, account: &NewAccount<'_>) -> Result<RecoveryClaim> {
+    check_server_address(account.server)?;
     let keys = AccountKeys::derive(account.secret);
     let request = ClaimRecoveryRequest {
         token: line.token.trim().to_owned(),

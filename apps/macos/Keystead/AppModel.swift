@@ -220,6 +220,8 @@ final class AppModel {
     /// Who this Mac approved, as the owner, because they joined with an invite's key; shown
     /// until dismissed.
     private(set) var approvedNames: [String] = []
+    /// The warning about a server at an http:// address was dismissed, until the next unlock.
+    private(set) var hidesPlainHTTPNotice = false
     /// The login whose password is on the clipboard, until it's cleared.
     private(set) var copiedName: String?
     /// What was copied for `copiedName`: "password" or "one-time code".
@@ -841,6 +843,7 @@ final class AppModel {
         copiedName = nil
         message = nil
         approvedNames = []
+        hidesPlainHTTPNotice = false
         phase = .locked
     }
 
@@ -1121,6 +1124,10 @@ final class AppModel {
 
     func dismissApproved() {
         approvedNames = []
+    }
+
+    func dismissPlainHTTPNotice() {
+        hidesPlainHTTPNotice = true
     }
 
     /// Quitting ends the timer that clears a copied password, so it's cleared now.
@@ -1750,7 +1757,8 @@ extension AppModel {
         model.identity = Identity(
             name: "Olivia", userId: 1, fingerprint: "ab12-cd34-ef56-7890-abcd",
             server: "https://keys.example.com", isOwner: true,
-            ownerFingerprint: "ab12-cd34-ef56-7890-abcd", escrow: false, recovering: false)
+            ownerFingerprint: "ab12-cd34-ef56-7890-abcd", escrow: false, recovering: false,
+            privateConnection: true)
         model.users = [demoUser(1, "Olivia", owner: true)]
         model.devices = [
             AccountDevice(
@@ -1942,6 +1950,15 @@ extension AppModel {
     func showDemoJoining(_ joining: Bool = true) {
         phase = joining ? .welcome : .unlocked
         joiningCode = joining ? "e0df-9242-f81b-7272-aa2f" : nil
+    }
+
+    /// The demo team's server at an http:// address, as a Mac set up before 0.18.0 could
+    /// have it, or back at its https:// one.
+    func showDemoPlainHTTP(_ plain: Bool = true) {
+        guard var identity else { return }
+        identity.server = plain ? "http://keys.example.com:8080" : "https://keys.example.com"
+        identity.privateConnection = !plain
+        self.identity = identity
     }
 
     func showDemoWelcome(_ page: WelcomePage) {

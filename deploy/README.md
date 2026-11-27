@@ -336,6 +336,11 @@ key, and the owner's Keystead approves whoever joins with one on its own, with n
 fingerprint to read out. Whoever joins needs Keystead 0.18.0 or later: older apps can't
 read the new lines. Invites made before keep working, with a fingerprint check.
 
+Apps now set up, join and recover only with an `https://` address, or `http://` for a
+server on the same computer; devices already set up with an `http://` address keep it and
+show a warning. A certificate from your own certificate authority works once the Mac, or
+the machine running the CLI, trusts it.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`

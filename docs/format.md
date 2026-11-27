@@ -636,6 +636,14 @@ All requests except health, setup, sign-in, accepting an invite and recovery nee
 `Authorization: Bearer <token>`. Errors return `{"error": "…"}` with the usual status
 codes (400, 401, 403, 404, 409).
 
+**Server addresses.** Clients talk to the server over HTTPS, and leave its certificate to
+the operating system, as a browser does: what it trusts counts, a company's own
+certificate authority included (0.18.0 and later; before, only the roots bundled with the
+client). Over plain HTTP, anyone on the network could read session tokens and stand in for
+the server, so from 0.18.0 a new account or device refuses an `http://` address unless it's
+this computer (`localhost`, a name ending in `.localhost`, `127.0.0.0/8` or `::1`). Devices
+added before keep the address they have, and say it isn't private.
+
 | Method and path | Request | Response | Who |
 | --- | --- | --- | --- |
 | `GET /v1/health` | | `Health` | Anyone |
