@@ -395,9 +395,11 @@ the machine running the CLI, trusts it.
 
 **The nginx configuration, after 0.18.0.** `keystead.nginx.conf` now refuses requests for
 any domain name but yours, so another Cloudflare customer can't reach your server by
-pointing their domain at it. Copy it over yours as in step 3, putting your domain (and
-port) back in; the server and the apps don't change. Authenticated Origin Pulls, which
-closes the rest of that gap, is optional (end of step 4).
+pointing their domain at it. It also keeps its connections to the server open between
+requests, and lets Cloudflare resume TLS sessions rather than start each one afresh. Copy
+it over yours as in step 3, putting your domain (and port) back in; the server and the
+apps don't change. Authenticated Origin Pulls, which closes the rest of that gap, is
+optional (end of step 4).
 
 ## Backups
 

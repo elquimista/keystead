@@ -328,7 +328,14 @@ impl AppState {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
             .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5));
+            .busy_timeout(Duration::from_secs(5))
+            // Reads straight from the operating system's cache of the file, shared by every
+            // connection, rather than copying each page in: this is address space, not
+            // memory set aside. A bigger cache of SQLite's own (8 MB a connection, from
+            // 2 MB), and sorting in memory.
+            .pragma("mmap_size", "268435456")
+            .pragma("cache_size", "-8192")
+            .pragma("temp_store", "memory");
         let writer = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(options.clone())
@@ -340,8 +347,10 @@ impl AppState {
         sqlx::query("PRAGMA optimize = 0x10002")
             .execute(&writer)
             .await?;
+        // Two readers stay open through quiet hours, with what they have cached.
         let readers = SqlitePoolOptions::new()
             .max_connections(8)
+            .min_connections(2)
             .connect_with(options)
             .await?;
 

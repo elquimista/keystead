@@ -14,11 +14,12 @@ What each release changes, newest first. The release workflow puts a version's s
 - Imports no longer slow down as you have more logins: the server now checks only who can reach the login being saved, rather than everything each of them can reach, and an import sends its logins 200 at a time instead of one request each. Importing into an account that already has 2,000 of its own logins went from about 3 ms a login to about a third of a millisecond, and saving a login shared with a 100-person group from about 60 ms to 25. Batches take the server and the app or CLI on 0.19.0; with an older server, an import sends one request a login as before.
 - Password Health remembers which passwords it found weak, for each version of a login, so checking again only scores the ones that changed: with 20,000 logins, from about 6 seconds each time to a fifth of a second after the first. Only whether each is weak is kept, in memory, never the password. While it scores, the Mac app can still copy passwords.
 - Moving a login, group actions and saving a login with a one-time code no longer open a new connection to ask the server what it can do; Keystead asks at most every five minutes.
+- The server reads its database through a memory map, with a bigger cache and two connections kept ready, which makes its heavier reads up to about three times faster.
 - A sync that brings nothing new no longer rewrites the copy of your logins on your Mac (with 30,000 logins, about 30 MB every five minutes); the CLI's likewise. When something changes, the file is a fifth smaller than before.
 
 **Deployment**
 
-- `deploy/keystead.nginx.conf` refuses requests for any domain name but yours, so another Cloudflare customer can't reach your server, past your Cloudflare rules, by pointing their own domain at it. Copy it over yours as in step 3 of `deploy/README.md`; nothing else changes. The guide also covers Authenticated Origin Pulls with a certificate of your own, which closes the rest of that gap.
+- `deploy/keystead.nginx.conf` refuses requests for any domain name but yours, so another Cloudflare customer can't reach your server, past your Cloudflare rules, by pointing their own domain at it. It also keeps its connections to the server open between requests, and lets Cloudflare resume TLS sessions. Copy it over yours as in step 3 of `deploy/README.md`; nothing else changes. The guide also covers Authenticated Origin Pulls with a certificate of your own, which closes the rest of that gap.
 
 ## 0.18.0
 
