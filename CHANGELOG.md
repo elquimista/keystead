@@ -4,7 +4,7 @@ What each release changes, newest first. The release workflow puts a version's s
 
 ## 0.18.0
 
-Update the server, then the apps, in any order; older apps keep working.
+Update the server and the apps in any order; older apps keep working with a 0.18.0 server. People joining with a new invite need Keystead 0.18.0.
 
 **Security**
 
@@ -13,8 +13,8 @@ Update the server, then the apps, in any order; older apps keep working.
 - Once someone has turned escrow on with 0.18.0, their older apps show it as off and can't turn it on again; they're told to update.
 - An account has at most ten devices. Adding another from a device you have says to remove one you no longer use first; a Recovery Kit still brings your account back, in place of your oldest device.
 - Keystead connects only to `https://` servers when setting up, joining, recovering or adding a device; `http://` works only for a server on the same computer, so nobody on the network can read or change what it sends. Macs and CLIs already set up with an `http://` address keep it, and warn that it isn't private.
-- On a Mac, the CLI keeps your account secret and its sign-in key in the login Keychain instead of a plain file; an existing setup moves over the next time you run a command. The first run of a newly built `keystead` may ask to use them: choose Always Allow. Elsewhere they stay in `device.json`, readable only by you.
 - Server certificates are checked by the operating system, as browsers do: a certificate from your company's own authority works once your Mac trusts it, so a self-hosted server doesn't need `http://`.
+- On a Mac, the CLI keeps your account secret and its sign-in key in the login Keychain instead of a plain file; an existing setup moves over the next time you run a command. The first run of a newly built `keystead` may ask to use them: choose Always Allow. Elsewhere they stay in `device.json`, readable only by you.
 
 **Invites**
 

@@ -330,7 +330,7 @@ Apps now keep the newest copy they've seen of every login, folder and group, and
 the server hands them an older one, as a server restored from a backup does (see
 Backups).
 
-**Updating to 0.18.0.** Update the server, then the apps, in any order; older apps keep
+**Updating to 0.18.0.** Update the server and the apps in any order; older apps keep
 working. Once the owner's app and the server are both on 0.18.0, new invite lines carry a
 key, and the owner's Keystead approves whoever joins with one on its own, with no
 fingerprint to read out. Whoever joins needs Keystead 0.18.0 or later: older apps can't
