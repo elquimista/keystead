@@ -558,6 +558,19 @@ pub struct PutItemRequest {
     pub password_changed: bool,
 }
 
+/// `POST /v1/items` (0.19.0 and later): several versions saved in one go, each as with
+/// `PUT /v1/items/{item_id}`, all of them or none. Servers before 0.19.0 answer 404.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PutItemsRequest {
+    pub items: Vec<PutItemRequest>,
+}
+
+/// The answer to `POST /v1/items`: what was saved, in the order asked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedItems {
+    pub items: Vec<EncryptedItem>,
+}
+
 /// `GET /v1/password-ages` (0.13.0 and later): when the password of each live item the
 /// caller can open was last set.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

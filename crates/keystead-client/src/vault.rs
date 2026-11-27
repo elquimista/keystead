@@ -14,9 +14,9 @@ use keystead_core::api::{
     DeviceTransferState, Directory, Enrolled, Exposure, Exposures, GroupFolderKey, GroupInfo,
     GroupMemberKey, GroupRekeyRequest, GroupShare, Groups, Health, Invite, InviteRequest, Invites,
     ItemHistory, JoinDeviceTransferRequest, KeyLink, Member, MemberKey, Members, PendingInvite,
-    PutItemRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest,
-    Removal, RemoveUserRequest, Role, RoleRequest, SendAccountSecretRequest, SetupRequest,
-    SyncEntry, SyncPage, UpdateGroupRequest,
+    PutItemRequest, PutItemsRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest,
+    RekeyRequest, Removal, RemoveUserRequest, Role, RoleRequest, SavedItems,
+    SendAccountSecretRequest, SetupRequest, SyncEntry, SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::encoding::Bytes;
@@ -83,6 +83,9 @@ const NEEDS_0_13: &str = "the server is older than Keystead 0.13.0 and can't del
 /// What a server answers for sign-out if it's from before sign-out existed.
 const NO_SIGN_OUT: &str = "the server is too old to forget a device that signs out; update it";
 const PAGE_SIZE: i64 = 500;
+/// The most logins an import saves in one request, and about the most bytes.
+const BATCH_LOGINS: usize = 200;
+const BATCH_BYTES: usize = 1_000_000;
 /// Sign in again this long before the server's session would expire.
 const SESSION_MARGIN: Duration = Duration::from_secs(60);
 
@@ -1079,6 +1082,9 @@ pub struct Vault {
     signed_before_complete: Option<u64>,
     /// The server stores this build's item format; checked before the first save.
     server_takes_items: bool,
+    /// Whether the server saves several logins in one request (0.19.0 and later), once
+    /// an import has asked.
+    server_takes_batches: Option<bool>,
     /// Whether the server keeps signed members, once asked this session.
     /// What the server says it keeps signed (see `membership_level`), once asked.
     server_membership: Option<u8>,
@@ -1165,6 +1171,7 @@ impl Vault {
             },
             keys,
             server_takes_items: false,
+            server_takes_batches: None,
             server_membership: None,
             could_save: HashMap::new(),
             history: HashMap::new(),
@@ -1196,6 +1203,7 @@ impl Vault {
             },
             keys,
             server_takes_items: false,
+            server_takes_batches: None,
             server_membership: None,
             could_save: HashMap::new(),
             history: HashMap::new(),
@@ -3184,6 +3192,20 @@ impl Vault {
         overview: &Overview,
         details: &Details,
     ) -> Result<ItemId> {
+        let request = self.new_version(folder_id, overview, details)?;
+        let id = request.item.id;
+        self.put_each(vec![request])?;
+        Ok(id)
+    }
+
+    /// The first version of a new login, sealed for its folder or for this account, ready
+    /// to save.
+    fn new_version(
+        &mut self,
+        folder_id: Option<FolderId>,
+        overview: &Overview,
+        details: &Details,
+    ) -> Result<PutItemRequest> {
         if let Some(folder_id) = folder_id {
             self.folder_ready(folder_id)?;
         }
@@ -3216,17 +3238,58 @@ impl Vault {
                 }
             }
         };
-        let request = PutItemRequest {
+        Ok(PutItemRequest {
             base_version: None,
             item: EncryptedItem::seal(at, &key, keys, &self.keys, overview, details)?,
             roles: Vec::new(),
             group_roles: Vec::new(),
             password_changed: false,
-        };
-        let path = format!("/v1/items/{id}");
-        let saved: EncryptedItem = self.call(|client| client.put(&path, &request))??;
-        self.profile.items.insert(id, kept(&request.item, saved)?);
-        Ok(id)
+        })
+    }
+
+    /// Saves new logins' first versions: in one request to a server that takes several
+    /// (0.19.0 and later). Otherwise, or if that doesn't work out, one at a time as
+    /// before, so the first that can't be saved says why, and those before it stay saved.
+    fn put_batch(&mut self, requests: Vec<PutItemRequest>) -> Result<()> {
+        if requests.len() < 2 || self.server_takes_batches == Some(false) {
+            return self.put_each(requests);
+        }
+        let batch = PutItemsRequest { items: requests };
+        match self.call(|client| client.post::<_, SavedItems>("/v1/items", &batch))? {
+            Ok(saved) => {
+                if saved.items.len() != batch.items.len() {
+                    bail!("the server answered with other logins than were saved");
+                }
+                let saved = batch
+                    .items
+                    .iter()
+                    .zip(saved.items)
+                    .map(|(request, saved)| kept(&request.item, saved))
+                    .collect::<Result<Vec<_>>>()?;
+                for item in saved {
+                    self.profile.items.insert(item.id, item);
+                }
+                self.server_takes_batches = Some(true);
+                return Ok(());
+            }
+            Err(Failure::Status {
+                code: 404 | 405, ..
+            }) => self.server_takes_batches = Some(false),
+            Err(_) => {}
+        }
+        self.put_each(batch.items)
+    }
+
+    /// Saves versions one request each.
+    fn put_each(&mut self, requests: Vec<PutItemRequest>) -> Result<()> {
+        for request in requests {
+            let path = format!("/v1/items/{}", request.item.id);
+            let saved: EncryptedItem = self.call(|client| client.put(&path, &request))??;
+            self.profile
+                .items
+                .insert(request.item.id, kept(&request.item, saved)?);
+        }
+        Ok(())
     }
 
     /// Every login this account can open, from the local copy, in a KeePass file (.kdbx)
@@ -3306,6 +3369,9 @@ impl Vault {
             ..ImportSummary::default()
         };
         let mut folder_ids: HashMap<String, FolderId> = HashMap::new();
+        // Saved a batch at a time, under the 2 MB a request can be behind nginx.
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0;
         for (login, destination) in logins.iter().zip(destinations) {
             let folder_id = match destination {
                 Destination::LeftOut => continue,
@@ -3325,9 +3391,19 @@ impl Vault {
             if overview.name.trim().is_empty() {
                 overview.name = "Untitled".to_owned();
             }
-            self.put_new(folder_id, &overview, &login.details)?;
+            let request = self.new_version(folder_id, &overview, &login.details)?;
+            let bytes = serde_json::to_vec(&request)?.len();
+            if !batch.is_empty()
+                && (batch.len() == BATCH_LOGINS || batch_bytes + bytes > BATCH_BYTES)
+            {
+                self.put_batch(std::mem::take(&mut batch))?;
+                batch_bytes = 0;
+            }
+            batch.push(request);
+            batch_bytes += bytes;
             summary.added += 1;
         }
+        self.put_batch(batch)?;
         self.save()?;
         Ok(summary)
     }

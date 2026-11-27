@@ -298,6 +298,9 @@ const MIGRATIONS: &[&str] = &[
      CREATE INDEX members_folder ON members (folder_id);
      CREATE INDEX members_pending ON members (folder_id) WHERE pending;
      CREATE INDEX item_access_pending ON item_access (item_id) WHERE pending;",
+    // 19 (0.19.0): who reaches an item directly, by item, for the check after each save
+    // (`vault::reconcile_item`).
+    "CREATE INDEX item_reach_item ON item_reach (item_id);",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -567,6 +570,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/groups/{group_id}/members/{user_id}/secret",
             put(groups::restore_group_secret),
         )
+        .route("/v1/items", post(vault::put_items))
         .route("/v1/items/{item_id}", put(vault::put_item))
         .route("/v1/items/{item_id}/people", get(vault::item_people))
         .route("/v1/items/{item_id}/history", get(vault::item_history))

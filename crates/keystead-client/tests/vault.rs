@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use keystead_client::http::Client;
 use keystead_client::{
-    DeviceSetupLine, DeviceSigner, EditOutcome, JoiningDevice, NewAccount, RecoveryLine, Vault,
-    claim_recovery, join, recover, setup,
+    DeviceSetupLine, DeviceSigner, EditOutcome, ImportedLogin, JoiningDevice, NewAccount,
+    RecoveryLine, Vault, claim_recovery, join, recover, setup,
 };
 use keystead_core::api::{ApprovalRequest, EscrowRequest, PutItemRequest, Role};
 use keystead_core::directory::{DirectoryEntry, escrow_consent};
@@ -3787,4 +3787,41 @@ fn syncs_keep_unchanged_lists_and_still_get_each_change() {
     assert_eq!(bob.list().unwrap()[0].role, Role::Edit);
     bob.sync().unwrap();
     assert_eq!(bob.list().unwrap()[0].role, Role::Edit);
+}
+
+/// An import bigger than a batch (a server on 0.19.0 or later takes 200 at a time)
+/// arrives whole, for the folder's other members too, and is kept on this device.
+#[test]
+fn a_big_import_arrives_whole_in_batches() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        alice_secret,
+        alice_signer,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::View)
+        .unwrap();
+    let logins: Vec<ImportedLogin> = (0..450)
+        .map(|index| {
+            let (overview, details) = login(&format!("Login {index}"), "pw");
+            ImportedLogin {
+                folder: (index % 2 == 0).then(|| "Production".to_owned()),
+                overview,
+                details,
+            }
+        })
+        .collect();
+    let summary = alice.import(&logins, None).unwrap();
+    assert_eq!(summary.added, 450);
+    assert_eq!(alice.list().unwrap().len(), 450);
+    bob.sync().unwrap();
+    assert_eq!(bob.list().unwrap().len(), 225);
+    drop(alice);
+    let reopened = Vault::open(&fixture.profile("alice"), &alice_secret, alice_signer).unwrap();
+    assert_eq!(reopened.list().unwrap().len(), 450);
 }

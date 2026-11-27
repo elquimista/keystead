@@ -16,7 +16,8 @@ use keystead_core::api::{
     SignInRequest, SyncEntry, SyncPage, UpdateGroupRequest, ViaGroup,
 };
 use keystead_core::api::{
-    DeletedItems, FolderEntryRequest, Health, Invites, Removal, RemoveUserRequest,
+    DeletedItems, FolderEntryRequest, Health, Invites, PutItemsRequest, Removal, RemoveUserRequest,
+    SavedItems,
 };
 use keystead_core::directory::{DirectoryEntry, InviteProof};
 use keystead_core::encoding::Bytes;
@@ -1362,7 +1363,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, 19);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }
@@ -3712,4 +3713,62 @@ async fn unchanged_lists_come_back_as_304_and_roles_by_their_tag() {
     let changed: SyncPage = decode(body);
     assert!(changed.roles.is_some());
     assert_ne!(changed.roles_tag.as_deref(), Some(tag.as_str()));
+}
+
+/// `POST /v1/items` saves several logins in one go, each as it would be saved alone, and
+/// none of them if one can't be.
+#[tokio::test]
+async fn several_logins_save_in_one_go_or_not_at_all() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let (folder_id, key) = create_folder(&server, &alice, "Production").await;
+    let batch = |items: &[EncryptedItem]| {
+        json(&PutItemsRequest {
+            items: items
+                .iter()
+                .map(|item| PutItemRequest {
+                    base_version: None,
+                    item: item.clone(),
+                    roles: Vec::new(),
+                    group_roles: Vec::new(),
+                    password_changed: false,
+                })
+                .collect(),
+        })
+    };
+    let before = alice.sync(&server, 0, 100).await.cursor;
+    let items: Vec<_> = (0..3)
+        .map(|index| new_item(&alice, folder_id, &key, &format!("Login {index}")))
+        .collect();
+    let (status, body) = alice
+        .call(&server, Method::POST, "/v1/items", batch(&items))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(decode::<SavedItems>(body).items, items);
+    let page = alice.sync(&server, before, 100).await;
+    let saved: Vec<_> = items.iter().map(|item| (item.id, 1)).collect();
+    assert_eq!(item_entries(&page), saved);
+
+    // One whose id is taken stops the lot: the new one with it isn't saved either.
+    let fresh = new_item(&alice, folder_id, &key, "Fresh");
+    let (status, _) = alice
+        .call(
+            &server,
+            Method::POST,
+            "/v1/items",
+            batch(&[fresh, items[0].clone()]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let after = alice.sync(&server, page.cursor, 100).await;
+    assert!(after.entries.is_empty());
+
+    // At most 500 at once.
+    let many: Vec<_> = (0..501)
+        .map(|index| new_item(&alice, folder_id, &key, &format!("Many {index}")))
+        .collect();
+    let (status, _) = alice
+        .call(&server, Method::POST, "/v1/items", batch(&many))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

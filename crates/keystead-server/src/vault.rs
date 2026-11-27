@@ -21,8 +21,9 @@ use keystead_core::api::{
     AddFolderGroupRequest, AddMemberRequest, CreateFolderRequest, DeletedItem, DeletedItems,
     EscrowedFolder, Exposure, Exposures, FolderEntryRequest, FolderEscrowRequest, FolderMember,
     FolderRole, GroupMember, GroupShare, ItemHistory, ItemRole, KeyLink, Member, Members,
-    PasswordAge, PasswordAges, PutItemRequest, RekeyRequest, Restore, RestoreFolderKeyRequest,
-    Role, RoleRequest, Roles, SavedVersion, SyncEntry, SyncPage, ViaGroup,
+    PasswordAge, PasswordAges, PutItemRequest, PutItemsRequest, RekeyRequest, Restore,
+    RestoreFolderKeyRequest, Role, RoleRequest, Roles, SavedItems, SavedVersion, SyncEntry,
+    SyncPage, ViaGroup,
 };
 use keystead_core::folders::{FolderEntry, verify_folder_step};
 use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
@@ -992,23 +993,61 @@ pub(crate) async fn put_item(
     Path(item_id): Path<ItemId>,
     Json(request): Json<PutItemRequest>,
 ) -> Result<Json<EncryptedItem>, ApiError> {
-    let item = request.item;
-    if item.id != item_id {
+    if request.item.id != item_id {
         return Err(ApiError::BadRequest(
             "item id doesn't match the path".into(),
         ));
     }
-    if item.author != auth.user_id {
+    let mut tx = state.writer.begin().await?;
+    let item = save_item(&mut tx, auth.user_id, request).await?;
+    tx.commit().await?;
+    Ok(Json(item))
+}
+
+/// The most versions `POST /v1/items` saves in one go.
+const MAX_BATCH: usize = 500;
+
+/// `POST /v1/items` (0.19.0 and later): saves several versions in one transaction, each as
+/// `PUT /v1/items/{item_id}` would, and all of them or none: the first that can't be saved
+/// stops the lot. For imports, which otherwise take a request and a write per login.
+pub(crate) async fn put_items(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(request): Json<PutItemsRequest>,
+) -> Result<Json<SavedItems>, ApiError> {
+    if request.items.len() > MAX_BATCH {
+        return Err(ApiError::BadRequest(format!(
+            "save at most {MAX_BATCH} logins at once"
+        )));
+    }
+    let mut tx = state.writer.begin().await?;
+    let mut items = Vec::with_capacity(request.items.len());
+    for request in request.items {
+        items.push(save_item(&mut tx, auth.user_id, request).await?);
+    }
+    tx.commit().await?;
+    Ok(Json(SavedItems { items }))
+}
+
+/// Saves one version for `caller`, within a transaction the caller commits: everything
+/// `PUT /v1/items/{item_id}` checks and does.
+async fn save_item(
+    tx: &mut SqliteConnection,
+    caller: UserId,
+    request: PutItemRequest,
+) -> Result<EncryptedItem, ApiError> {
+    let item = request.item;
+    let item_id = item.id;
+    if item.author != caller {
         return Err(ApiError::Forbidden(
             "you can only save versions you authored".into(),
         ));
     }
     check_shape(&item)?;
 
-    let mut tx = state.writer.begin().await?;
     // A courtesy check: clients verify signatures themselves, but rejecting bad ones here
     // keeps garbage out of everyone's feed.
-    let author = user_entry(&mut tx, auth.user_id)
+    let author = user_entry(&mut *tx, caller)
         .await?
         .ok_or(ApiError::Unauthorized)?;
     item.verify(&author.keys)
@@ -1024,8 +1063,8 @@ pub(crate) async fn put_item(
     let (role, expected_version) = match (request.base_version, &current) {
         (None, None) => {
             let role = match item.folder_id {
-                Some(folder_id) => folder_role(&mut tx, auth.user_id, folder_id).await?,
-                None if item.owner == Some(auth.user_id) => Some(Role::Manage),
+                Some(folder_id) => folder_role(&mut *tx, caller, folder_id).await?,
+                None if item.owner == Some(caller) => Some(Role::Manage),
                 None => {
                     return Err(ApiError::Forbidden(
                         "an item outside folders starts out as its author's own".into(),
@@ -1037,18 +1076,16 @@ pub(crate) async fn put_item(
         // The id is taken. Only someone who can open that login gets it back: anyone
         // else, such as a person who lost access and kept its id, learns nothing more.
         (None, Some(current)) => {
-            return Err(
-                if item_role(&mut tx, auth.user_id, current).await?.is_some() {
-                    ApiError::ItemConflict(Box::new(current.clone()))
-                } else {
-                    ApiError::Conflict("a login with that id already exists".into())
-                },
-            );
+            return Err(if item_role(&mut *tx, caller, current).await?.is_some() {
+                ApiError::ItemConflict(Box::new(current.clone()))
+            } else {
+                ApiError::Conflict("a login with that id already exists".into())
+            });
         }
         (Some(_), None) => return Err(ApiError::NotFound),
         (Some(base), Some(current)) => {
             let role = require(
-                item_role(&mut tx, auth.user_id, current).await?,
+                item_role(&mut *tx, caller, current).await?,
                 Role::Edit,
                 "change this login",
             )?;
@@ -1056,7 +1093,7 @@ pub(crate) async fn put_item(
             // logins, or out of folders as their own. A login in no folder stays its
             // owner's to move.
             if current.folder_id != item.folder_id || current.owner != item.owner {
-                if current.owner.is_some_and(|owner| owner != auth.user_id) {
+                if current.owner.is_some_and(|owner| owner != caller) {
                     return Err(ApiError::Forbidden(
                         "only its owner can move a login that's in no folder".into(),
                     ));
@@ -1064,12 +1101,12 @@ pub(crate) async fn put_item(
                 match (item.folder_id, item.owner) {
                     (Some(folder_id), _) => {
                         require(
-                            folder_role(&mut tx, auth.user_id, folder_id).await?,
+                            folder_role(&mut *tx, caller, folder_id).await?,
                             Role::Edit,
                             "move logins into that folder",
                         )?;
                     }
-                    (None, Some(owner)) if owner == auth.user_id => {}
+                    (None, Some(owner)) if owner == caller => {}
                     _ => {
                         return Err(ApiError::BadRequest(
                             "a login moved out of folders becomes the mover's own".into(),
@@ -1119,7 +1156,7 @@ pub(crate) async fn put_item(
         .filter(|&user| Some(user) != item.owner)
         .collect();
     for &user in &dropped {
-        let removed = user_entry(&mut tx, user)
+        let removed = user_entry(&mut *tx, user)
             .await?
             .is_none_or(|entry| entry.removed);
         dropped_active |= !removed;
@@ -1146,15 +1183,15 @@ pub(crate) async fn put_item(
         ));
     }
     if !added.is_empty() || groups_after.difference(&groups_before).next().is_some() {
-        require_approved_to_share(&mut tx, auth.user_id).await?;
+        require_approved_to_share(&mut *tx, caller).await?;
     }
     for &user in &added {
-        require_shareable(&mut tx, user).await?;
+        require_shareable(&mut *tx, user).await?;
     }
     // Copies for a group are for one of its generations: the current one when the group
     // is new to the item, and never one that doesn't exist yet.
     for copy in &item.keys.groups {
-        let (generation, _) = group_key_state(&mut tx, copy.group_id)
+        let (generation, _) = group_key_state(&mut *tx, copy.group_id)
             .await
             .map_err(|_| ApiError::BadRequest(format!("no group {}", copy.group_id)))?;
         let new = !groups_before.contains(&copy.group_id);
@@ -1183,7 +1220,7 @@ pub(crate) async fn put_item(
             .await?;
     }
 
-    let seq = next_seq(&mut tx).await?;
+    let seq = next_seq(&mut *tx).await?;
     sqlx::query(
         "INSERT INTO items (id, folder_id, version, seq, body, saved_at, password_saved_at)
          VALUES (?1, ?2, ?3, ?4, ?5, CAST(strftime('%s', 'now') AS INTEGER),
@@ -1279,16 +1316,9 @@ pub(crate) async fn put_item(
             .await?;
     }
 
-    // Everyone whose reach may have changed: people and members of groups, before and after.
-    let mut affected: BTreeSet<UserId> = before.union(&after).copied().collect();
-    affected.extend(item.owner);
-    affected.extend(current.as_ref().and_then(|current| current.owner));
-    for group in groups_before.union(&groups_after) {
-        affected.extend(group_member_ids(&mut tx, *group).await?);
-    }
-    for user in affected {
-        reconcile(&mut tx, user).await?;
-    }
+    // Who reaches this item directly may have changed, and nothing else: a save changes no
+    // folder's members, no group, and no other item.
+    reconcile_item(&mut *tx, &item_id.to_string()).await?;
     // Moved out of a folder: its members who can't reach it now lose it, as if removed,
     // and their devices are told it moved.
     if let Some(old_folder) = current
@@ -1314,7 +1344,7 @@ pub(crate) async fn put_item(
             if reaches {
                 continue;
             }
-            let seq = next_seq(&mut tx).await?;
+            let seq = next_seq(&mut *tx).await?;
             sqlx::query(
                 "INSERT INTO item_leave_log (seq, user_id, item_id, moved) VALUES (?, ?, ?, 1)",
             )
@@ -1332,8 +1362,7 @@ pub(crate) async fn put_item(
             .await?;
         }
     }
-    tx.commit().await?;
-    Ok(Json(item))
+    Ok(item)
 }
 
 /// `GET /v1/items/{item_id}/people`: who has the item directly (its owner, and everyone
@@ -2686,43 +2715,93 @@ async fn reconcile_with(
             .into_iter()
             .collect();
     for item_id in reachable.difference(&held) {
-        sqlx::query("INSERT INTO item_reach (user_id, item_id) VALUES (?, ?)")
-            .bind(user.0)
-            .bind(item_id)
-            .execute(&mut *conn)
-            .await?;
-        let seq = next_seq(conn).await?;
-        sqlx::query("INSERT INTO item_join_log (seq, user_id, item_id) VALUES (?, ?, ?)")
-            .bind(seq)
-            .bind(user.0)
-            .bind(item_id)
-            .execute(&mut *conn)
-            .await?;
+        reach_item(conn, user.0, item_id).await?;
     }
     for item_id in held.difference(&reachable) {
-        sqlx::query("DELETE FROM item_reach WHERE user_id = ? AND item_id = ?")
-            .bind(user.0)
+        lose_item(conn, user.0, item_id, expose).await?;
+    }
+    Ok(())
+}
+
+/// Like [`reconcile`], for one item and everyone: who reaches it directly, themselves or
+/// through a group, against who did. After a save, which changes that and nothing else, so
+/// it costs what the item's people and groups do, not everything each of them reaches.
+async fn reconcile_item(conn: &mut SqliteConnection, item_id: &str) -> Result<(), ApiError> {
+    let reachable: BTreeSet<i64> = sqlx::query_scalar(
+        "SELECT user_id FROM item_access WHERE item_id = ?1 AND NOT pending
+         UNION
+         SELECT gm.user_id FROM item_groups ig
+         JOIN group_members gm ON gm.group_id = ig.group_id
+         WHERE ig.item_id = ?1 AND NOT gm.pending",
+    )
+    .bind(item_id)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let held: BTreeSet<i64> =
+        sqlx::query_scalar("SELECT user_id FROM item_reach WHERE item_id = ?")
             .bind(item_id)
-            .execute(&mut *conn)
-            .await?;
-        let seq = next_seq(conn).await?;
-        sqlx::query("INSERT INTO item_leave_log (seq, user_id, item_id) VALUES (?, ?, ?)")
-            .bind(seq)
-            .bind(user.0)
-            .bind(item_id)
-            .execute(&mut *conn)
-            .await?;
-        if expose {
-            sqlx::query(&format!(
-                "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
-                 WHERE id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
-                 {EXPOSE_AGAIN}"
-            ))
-            .bind(user.0)
-            .bind(item_id)
-            .execute(&mut *conn)
-            .await?;
-        }
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+    for &user in reachable.difference(&held) {
+        reach_item(conn, user, item_id).await?;
+    }
+    for &user in held.difference(&reachable) {
+        lose_item(conn, user, item_id, true).await?;
+    }
+    Ok(())
+}
+
+/// `user` now reaches the item directly: it goes in their feed as a join.
+async fn reach_item(conn: &mut SqliteConnection, user: i64, item_id: &str) -> Result<(), ApiError> {
+    sqlx::query("INSERT INTO item_reach (user_id, item_id) VALUES (?, ?)")
+        .bind(user)
+        .bind(item_id)
+        .execute(&mut *conn)
+        .await?;
+    let seq = next_seq(conn).await?;
+    sqlx::query("INSERT INTO item_join_log (seq, user_id, item_id) VALUES (?, ?, ?)")
+        .bind(seq)
+        .bind(user)
+        .bind(item_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// `user` no longer reaches the item directly: it goes in their feed as a leave, and, with
+/// `expose`, its password on passwords to change, as they may still know it.
+async fn lose_item(
+    conn: &mut SqliteConnection,
+    user: i64,
+    item_id: &str,
+    expose: bool,
+) -> Result<(), ApiError> {
+    sqlx::query("DELETE FROM item_reach WHERE user_id = ? AND item_id = ?")
+        .bind(user)
+        .bind(item_id)
+        .execute(&mut *conn)
+        .await?;
+    let seq = next_seq(conn).await?;
+    sqlx::query("INSERT INTO item_leave_log (seq, user_id, item_id) VALUES (?, ?, ?)")
+        .bind(seq)
+        .bind(user)
+        .bind(item_id)
+        .execute(&mut *conn)
+        .await?;
+    if expose {
+        sqlx::query(&format!(
+            "{EXPOSE} SELECT id, ?1, CAST(strftime('%s', 'now') AS INTEGER) FROM items
+             WHERE id = ?2 AND NOT COALESCE(json_extract(body, '$.deleted'), 0)
+             {EXPOSE_AGAIN}"
+        ))
+        .bind(user)
+        .bind(item_id)
+        .execute(&mut *conn)
+        .await?;
     }
     Ok(())
 }

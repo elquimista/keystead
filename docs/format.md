@@ -709,6 +709,7 @@ what the tag was given for. Older servers ignore `If-None-Match` and send the li
 | `PUT /v1/groups/{id}/members/{user}/secret` | `RestoreGroupSecretRequest` | 204 | Group members, for someone who recovered |
 | `DELETE /v1/groups/{id}` | | 204 | Owner, and the group's managers in it |
 | `PUT /v1/items/{id}` | `PutItemRequest` | 200 with the saved item, or 409 `Conflict` | Editors and managers of the item (see Roles) |
+| `POST /v1/items` | `PutItemsRequest` | `SavedItems`, or the first one's error | As `PUT` for each; at most 500, all saved or none (0.19.0 and later) |
 | `GET /v1/items/{id}/people` | | `Members` | Anyone who can open the item |
 | `GET /v1/items/{id}/history` | | `ItemHistory` | Editors and managers of the item |
 | `GET /v1/deleted` | | `DeletedItems` | Members; only items they can change |
