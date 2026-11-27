@@ -1205,8 +1205,7 @@ private struct PeopleList: View {
                 ContentUnavailableView {
                     Label("Just you so far", systemImage: "person.circle")
                 } description: {
-                    Text("Invite your team; they'll show up here once they've joined, ready "
-                        + "for you to approve.")
+                    Text("Invite your team; they'll show up here once they've joined.")
                 } actions: {
                     Button("Invite Someone…") { model.sheet = .invite }
                 }
@@ -1308,9 +1307,9 @@ private struct InviteDetail: View {
                         .opacity(0.5)
                 }
             } footer: {
-                Text("\(invite.name) joins by pasting the invite you sent into Keystead, then shows "
-                    + "up here for you to approve. Keystead doesn't keep the invite itself: if "
-                    + "it's lost or went to the wrong person, revoke it and invite them again.")
+                Text("\(invite.name) joins by pasting the invite you sent into Keystead. Keystead "
+                    + "doesn't keep the invite itself: if it's lost or went to the wrong person, "
+                    + "revoke it and invite them again.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1382,8 +1381,9 @@ private struct PersonDetail: View {
                     Text(user.approved
                         ? "If this Mac is lost, broken or wiped, your Recovery Kit brings your "
                             + "account back on a new one."
-                        : "Read your fingerprint to the owner, in person or on a call, so they "
-                            + "can approve you.")
+                        : "The owner's Keystead approves you the next time it syncs, if you "
+                            + "joined with an invite from Keystead 0.18.0 or later. If not, read "
+                            + "them your fingerprint, in person or on a call.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1445,6 +1445,13 @@ private struct PersonDetail: View {
                 .task { await model.reloadDevices() }
             } else if !user.approved {
                 Section {
+                    if model.isOwner && user.inviteMismatch {
+                        Label("The keys on the server for \(user.name) don't match the invite you "
+                            + "sent them. The server may have swapped them.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if model.isOwner {
                         ActionRow(title: "Their fingerprint", button: "Approve…") {
                             model.sheet = .approve(user)
@@ -1457,9 +1464,11 @@ private struct PersonDetail: View {
                     header
                 } footer: {
                     if model.isOwner {
-                        Text("\(user.name) has joined. Ask them to read out the fingerprint "
-                            + "their Keystead shows, in person or on a call, to prove the keys on "
-                            + "the server are really theirs.")
+                        Text((user.inviteMismatch
+                            ? "Approve \(user.name) only if the fingerprint they read out matches. "
+                            : "\(user.name) has joined. ")
+                            + "Ask them to read out the fingerprint their Keystead shows, in person "
+                            + "or on a call, to prove the keys on the server are really theirs.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1897,6 +1906,22 @@ private struct Notices: View {
                       systemImage: "checkmark.circle.fill")
                     .notice()
             }
+            if !model.approvedNames.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Text("Approved \(ListFormatter.localizedString(byJoining: model.approvedNames)), "
+                        + "who joined with your " + (model.approvedNames.count == 1 ? "invite." : "invites."))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        model.dismissApproved()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .notice()
+            }
             if model.updates.showsNotice, let update = model.updates.available {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.down.circle.fill")
@@ -1919,6 +1944,7 @@ private struct Notices: View {
         .padding(.bottom, 16)
         .animation(.default, value: model.copiedName)
         .animation(.default, value: model.message)
+        .animation(.default, value: model.approvedNames)
         .animation(.default, value: model.updates.showsNotice)
     }
 }

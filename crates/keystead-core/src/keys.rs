@@ -21,6 +21,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::Error;
 use crate::encoding::{Bytes, Key32, transcript};
 use crate::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
+use crate::invites::InviteKey;
 
 type Kem = X25519HkdfSha256;
 type KemPrivateKey = <Kem as hpke::Kem>::PrivateKey;
@@ -30,6 +31,7 @@ type EncappedKey = <Kem as hpke::Kem>::EncappedKey;
 const ACCOUNT_ENCRYPTION_INFO: &[u8] = b"keystead/account/encryption/v1";
 const ACCOUNT_SIGNING_INFO: &[u8] = b"keystead/account/signing/v1";
 const ACCOUNT_PERSONAL_INFO: &[u8] = b"keystead/account/personal/v1";
+const ACCOUNT_INVITES_INFO: &[u8] = b"keystead/account/invites/v1";
 const FOLDER_KEY_INFO: &[u8] = b"keystead/folder-key/v1";
 const ITEM_KEY_INFO: &[u8] = b"keystead/item-key/v1";
 const GROUP_SECRET_INFO: &[u8] = b"keystead/group-secret/v1";
@@ -118,13 +120,14 @@ fn recovery_error(error: bip39::Error) -> Error {
     })
 }
 
-/// A user's private keys: one for opening wrapped keys, one for signing, and a symmetric
-/// personal key for items outside folders.
+/// A user's private keys: one for opening wrapped keys, one for signing, a symmetric
+/// personal key for items outside folders, and a seed for the owner's invite keys.
 pub struct AccountKeys {
     encryption: KemPrivateKey,
     encryption_public: KemPublicKey,
     signing: SigningKey,
     personal: Zeroizing<[u8; 32]>,
+    invites: Zeroizing<[u8; 32]>,
 }
 
 impl AccountKeys {
@@ -147,7 +150,16 @@ impl AccountKeys {
             encryption_public,
             signing: SigningKey::from_bytes(&signing_seed),
             personal: expand(ACCOUNT_PERSONAL_INFO),
+            invites: expand(ACCOUNT_INVITES_INFO),
         }
+    }
+
+    /// The key for an invite this account makes, as the team's owner, for `name`, from
+    /// the invite's random `nonce`. The owner's app makes it again from the same two to
+    /// check whoever joined with it, so it keeps nothing; nobody without the account's
+    /// secret can make it.
+    pub fn invite_key(&self, nonce: &[u8], name: &str) -> InviteKey {
+        InviteKey::derive(&self.invites, nonce, name)
     }
 
     /// The personal key on its own, to tell which of this account's items are sealed with

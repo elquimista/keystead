@@ -59,6 +59,8 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
 - `info = "keystead/account/personal/v1"` gives the personal key, an XChaCha20-Poly1305
   key only this account can make. It seals the keys of the account's own items outside
   folders, so opening those costs no public-key operation.
+- `info = "keystead/account/invites/v1"` gives the invite seed, from which the owner's app
+  makes each invite's key (0.18.0 and later; see Approving with an invite's key).
 
 **Fingerprint.** `SHA-256("keystead/fingerprint/v1" ‖ encryption public key ‖ signing
 public key)`, first 10 bytes, written as five groups of four hex digits
@@ -150,6 +152,13 @@ others; a removed device's sessions end at once. A device removes itself by **si
 (`POST /v1/sign-out`), and then deletes its profile and keys. Servers before sign-out
 existed answer 404; the device still deletes its own data, and stays listed until removed
 from another device.
+
+An account has at most ten devices (0.18.0 and later). Starting to add one from another
+device (`POST /v1/device-transfers`) answers 409 at the limit, saying to remove one first.
+A device added with the account secret (`POST /v1/recover`), as with a Recovery Kit, is
+added anyway, in place of the account's oldest device, whose sessions end: someone who
+has lost every device can't remove one first. Recovering with the owner's help replaces
+all of them with one.
 
 **Recovering an account on a new device** uses the account signing key instead of an
 existing device:
@@ -438,7 +447,8 @@ without it, as when they're removed. Folders inside it by name stay.
 The server lists every user's public keys, but a server that swapped in its own key
 could read everything shared with that user. So each entry carries the **team owner's
 signature**, given after the owner compares the user's fingerprint in person or on a
-call:
+call, or by the owner's app once the person proves their keys with their invite's key
+(0.18.0 and later; see Approving with an invite's key):
 
 ```
 transcript("keystead/directory-entry/v1", user id, name, encryption key, signing key)
@@ -487,6 +497,44 @@ lost device until then.
 
 Unsigned flags show who has `escrow` on, as the server says, and who is `recovering`. Clients before 0.13.0
 can't check a revision above 0, and stop trusting that person until they're updated.
+
+### Approving with an invite's key
+
+(0.18.0 and later; `"invite_keys": true` in `GET /v1/health`.) An invite can stand in for
+the fingerprint check. The owner's app picks a random 16-byte `nonce` for each invite,
+sends it with the invite's name (`InviteRequest.nonce`), and puts the invite's **key** on
+the line, where the server never sees it:
+
+```
+key = HKDF-SHA256(no salt, input = invite seed,
+                  info = transcript("keystead/invite-key/v1", nonce, name))   32 bytes
+```
+
+The line is `keystead join <server> <token> --owner <fingerprint> --key <key>`, the key
+as unpadded base64url. Joining, the new person's app sends, with its keys
+(`AcceptInviteRequest.proof`),
+
+```
+proof = HMAC-SHA256(key, transcript("keystead/invite-proof/v1", encryption key, signing key))
+```
+
+The server keeps the invite's nonce with the account, and lists both on its directory entry
+as `"invite": {"nonce", "proof"}` until the owner approves it. When the owner's app syncs,
+it makes the key again from the nonce and the name the entry has, and approves on its own,
+as above, anyone whose proof checks out (compared in constant time), who is at revision 0,
+whom it has never seen approved, and who is the only entry listed with that nonce and with
+those keys. A server can't make a proof for keys of its own, can't move a proof to
+another name or invite, and can't pass one off as two people. An entry whose proof doesn't
+check out may have had its keys swapped: the owner's app says so, and leaves it to a
+fingerprint check. So does an entry without one, as from a line without a key.
+
+The key is only as safe as the line: someone who reads it before the person it was for
+joins in their place. The invite then works for nobody else, so that person finds it
+used, and the owner removes the impostor. Comparing fingerprints remains the stronger
+check, and People keeps showing everyone's.
+
+Servers before 0.18.0 drop the nonce and the proof; the owner's app checks `invite_keys`
+first and makes lines without a key there. Apps before 0.18.0 can't read a line with a key.
 
 ## Groups
 
@@ -660,7 +708,9 @@ codes (400, 401, 403, 404, 409).
 `Health` is `{"status", "version", "item_format"}`. `item_format` is the newest item
 format the server stores; servers older than 0.2.0 leave it out and store only format 1,
 so clients check it before saving. Servers with groups (0.4.0 and later) say 3, and with
-one-time codes (0.6.0 and later) 4.
+one-time codes (0.6.0 and later) 4. Later servers add `membership` (see Signed members and
+Signed roles), `escrow` (see Escrow) and `invite_keys` (see Approving with an invite's
+key); a field left out means the server doesn't do that.
 
 **Setup.** The setup code works once, and (0.16.0 and later) for a day from the server's
 first start: after that `POST /v1/setup` answers 403 to the right code too, and an
@@ -676,7 +726,8 @@ asking the server.
 owner can't be shown an invite's line again. `Invites` lists the ones nobody has used and
 that haven't run out, oldest first, each as `{"id", "name", "created_at", "expires_at"}`;
 ids are never used again. Deleting one revokes it: its token stops working at once.
-Accepting a token that was used, revoked or has run out answers 403. Invites made before
+Accepting a token that was used, revoked or has run out answers 403. A nonce that isn't 16
+bytes, or a proof that isn't 32, answers 400, and the invite still works. Invites made before
 0.16.0 run out seven days after the server is updated. Servers before 0.16.0 answer 404
 or 405 to listing and revoking, leave out `expires_at`, and their invites work until
 used; clients say to update the server instead of failing.
@@ -1083,12 +1134,13 @@ key, is written down as a manager, like everyone from before roles.
 outside a folder may do to an item in it. Someone who could once edit a folder can still
 be passed off as the author of a later version, since nothing signed says when a version
 was written. A new device, which a server can show an earlier state of a folder (see Older
-copies), can be shown one from before its roles were signed. And a group's managers are the server's to
-name: anyone in a group can sign its next entry.
+copies), can be shown one from before its roles were signed. (A group's managers were
+signed from the start: only the owner, or a manager the previous entry names, signs a
+group's next entry; see Groups.)
 
 ## Not in this format yet
 
-- Signed roles on single items. In a folder roles are signed (see Signed roles); on an
-  item shared directly, and for a group's managers, they are kept and enforced by the
-  server alone.
+- Signed roles on single items. In a folder roles are signed (see Signed roles), and a
+  group's managers are named in its signed entries; on an item shared directly, roles are
+  kept and enforced by the server alone.
 - Groups inside groups (on purpose: no loops, and access stays easy to follow).

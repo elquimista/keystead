@@ -9,6 +9,7 @@ pub mod encoding;
 pub mod folders;
 pub mod groups;
 pub mod ids;
+pub mod invites;
 pub mod items;
 pub mod keys;
 pub mod otp;

@@ -19,6 +19,7 @@ chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hkdf = "0.12"
+hmac = "0.12"
 hpke = "0.12"
 keepass = "0.17"
 p256 = { version = "0.13", features = ["ecdsa"] }

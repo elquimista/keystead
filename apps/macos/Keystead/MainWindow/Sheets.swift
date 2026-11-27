@@ -41,6 +41,8 @@ struct SheetContent: View {
             ApproveSheet(model: model, user: user)
         case .fingerprint:
             FingerprintSheet(model: model)
+        case .joined:
+            JoinedSheet(model: model)
         case .recoveryKit(let afterSetup):
             RecoveryKitSheet(model: model, afterSetup: afterSetup)
         case .signOut:
@@ -2385,17 +2387,22 @@ private struct InviteSheet: View {
             return false
         } content: {
             if let invitation {
-                Text("Send it to \(name.trimmed) directly, for example in a private message. It "
-                    + "works once" + (invitation.expiresAt.map { ", until \(date($0))" } ?? "")
-                    + ".")
+                Text("Send it to \(name.trimmed) directly, for example in a private message: "
+                    + "whoever has it can join as them. It works once"
+                    + (invitation.expiresAt.map { ", until \(date($0))" } ?? "") + ".")
                     .fixedSize(horizontal: false, vertical: true)
                 Form {
                     Section {
                         LineRow(line: invitation.command) { model.copy(invitation.command) }
                     } footer: {
-                        FormFooter("They paste it into Keystead's welcome screen. Once they've joined, "
-                            + "they show up under People: approve them after they read you their "
-                            + "fingerprint."
+                        FormFooter(
+                            (invitation.key == nil
+                                ? "They paste it into Keystead's welcome screen. Once they've joined, "
+                                    + "they show up under People: approve them after they read you "
+                                    + "their fingerprint."
+                                : "They paste it into Keystead's welcome screen, with Keystead "
+                                    + "0.18.0 or later. Once they've joined, your Keystead approves "
+                                    + "them on its own.")
                             + (invitation.expiresAt == nil
                                 ? "" : " Until then, you can revoke the invite from People."))
                     }
@@ -2509,7 +2516,33 @@ struct SignOutSheet: View {
     }
 }
 
-/// Shown right after joining.
+/// Shown right after joining with an invite's key: nothing to read out.
+private struct JoinedSheet: View {
+    let model: AppModel
+
+    var body: some View {
+        SheetScaffold(title: "You've Joined", actionTitle: "Done", showsCancel: false) {
+            true
+        } content: {
+            if let identity = model.identity {
+                let owner = model.users.first(where: \.isOwner)?.name ?? "the owner"
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("You've joined \(host(identity.server)). \(owner)'s Keystead approves you "
+                        + "the next time it syncs, usually within minutes; then logins shared with "
+                        + "you show up here.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Meanwhile you can add logins of your own. If you're still waiting "
+                        + "later, read \(owner) your fingerprint, under People.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+/// Shown right after joining with an invite that has no key.
 private struct FingerprintSheet: View {
     let model: AppModel
 

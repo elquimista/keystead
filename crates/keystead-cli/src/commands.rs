@@ -39,8 +39,15 @@ pub fn setup(home: &Path, server: &str, setup_code: &str, name: &str) -> Result<
     Ok(vault.whoami())
 }
 
-/// Joins with an invite, pinning the owner's keys after checking their fingerprint.
-pub fn join(home: &Path, server: &str, token: &str, owner_fingerprint: &str) -> Result<Whoami> {
+/// Joins with an invite, pinning the owner's keys after checking their fingerprint. With
+/// the invite's key, the owner's app approves the account on its own.
+pub fn join(
+    home: &Path,
+    server: &str,
+    token: &str,
+    owner_fingerprint: &str,
+    invite_key: Option<&str>,
+) -> Result<Whoami> {
     refuse_existing(home)?;
     let secret = AccountSecret::generate();
     let key = Arc::new(SoftwareDeviceKey::generate());
@@ -49,6 +56,7 @@ pub fn join(home: &Path, server: &str, token: &str, owner_fingerprint: &str) -> 
         new_account(server, &secret, &key),
         token,
         owner_fingerprint,
+        invite_key,
     )?;
     DeviceFile::new(&key, &secret).save(home)?;
     Ok(vault.whoami())
@@ -740,6 +748,9 @@ pub fn sync(home: &Path) -> Result<SyncSummary> {
 }
 
 pub fn warn_rejected(summary: &SyncSummary) {
+    for name in &summary.approved {
+        eprintln!("Approved {name}, who joined with your invite.");
+    }
     if summary.older > 0 || summary.server_went_back {
         eprintln!("warning: {}", older_note(summary));
     }

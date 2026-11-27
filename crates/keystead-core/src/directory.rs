@@ -3,7 +3,9 @@
 //! The server stores the directory but can't be trusted with it: a server that swapped
 //! in its own key could read everything shared with that user. So each entry carries the
 //! team owner's signature, given after the owner checks the user's fingerprint in person
-//! or on a call, and apps only share with entries whose signature verifies.
+//! or on a call, or by the owner's app once the user proves their keys with their
+//! invite's key (see `crate::invites`), and apps only share with entries whose signature
+//! verifies.
 //!
 //! Someone who recovers with the owner's help gets new keys at the next `revision`. Apps
 //! remember the highest revision they've seen for each person and never share with an
@@ -55,6 +57,31 @@ pub struct DirectoryEntry {
     /// The owner has started a recovery for them that isn't approved yet. Not signed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovering: bool,
+    /// How they joined, if with an invite that carried a key, until the owner approves
+    /// them (0.18.0 and later). Not signed: the owner's app checks the proof itself, and
+    /// approves them on its own if it holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite: Option<InviteProof>,
+}
+
+/// What someone who joined with an invite's key sent (see `crate::invites`): the invite's
+/// nonce, as the owner's app made it, and their proof, made with the key, of the keys they
+/// joined with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteProof {
+    pub nonce: Bytes,
+    pub proof: Bytes,
+}
+
+impl InviteProof {
+    /// Whether the person who joined proved, with the key of the invite `owner` made for
+    /// them, that `entry`'s keys are the ones they joined with, under the name the invite
+    /// was made for.
+    pub fn holds(&self, owner: &AccountKeys, entry: &DirectoryEntry) -> bool {
+        owner
+            .invite_key(self.nonce.as_slice(), &entry.name)
+            .verify(&entry.keys, &self.proof)
+    }
 }
 
 /// Keys someone had before a recovery, with the owner's approval of them.
@@ -128,6 +155,7 @@ impl DirectoryEntry {
             escrow_consent: None,
             escrow_sequence: 0,
             recovering: false,
+            invite: None,
         }
     }
 

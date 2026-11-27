@@ -91,6 +91,7 @@ fn alice_and_bob_share_a_password() {
         &invite.server,
         &invite.token,
         &invite.owner_fingerprint,
+        None,
     )
     .unwrap();
     assert_eq!(me.name, "Bob");
@@ -186,6 +187,7 @@ fn the_owner_lists_invites_and_takes_one_back() {
         &for_bob.server,
         &for_bob.token,
         &for_bob.owner_fingerprint,
+        None,
     )
     .unwrap_err();
     assert!(error.to_string().contains("revoked"), "{error}");
@@ -196,6 +198,7 @@ fn the_owner_lists_invites_and_takes_one_back() {
         &for_carol.server,
         &for_carol.token,
         &for_carol.owner_fingerprint,
+        None,
     )
     .unwrap();
     assert_eq!(commands::pending_invites(&alice).unwrap(), Some(Vec::new()));
@@ -221,6 +224,7 @@ fn joining_checks_the_owner_fingerprint() {
         &invite.server,
         &invite.token,
         "0000-0000-0000-0000-0000",
+        None,
     )
     .unwrap_err();
     assert!(
@@ -269,4 +273,30 @@ fn a_recovery_kit_restores_an_account_on_another_machine() {
     let again = fixture.home("alice-again");
     commands::recover(&again, &fixture.url, Some(&me.owner_fingerprint), &words).unwrap();
     assert_eq!(commands::devices(&again).unwrap().len(), 1);
+}
+
+#[test]
+fn with_the_invites_key_the_owners_next_sync_approves_them() {
+    let fixture = Fixture::start();
+    let alice = fixture.home("alice");
+    let bob = fixture.home("bob");
+    commands::setup(&alice, &fixture.url, &fixture.setup_code, "Alice").unwrap();
+    let invite = commands::invite(&alice, "Bob").unwrap();
+    let me = commands::join(
+        &bob,
+        &invite.server,
+        &invite.token,
+        &invite.owner_fingerprint,
+        invite.key.as_deref(),
+    )
+    .unwrap();
+    // Listing people fetches them, and approves whoever proved their keys.
+    let users = commands::users(&alice).unwrap();
+    let bob_row = users
+        .iter()
+        .find(|user| user.user_id == me.user_id)
+        .unwrap();
+    assert!(bob_row.approved);
+    commands::create_folder(&alice, "Production").unwrap();
+    commands::share_folder(&alice, "Production", me.user_id, Role::View).unwrap();
 }

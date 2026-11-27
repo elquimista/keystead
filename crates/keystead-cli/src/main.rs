@@ -40,10 +40,16 @@ enum Command {
     /// Join a server with an invite
     Join {
         server: String,
+        /// Tokens are base64url, so one can start with a dash
+        #[arg(allow_hyphen_values = true)]
         token: String,
         /// The owner's fingerprint, from the invite
         #[arg(long)]
         owner: String,
+        /// The invite's key, from the invite: with it, the owner's app approves you on its own.
+        /// It's base64url, so it can start with a dash
+        #[arg(long, allow_hyphen_values = true)]
+        key: Option<String>,
     },
     /// Show your account and fingerprint
     Whoami,
@@ -53,6 +59,8 @@ enum Command {
     /// `keystead devices add` there (or Add a Device in the app) and use the line it shows
     AddDevice {
         server: String,
+        /// Tokens are base64url, so one can start with a dash
+        #[arg(allow_hyphen_values = true)]
         token: String,
         /// The owner's fingerprint, from the line
         #[arg(long)]
@@ -65,6 +73,8 @@ enum Command {
     /// device and your recovery kit: use the line the owner sends you
     RecoverWithHelp {
         server: String,
+        /// Tokens are base64url, so one can start with a dash
+        #[arg(allow_hyphen_values = true)]
         token: String,
         /// The owner's fingerprint, from the line
         #[arg(long)]
@@ -502,8 +512,13 @@ fn run(cli: Cli) -> Result<()> {
                 None => println!("Send {name} this command. It works once:\n"),
             }
             println!("  {}\n", invite.command());
-            println!("Then compare fingerprints with them and run:");
-            println!("  keystead approve <their user id> --fingerprint <their fingerprint>");
+            if invite.key.is_some() {
+                println!("Once they've joined, your next sync approves them: the key on the");
+                println!("line proves their keys are theirs. They need Keystead 0.18.0 or later.");
+            } else {
+                println!("Then compare fingerprints with them and run:");
+                println!("  keystead approve <their user id> --fingerprint <their fingerprint>");
+            }
             if invite.expires_at.is_some() {
                 println!("\nTo revoke it before they use it, see `keystead invites`.");
             }
@@ -539,11 +554,17 @@ fn run(cli: Cli) -> Result<()> {
             server,
             token,
             owner,
+            key,
         } => {
-            let me = commands::join(&home, &server, &token, &owner)?;
+            let me = commands::join(&home, &server, &token, &owner, key.as_deref())?;
             println!("Joined {} as {} (user {}).", me.server, me.name, me.user_id);
             println!("Your fingerprint: {}", me.fingerprint);
-            println!("Read it to the owner, in person or on a call, so they can approve you.");
+            if key.is_some() {
+                println!("The owner's Keystead approves you the next time it syncs. If it");
+                println!("doesn't, read them your fingerprint, in person or on a call.");
+            } else {
+                println!("Read it to the owner, in person or on a call, so they can approve you.");
+            }
         }
         Command::Whoami => {
             let me = commands::whoami(&home)?;
@@ -804,6 +825,8 @@ fn run(cli: Cli) -> Result<()> {
                         "recovering"
                     } else if user.approved {
                         "approved"
+                    } else if user.invite_mismatch {
+                        "waiting, keys don't match the invite"
                     } else {
                         "waiting"
                     }
@@ -1627,7 +1650,43 @@ fn print_table(headers: &[&str], rows: Vec<Vec<String>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::date;
+    use clap::Parser;
+
+    use super::{Cli, Command, date};
+
+    #[test]
+    fn tokens_and_keys_may_start_with_a_dash() {
+        let cli = Cli::try_parse_from([
+            "keystead",
+            "join",
+            "https://keys.example.com",
+            "-tok",
+            "--owner",
+            "ab12-cd34",
+            "--key",
+            "-zAb",
+        ])
+        .unwrap();
+        let Command::Join {
+            token, owner, key, ..
+        } = cli.command
+        else {
+            panic!("not a join");
+        };
+        assert_eq!((token.as_str(), owner.as_str()), ("-tok", "ab12-cd34"));
+        assert_eq!(key.as_deref(), Some("-zAb"));
+        for command in ["add-device", "recover-with-help"] {
+            let args = [
+                "keystead",
+                command,
+                "https://keys.example.com",
+                "-tok",
+                "--owner",
+                "ab12",
+            ];
+            assert!(Cli::try_parse_from(args).is_ok(), "{command}");
+        }
+    }
 
     #[test]
     fn dates_are_utc_calendar_days() {

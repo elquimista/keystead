@@ -113,9 +113,12 @@ account back on a new Mac with a Recovery Kit.
   a login copies its password, and so does Return for the first match.
 - **Dock icon:** shown by default. Settings > General can turn it off, leaving only the
   menu bar icon.
-- **Approving people:** the owner types in the fingerprint the new person reads out (in
-  person or on a call). Keystead checks it against the keys they joined with, ignoring
-  spaces, dashes and capitals.
+- **Approving people:** the owner's Keystead approves whoever joins with an invite line on
+  its own, as the key on the line proves the keys they joined with are theirs; while
+  invites are out it syncs every minute. Someone who joined with a line from an older
+  Keystead, or whose keys don't match the invite (a warning says so), waits for the owner to
+  type in the fingerprint they read out (in person or on a call). Keystead checks it
+  against the keys they joined with, ignoring spaces, dashes and capitals.
 - **Recovery Kit:** the account secret as 24 words, shown after Touch ID (hidden until
   asked for), printable, or copied as words alone to this Mac's clipboard for 30 seconds
   (People › You, or Settings › Account). The owner is asked to save one right after setup.

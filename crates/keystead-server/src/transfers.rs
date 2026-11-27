@@ -18,7 +18,7 @@ use keystead_core::api::{
 use rand::RngCore;
 use rand::rngs::OsRng;
 
-use crate::accounts::{Auth, check_name, hash};
+use crate::accounts::{Auth, MAX_DEVICES, check_name, device_count, hash};
 use crate::{ApiError, AppState};
 
 /// How long a transfer waits for the new device and the approval.
@@ -38,6 +38,13 @@ pub(crate) async fn start(
     let mut token = [0u8; 32];
     OsRng.fill_bytes(&mut token);
     let mut tx = state.writer.begin().await?;
+    if device_count(&mut tx, auth.user_id).await? >= MAX_DEVICES {
+        return Err(ApiError::Conflict(format!(
+            "this account has {MAX_DEVICES} devices, the most it can have. Remove one you no \
+             longer use first: in Keystead under People, You, or with `keystead devices \
+             remove`"
+        )));
+    }
     sqlx::query(&format!(
         "DELETE FROM device_transfers WHERE expires_at < {NOW}"
     ))

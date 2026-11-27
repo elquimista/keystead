@@ -39,6 +39,7 @@ enum DebugSnapshots {
         } else {
             steps += [
                 ("3-person-waiting", { model.selectedUserID = 3 }),
+                ("3b-person-mismatch", { model.selectedUserID = 5 }),
                 // Riley was invited and hasn't joined; the same toolbar, greyed out.
                 ("3a-invite-waiting", {
                     model.selectedUserID = nil
@@ -141,6 +142,7 @@ enum DebugSnapshots {
                 }),
                 ("6e12d-invite", { model.sheet = .invite }),
                 ("6e12e-fingerprint", { model.sheet = .fingerprint }),
+                ("6e12e2-joined", { model.sheet = .joined }),
                 ("6e12f-remove-user", {
                     if let user = model.users.first(where: { !$0.isOwner && $0.approved && !$0.removed }) {
                         model.sheet = .removeUser(user)

@@ -118,13 +118,18 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     // The member pastes the invite, wrapped onto several lines by a mail client.
     let invitation = owner.invite("Mo".into()).unwrap();
     let pasted = parse_invite(invitation.command.replace(' ', "\n")).unwrap();
+    assert_eq!(pasted.key, invitation.key);
+    assert!(pasted.key.is_some());
     let member_secret = account_secret();
     let member_signer = signer();
+    // Without the invite's key, as with an owner before 0.18.0: the owner compares
+    // fingerprints.
     let member = Vault::join(
         server.profile("member"),
         pasted.server,
         pasted.token,
         pasted.owner_fingerprint,
+        None,
         member_secret.clone(),
         new_device_id(),
         "Test Mac".into(),
@@ -156,6 +161,29 @@ fn an_owner_sets_up_invites_approves_and_shares() {
     let typed = them.fingerprint.to_uppercase().replace('-', " ");
     assert_eq!(owner.approve(them.user_id, typed).unwrap(), "Mo");
     assert!(owner.users().unwrap().iter().all(|user| user.approved));
+
+    // With it, the owner's next sync approves them, with nothing to compare.
+    let invitation = owner.invite("Kai".into()).unwrap();
+    let kai = Vault::join(
+        server.profile("kai"),
+        invitation.server,
+        invitation.token,
+        invitation.owner_fingerprint,
+        invitation.key,
+        account_secret(),
+        new_device_id(),
+        "Test Mac".into(),
+        signer(),
+    )
+    .unwrap();
+    let kai = kai.identity().unwrap();
+    assert_eq!(owner.sync().unwrap().approved, ["Kai"]);
+    let users = owner.known_users().unwrap();
+    let approved = users
+        .iter()
+        .find(|user| user.user_id == kai.user_id)
+        .unwrap();
+    assert!(approved.approved && !approved.invite_mismatch);
 
     owner.create_folder("Production".into()).unwrap();
     owner

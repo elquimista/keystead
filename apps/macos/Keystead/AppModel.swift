@@ -85,6 +85,8 @@ final class AppModel {
         case approve(User)
         /// After joining: the fingerprint to read to the owner.
         case fingerprint
+        /// After joining with an invite's key: the owner's Keystead approves this account.
+        case joined
         /// The recovery kit; right after setup it first explains why it matters.
         case recoveryKit(afterSetup: Bool)
         case signOut
@@ -117,6 +119,7 @@ final class AppModel {
             case .invite: "invite"
             case .approve(let user): "approve-\(user.userId)"
             case .fingerprint: "fingerprint"
+            case .joined: "joined"
             case .recoveryKit: "recovery-kit"
             case .signOut: "sign-out"
             case .newGroup: "new-group"
@@ -214,6 +217,9 @@ final class AppModel {
     private(set) var devicesProblem: String?
     /// A short note: why the last action failed, or what sync skipped.
     private(set) var message: String?
+    /// Who this Mac approved, as the owner, because they joined with an invite's key; shown
+    /// until dismissed.
+    private(set) var approvedNames: [String] = []
     /// The login whose password is on the clipboard, until it's cleared.
     private(set) var copiedName: String?
     /// What was copied for `copiedName`: "password" or "one-time code".
@@ -398,8 +404,8 @@ final class AppModel {
         }
     }
 
-    /// Joins a team with an invite. Afterwards the user reads their fingerprint to the
-    /// owner, who approves them.
+    /// Joins a team with an invite. With the invite's key, the owner's Keystead approves
+    /// this account on its own; without one, the user reads their fingerprint to the owner.
     func join(invite text: String) async {
         let invite: Invitation
         do {
@@ -413,11 +419,11 @@ final class AppModel {
             profilePath, secret, deviceId, deviceName, signer in
             try Vault.join(
                 profilePath: profilePath, server: invite.server, token: invite.token,
-                ownerFingerprint: invite.ownerFingerprint, accountSecret: secret,
+                ownerFingerprint: invite.ownerFingerprint, key: invite.key, accountSecret: secret,
                 deviceId: deviceId, deviceName: deviceName, signer: signer)
         }
         if joined {
-            sheet = .fingerprint
+            sheet = invite.key == nil ? .fingerprint : .joined
         }
     }
 
@@ -834,6 +840,7 @@ final class AppModel {
         selectedInviteID = nil
         copiedName = nil
         message = nil
+        approvedNames = []
         phase = .locked
     }
 
@@ -882,12 +889,14 @@ final class AppModel {
     }
 
     /// Keeps this Mac's copy fresh without a button: every five minutes while unlocked, and
-    /// when Keystead comes back to the front after a minute or more.
+    /// when Keystead comes back to the front after a minute or more. Every minute while the
+    /// owner has invites out, so whoever joins with one is approved soon after.
     private func startAutoSync() {
         autoSyncTask?.cancel()
         autoSyncTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(300))
+                let waiting = self.map { $0.isOwner && !$0.invites.isEmpty } ?? false
+                try? await Task.sleep(for: .seconds(waiting ? 60 : 300))
                 guard let self, !Task.isCancelled, self.phase == .unlocked else { return }
                 await self.refresh()
             }
@@ -934,6 +943,9 @@ final class AppModel {
             // The sync fetched the directory already.
             update(\.users, to: try await perform { try $0.knownUsers() })
             update(\.identity, to: try await perform { try $0.identity() })
+            if !result.approved.isEmpty {
+                approvedNames += result.approved
+            }
             if result.older > 0 || result.serverWentBack {
                 // A server restored from a backup looks like this; so does one that lies.
                 message = (result.older > 0
@@ -1105,6 +1117,10 @@ final class AppModel {
 
     func dismissMessage() {
         message = nil
+    }
+
+    func dismissApproved() {
+        approvedNames = []
     }
 
     /// Quitting ends the timer that clears a copied password, so it's cleared now.
@@ -1711,11 +1727,11 @@ extension AppModel {
     /// vault fail with "Keystead is locked."
     private static func demoUser(
         _ id: Int64, _ name: String, owner: Bool = false, approved: Bool = true,
-        removed: Bool = false, escrow: Bool = false
+        removed: Bool = false, escrow: Bool = false, inviteMismatch: Bool = false
     ) -> User {
         User(
             userId: id, name: name, approved: approved, isOwner: owner, removed: removed,
-            escrow: escrow, recovering: false, keysReplaced: false)
+            escrow: escrow, recovering: false, keysReplaced: false, inviteMismatch: inviteMismatch)
     }
 
     /// With `-slowDemo`, demo loads take as long as a slow server's, to see sheets as
@@ -1753,6 +1769,8 @@ extension AppModel {
                 demoUser(2, "Mo", escrow: true),
                 demoUser(3, "Sam", approved: false),
                 demoUser(4, "Pat", removed: true),
+                // Joined with an invite's key that doesn't prove the keys on the server.
+                demoUser(5, "Tom", approved: false, inviteMismatch: true),
             ]
             model.invites = [
                 PendingInvitation(

@@ -16,7 +16,8 @@ use keystead_core::api::{
     SignInRequest, SyncEntry, SyncPage, UpdateGroupRequest, ViaGroup,
 };
 use keystead_core::api::{FolderEntryRequest, Health, Invites, Removal, RemoveUserRequest};
-use keystead_core::directory::DirectoryEntry;
+use keystead_core::directory::{DirectoryEntry, InviteProof};
+use keystead_core::encoding::Bytes;
 use keystead_core::folders::FolderEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring, verify_entries};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
@@ -278,7 +279,10 @@ async fn invite(server: &Server, owner: &Person, name: &str) -> Person {
             Method::POST,
             "/v1/invites",
             owner.token(),
-            json(&InviteRequest { name: name.into() }),
+            json(&InviteRequest {
+                name: name.into(),
+                nonce: None,
+            }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -295,6 +299,7 @@ async fn invite(server: &Server, owner: &Person, name: &str) -> Person {
                 device_id: person.device_id,
                 device_key: person.device.public(),
                 device_name: format!("{name}'s Mac"),
+                proof: None,
             }),
         )
         .await;
@@ -600,7 +605,10 @@ async fn access_rules_are_enforced() {
             Method::POST,
             "/v1/invites",
             bob.token(),
-            json(&InviteRequest { name: "Eve".into() }),
+            json(&InviteRequest {
+                name: "Eve".into(),
+                nonce: None,
+            }),
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1309,7 +1317,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }
@@ -2264,7 +2272,10 @@ async fn a_recovery_challenge_from_before_a_removal_adds_no_device() {
             Method::POST,
             "/v1/invites",
             alice.token(),
-            json(&InviteRequest { name: "Bob".into() }),
+            json(&InviteRequest {
+                name: "Bob".into(),
+                nonce: None,
+            }),
         )
         .await;
     let invite: Invite = decode(body);
@@ -2280,6 +2291,7 @@ async fn a_recovery_challenge_from_before_a_removal_adds_no_device() {
                 device_id: bob.device_id,
                 device_key: bob.device.public(),
                 device_name: "Bob's Mac".into(),
+                proof: None,
             }),
         )
         .await;
@@ -2672,7 +2684,10 @@ async fn invites_run_out_and_can_be_taken_back() {
     let alice = set_up_owner(&server).await;
     let bob = invite(&server, &alice, "Bob").await;
     let make = |name: &str| {
-        let request = json(&InviteRequest { name: name.into() });
+        let request = json(&InviteRequest {
+            name: name.into(),
+            nonce: None,
+        });
         let (token, server) = (alice.token().map(str::to_owned), &server);
         async move {
             let (status, body) = server
@@ -2690,6 +2705,7 @@ async fn invites_run_out_and_can_be_taken_back() {
             device_id: person.device_id,
             device_key: person.device.public(),
             device_name: "Their Mac".into(),
+            proof: None,
         });
         let server = &server;
         async move {
@@ -3415,4 +3431,125 @@ async fn versions_may_skip_ahead_and_the_cursor_follows_a_server_that_went_back(
     let page = alice.sync(&server, newest + 50, 100).await;
     assert_eq!((page.cursor, page.more), (newest, false));
     assert!(page.entries.is_empty());
+}
+
+/// An account has at most ten devices. Adding one from another device stops at the limit,
+/// saying to remove one; a Recovery Kit still brings the account back, in place of its
+/// oldest device, as someone who lost them all can't remove one first.
+#[tokio::test]
+async fn an_account_has_at_most_ten_devices() {
+    let server = Server::new().await;
+    let secret = AccountSecret::generate();
+    let alice = set_up(&server, Person::with_secret("Alice", &secret)).await;
+    let mut macs = vec![alice];
+    for _ in 0..9 {
+        let mut device = Person::with_secret("Alice", &secret);
+        let (status, body) = recover(&server, &device, &device.keys).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        device.sign_in(&server).await;
+        macs.push(device);
+    }
+    let count = async |person: &Person| {
+        let (status, body) = devices(&server, person).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        decode::<DeviceList>(body).devices.len()
+    };
+    assert_eq!(count(&macs[9]).await, 10);
+
+    // Starting to add an eleventh from one of them is refused, saying what to do.
+    let (status, body) = macs[9]
+        .call(&server, Method::POST, "/v1/device-transfers", None)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.to_string().contains("Remove one"), "{body}");
+
+    // A Recovery Kit adds it anyway, and the oldest device goes, its session with it.
+    let mut kit = Person::with_secret("Alice", &secret);
+    let (status, body) = recover(&server, &kit, &kit.keys).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    kit.sign_in(&server).await;
+    assert_eq!(count(&kit).await, 10);
+    let (status, _) = devices(&server, &macs[0]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(count(&macs[1]).await, 10);
+
+    // With one removed, adding one from another device works again.
+    let path = format!("/v1/devices/{}", macs[1].device_id);
+    let (status, body) = kit.call(&server, Method::DELETE, &path, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = kit
+        .call(&server, Method::POST, "/v1/device-transfers", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn invites_keep_their_nonce_and_the_proof_until_the_owner_approves() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let (_, body) = server.call(Method::GET, "/v1/health", None, None).await;
+    assert!(decode::<Health>(body).invite_keys);
+
+    let make = |nonce: usize| {
+        let request = json(&InviteRequest {
+            name: "Sam".into(),
+            nonce: Some(Bytes(vec![7; nonce])),
+        });
+        let (token, server) = (alice.token().map(str::to_owned), &server);
+        async move {
+            server
+                .call(Method::POST, "/v1/invites", token.as_deref(), request)
+                .await
+        }
+    };
+    assert_eq!(make(15).await.0, StatusCode::BAD_REQUEST);
+    let (status, body) = make(16).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let invite: Invite = decode(body);
+
+    let mut sam = Person::new("Sam");
+    let accept = |proof: usize| {
+        let request = json(&AcceptInviteRequest {
+            token: invite.token.clone(),
+            keys: sam.keys.public(),
+            device_id: sam.device_id,
+            device_key: sam.device.public(),
+            device_name: "Sam's Mac".into(),
+            proof: Some(Bytes(vec![1; proof])),
+        });
+        let server = &server;
+        async move {
+            server
+                .call(Method::POST, "/v1/invites/accept", None, request)
+                .await
+                .0
+        }
+    };
+    // A proof of the wrong length is refused before the invite is used up.
+    assert_eq!(accept(31).await, StatusCode::BAD_REQUEST);
+    assert_eq!(accept(32).await, StatusCode::OK);
+
+    let listed = || async {
+        let (status, body) = server
+            .call(Method::GET, "/v1/directory", alice.token(), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        decode::<Directory>(body)
+            .entries
+            .into_iter()
+            .find(|entry| entry.name == "Sam")
+            .unwrap()
+    };
+    let waiting = listed().await;
+    assert_eq!(
+        waiting.invite,
+        Some(InviteProof {
+            nonce: Bytes(vec![7; 16]),
+            proof: Bytes(vec![1; 32]),
+        })
+    );
+    // Approved, they're listed without it.
+    sam.user_id = waiting.user_id;
+    approve(&server, &alice, &sam).await;
+    assert_eq!(listed().await.invite, None);
 }

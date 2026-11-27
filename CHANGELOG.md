@@ -11,6 +11,17 @@ Update the server, then the apps, in any order; older apps keep working.
 - Turning escrow off is now the last word: your app remembers it, and doesn't take your earlier agreement if the server shows it again. Turning escrow on again later works as before. Needs the server and the app on 0.18.0.
 - The server refuses an agreement to escrow that was already used, as from a copied session.
 - Once someone has turned escrow on with 0.18.0, their older apps show it as off and can't turn it on again; they're told to update.
+- An account has at most ten devices. Adding another from a device you have says to remove one you no longer use first; a Recovery Kit still brings your account back, in place of your oldest device.
+
+**Invites**
+
+- No more reading out fingerprints to join. An invite line now carries a key that never reaches the server; joining with it proves the new account's keys are theirs, and the owner's Keystead approves them on its own the next time it syncs. While invites are waiting, the owner's Mac app syncs every minute.
+- If the keys on the server don't match the invite, the owner's Keystead says so and leaves them waiting: approve them only if the fingerprint they read out matches. Fingerprints stay under People for anyone who wants to compare.
+- Joining with a new invite line takes Keystead 0.18.0 or later; older apps can't read it. Invites made with an older server, or before updating, work as before, with a fingerprint check.
+
+**Fixes**
+
+- The CLI no longer refuses an invite, new-device or recovery line whose token starts with a dash, as about one in 64 did.
 
 ## 0.17.0
 

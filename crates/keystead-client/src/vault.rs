@@ -19,9 +19,11 @@ use keystead_core::api::{
     SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
+use keystead_core::encoding::Bytes;
 use keystead_core::folders::FolderEntry;
 use keystead_core::groups::{GroupEntry, GroupKeyring};
 use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
+use keystead_core::invites::InviteKey;
 use keystead_core::items::{
     Details, EncryptedItem, FolderInfo, GroupKeyCopy, ITEM_FORMAT, ItemKeys, ItemVersion, Overview,
     PersonKey,
@@ -147,19 +149,31 @@ pub struct InviteInfo {
     pub server: String,
     pub token: String,
     pub owner_fingerprint: String,
+    /// The invite's key, which never reaches the server: joining proves with it that the
+    /// keys the new account registers are its own, and the owner's app then approves it on
+    /// its own (0.18.0 and later; see `keystead_core::invites`). None on a server older
+    /// than 0.18.0, whose owner compares fingerprints instead.
+    pub key: Option<String>,
     /// When it stops working, in seconds since 1970, for one just made on a server that
     /// says (0.16.0 and later); a line someone pasted doesn't carry it.
     pub expires_at: Option<i64>,
 }
 
 impl InviteInfo {
-    /// The invite as one line to send: `keystead join <server> <token> --owner <fingerprint>`.
-    /// The CLI runs it as a command; the apps accept it pasted whole.
+    /// The invite as one line to send:
+    /// `keystead join <server> <token> --owner <fingerprint> --key <key>`, without the key
+    /// on a server older than 0.18.0. The CLI runs it as a command; the apps accept it
+    /// pasted whole. Apps before 0.18.0 can't read a line with a key.
     pub fn command(&self) -> String {
-        format!(
+        let mut line = format!(
             "keystead join {} {} --owner {}",
             self.server, self.token, self.owner_fingerprint
-        )
+        );
+        if let Some(key) = &self.key {
+            line.push_str(" --key ");
+            line.push_str(key);
+        }
+        line
     }
 
     /// Reads an invite line back, with or without the leading `keystead join`, and
@@ -179,12 +193,27 @@ impl InviteInfo {
             .context("an invite ends with --owner and the owner's fingerprint")?;
         let owner_fingerprint = words[owner + 1].to_owned();
         words.drain(owner..=owner + 1);
+        let key = match words.iter().position(|&word| word == "--key") {
+            Some(index) => {
+                // Checked here, so a line cut short fails before anything reaches the
+                // server.
+                let key = words
+                    .get(index + 1)
+                    .filter(|key| InviteKey::decode(key).is_ok())
+                    .context(BROKEN_INVITE_KEY)?
+                    .to_string();
+                words.drain(index..=index + 1);
+                Some(key)
+            }
+            None => None,
+        };
         match words.as_slice() {
             [server, token] if server.starts_with("http://") || server.starts_with("https://") => {
                 Ok(Self {
                     server: (*server).to_owned(),
                     token: (*token).to_owned(),
                     owner_fingerprint,
+                    key,
                     expires_at: None,
                 })
             }
@@ -192,6 +221,9 @@ impl InviteInfo {
         }
     }
 }
+
+const BROKEN_INVITE_KEY: &str =
+    "the invite's key, after --key, is cut short or mistyped. Copy the whole invite line again";
 
 /// What a new device needs to join its account from a device the account already has:
 /// `keystead add-device <server> <token> --owner <fingerprint>`, as one line to copy over.
@@ -317,6 +349,9 @@ pub struct UserRow {
     pub recovering: bool,
     /// Their keys were replaced, after recovering with the owner's help.
     pub keys_replaced: bool,
+    /// For the owner: they joined with an invite's key, but it doesn't prove the keys the
+    /// server lists for them. Approve them only if the fingerprint they read out matches.
+    pub invite_mismatch: bool,
 }
 
 /// Someone who can open a folder or a login, with their role.
@@ -563,6 +598,9 @@ pub struct SyncSummary {
     pub older: usize,
     /// The server's change numbers went back, as when it's restored from a backup.
     pub server_went_back: bool,
+    /// People the owner's app approved, who joined with an invite's key (see
+    /// [`Vault::approve_invited`]).
+    pub approved: Vec<String>,
 }
 
 /// What enrolling a new device needs, whatever the platform.
@@ -604,14 +642,22 @@ pub fn setup(path: &Path, account: NewAccount<'_>, setup_code: &str, name: &str)
 }
 
 /// Joins with an invite, and pins the owner's keys after checking their fingerprint.
-/// Nothing is saved if the fingerprint doesn't match.
+/// Nothing is saved if the fingerprint doesn't match. With the invite's `key` (0.18.0 and
+/// later), proves with it that the keys registered are this account's, so the owner's app
+/// can approve it on its own.
 pub fn join(
     path: &Path,
     account: NewAccount<'_>,
     token: &str,
     owner_fingerprint: &str,
+    key: Option<&str>,
 ) -> Result<Vault> {
     let keys = AccountKeys::derive(account.secret);
+    // Before anything reaches the server, so a mistyped key leaves no trace.
+    let proof = key
+        .map(|key| InviteKey::decode(key).map(|key| key.prove(&keys.public())))
+        .transpose()
+        .context(BROKEN_INVITE_KEY)?;
     let mut client = Client::new(account.server);
     let enrolled: Enrolled = client.post(
         "/v1/invites/accept",
@@ -621,6 +667,7 @@ pub fn join(
             device_id: account.device_id,
             device_key: account.signer.public_key(),
             device_name: account.device_name.to_owned(),
+            proof,
         },
     )?;
     client.sign_in(account.device_id, account.signer.as_ref())?;
@@ -912,6 +959,9 @@ impl Vault {
     pub fn sync(&mut self) -> Result<SyncSummary> {
         let mut summary = SyncSummary::default();
         let (mut folders, groups, mut duties) = self.pull(&mut summary)?;
+        // If it doesn't work out, they stay waiting: the next sync tries again, and the
+        // owner can still approve them by comparing fingerprints, which says what's wrong.
+        summary.approved = self.approve_invited().unwrap_or_default();
         self.sign_members_from_before();
         // Someone left these groups: give each a new key first, as folders shared with them
         // wait for it.
@@ -1027,6 +1077,8 @@ impl Vault {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
         self.profile.set_directory(directory.entries);
         self.save()?;
+        // As after a sync: whoever is left waits for the next try, or for the owner.
+        let _ = self.approve_invited();
         Ok(self.known_users())
     }
 
@@ -1045,20 +1097,27 @@ impl Vault {
                 escrow: entry.consented_to_escrow(),
                 recovering: entry.recovering,
                 keys_replaced: entry.revision > 0,
+                invite_mismatch: self.invite_mismatch(entry),
             })
             .collect()
     }
 
-    /// Creates a single-use invite (owner only).
+    /// Creates a single-use invite (owner only). On a server on 0.18.0 or later, its line
+    /// carries a key made from a random nonce and `name`, so this app can approve whoever
+    /// joins with it on its own (see [`Vault::approve_invited`]).
     pub fn invite(&mut self, name: &str) -> Result<InviteInfo> {
+        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let nonce = health.invite_keys.then(InviteKey::new_nonce);
         let request = InviteRequest {
             name: name.to_owned(),
+            nonce: nonce.map(|nonce| Bytes(nonce.to_vec())),
         };
         let invite: Invite = self.call(|client| client.post("/v1/invites", &request))??;
         Ok(InviteInfo {
             server: self.profile.server.clone(),
             token: invite.token,
             owner_fingerprint: self.profile.owner.fingerprint(),
+            key: nonce.map(|nonce| self.keys.invite_key(&nonce, name).encode()),
             expires_at: invite.expires_at,
         })
     }
@@ -1114,15 +1173,85 @@ impl Vault {
                 shown.name
             );
         }
-        // Always their first keys, at revision 0, whatever the server says.
-        let mut entry = DirectoryEntry::new(user, &shown.name, shown.keys);
+        self.sign_approval(user, &shown.name, shown.keys)?;
+        Ok(shown.name)
+    }
+
+    /// Approves, as the owner, everyone who joined with the key on an invite this owner
+    /// made for them, and proved with it that the keys the server lists are theirs
+    /// (0.18.0 and later). Anyone else waits for the owner to compare fingerprints, as
+    /// before. Goes by the directory as last fetched, and fetches it again if it approved
+    /// anyone. Returns their names.
+    pub fn approve_invited(&mut self) -> Result<Vec<String>> {
+        if self.profile.user_id != OWNER {
+            return Ok(Vec::new());
+        }
+        let ready: Vec<DirectoryEntry> = self
+            .profile
+            .directory
+            .iter()
+            .filter(|entry| self.proven_by_invite(entry))
+            .cloned()
+            .collect();
+        let mut approved = Vec::new();
+        for entry in ready {
+            self.sign_approval(entry.user_id, &entry.name, entry.keys)?;
+            approved.push(entry.name);
+        }
+        if !approved.is_empty() {
+            let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
+            self.profile.set_directory(directory.entries);
+            self.save()?;
+        }
+        Ok(approved)
+    }
+
+    /// Whether this owner's app may approve someone on its own: someone it never saw
+    /// approved, at the keys they joined with, who proved them with the key of an invite
+    /// this owner made for them under the name the server lists; and the only one listed
+    /// with that invite, or with those keys, so a server can't pass one proof off twice.
+    fn proven_by_invite(&self, entry: &DirectoryEntry) -> bool {
+        let Some(invite) = &entry.invite else {
+            return false;
+        };
+        entry.user_id != OWNER
+            && !entry.removed
+            && entry.revision == 0
+            && !self.profile.key_revisions.contains_key(&entry.user_id)
+            && self.profile.directory.iter().all(|other| {
+                other.user_id == entry.user_id
+                    || (other.keys != entry.keys
+                        && other
+                            .invite
+                            .as_ref()
+                            .is_none_or(|theirs| theirs.nonce != invite.nonce))
+            })
+            && invite.holds(&self.keys, entry)
+    }
+
+    /// For the owner: someone waiting who joined with an invite's key, but whose keys on
+    /// the server it doesn't prove. The server may have swapped them: approve them only if
+    /// the fingerprint they read out matches.
+    fn invite_mismatch(&self, entry: &DirectoryEntry) -> bool {
+        self.profile.user_id == OWNER
+            && !self.profile.key_revisions.contains_key(&entry.user_id)
+            && entry
+                .invite
+                .as_ref()
+                .is_some_and(|invite| !invite.holds(&self.keys, entry))
+    }
+
+    /// Signs someone's first keys as the owner, at revision 0 whatever the server says,
+    /// and sends the approval.
+    fn sign_approval(&mut self, user: UserId, name: &str, keys: AccountPublicKeys) -> Result<()> {
+        let mut entry = DirectoryEntry::new(user, name, keys);
         entry.approve(&self.keys);
         let request = ApprovalRequest {
             approval: entry.approval.clone().expect("just approved"),
         };
         let path = format!("/v1/users/{user}/approval");
         let () = self.call(|client| client.post(&path, &request))??;
-        Ok(entry.name)
+        Ok(())
     }
 
     /// This account's devices, from the server.
@@ -2510,6 +2639,11 @@ impl Vault {
             match self.call(|client| client.post_empty("/v1/device-transfers"))? {
                 Ok(transfer) => transfer,
                 Err(Failure::Status { code: 404, .. }) => bail!(NEEDS_0_8),
+                // At the most devices an account can have: the server says which to remove.
+                Err(Failure::Status { code: 409, body }) => match body["error"].as_str() {
+                    Some(message) => bail!("{message}"),
+                    None => bail!("this account has as many devices as it can have"),
+                },
                 Err(error) => return Err(error.into()),
             };
         self.adding_device = Some((transfer.id, transfer.token.clone()));
@@ -4188,16 +4322,30 @@ mod tests {
 
     #[test]
     fn invites_survive_the_trip_through_a_message() {
-        let invite = InviteInfo {
+        let mut invite = InviteInfo {
             server: "https://keys.example.com".into(),
             token: "tok_123".into(),
             owner_fingerprint: "ab12cd34".into(),
+            key: None,
             expires_at: None,
         };
         assert_eq!(InviteInfo::parse(&invite.command()).unwrap(), invite);
         // Wrapped by a mail client, without the command name, with stray spaces.
         let wrapped = "  https://keys.example.com\n tok_123\n--owner ab12cd34\n";
         assert_eq!(InviteInfo::parse(wrapped).unwrap(), invite);
+
+        // With a key (0.18.0 and later), which must come through whole.
+        let owner = AccountKeys::derive(&AccountSecret::generate());
+        let key = owner.invite_key(&InviteKey::new_nonce(), "Sam").encode();
+        invite.key = Some(key.clone());
+        assert_eq!(InviteInfo::parse(&invite.command()).unwrap(), invite);
+        let wrapped = format!("https://keys.example.com tok_123\n--owner ab12cd34 --key\n{key}");
+        assert_eq!(InviteInfo::parse(&wrapped).unwrap(), invite);
+        let cut = invite.command();
+        let error = InviteInfo::parse(&cut[..cut.len() - 3]).unwrap_err();
+        assert!(error.to_string().contains("cut short"), "{error}");
+        let error = InviteInfo::parse(cut.trim_end_matches(&key)).unwrap_err();
+        assert!(error.to_string().contains("cut short"), "{error}");
     }
 
     #[test]

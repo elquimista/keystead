@@ -1599,6 +1599,7 @@ dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
  "hkdf",
+ "hmac 0.12.1",
  "hpke",
  "p256",
  "rand",

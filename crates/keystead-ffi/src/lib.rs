@@ -146,6 +146,9 @@ pub struct Invitation {
     pub server: String,
     pub token: String,
     pub owner_fingerprint: String,
+    /// The invite's key: joining with it, the new person is approved by the owner's app on
+    /// its own. None from a server older than 0.18.0, or from a line without one.
+    pub key: Option<String>,
     pub command: String,
     /// When it stops working; none from a server older than 0.16.0, whose invites work
     /// until used, and none for an invite read from its line.
@@ -168,6 +171,7 @@ impl From<InviteInfo> for Invitation {
             server: invite.server,
             token: invite.token,
             owner_fingerprint: invite.owner_fingerprint,
+            key: invite.key,
             expires_at: invite.expires_at,
         }
     }
@@ -190,6 +194,9 @@ pub struct User {
     pub recovering: bool,
     /// Their keys were replaced after recovering with the owner's help.
     pub keys_replaced: bool,
+    /// For the owner: they joined with an invite's key, but it doesn't prove the keys the
+    /// server lists for them. Approve them only if the fingerprint they read out matches.
+    pub invite_mismatch: bool,
 }
 
 /// What someone may do with a folder or a login.
@@ -525,6 +532,7 @@ impl From<keystead_client::UserRow> for User {
             escrow: user.escrow,
             recovering: user.recovering,
             keys_replaced: user.keys_replaced,
+            invite_mismatch: user.invite_mismatch,
         }
     }
 }
@@ -584,6 +592,8 @@ pub struct SyncResult {
     pub older: u32,
     /// The server's change numbers went back, as when it's restored from a backup.
     pub server_went_back: bool,
+    /// People the owner's app approved because they joined with an invite's key.
+    pub approved: Vec<String>,
 }
 
 impl From<SyncSummary> for SyncResult {
@@ -594,6 +604,7 @@ impl From<SyncSummary> for SyncResult {
             rekey_problems: summary.rekey_problems,
             older: summary.older.try_into().unwrap_or(u32::MAX),
             server_went_back: summary.server_went_back,
+            approved: summary.approved,
         }
     }
 }
@@ -641,7 +652,8 @@ impl Vault {
     }
 
     /// Joins a server with an invite, checking the owner's fingerprint that came with it.
-    /// Saves the profile at `profile_path` only if everything checks out.
+    /// Saves the profile at `profile_path` only if everything checks out. With the
+    /// invite's `key`, the owner's app approves the new account on its own.
     // Swift calls this with every argument labeled, so a long list reads fine there.
     #[allow(clippy::too_many_arguments)]
     #[uniffi::constructor]
@@ -650,6 +662,7 @@ impl Vault {
         server: String,
         token: String,
         owner_fingerprint: String,
+        key: Option<String>,
         account_secret: Vec<u8>,
         device_id: String,
         device_name: String,
@@ -667,6 +680,7 @@ impl Vault {
             },
             &token,
             &owner_fingerprint,
+            key.as_deref(),
         )?;
         Ok(Arc::new(Self {
             inner: Mutex::new(vault),

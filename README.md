@@ -79,10 +79,10 @@ keystead invite Bob                  # prints the join command for Bob; it works
 
 # Bob, in another terminal
 export KEYSTEAD_HOME=/tmp/bob
-keystead join http://127.0.0.1:8080 <token> --owner <Alice's fingerprint>
+keystead join http://127.0.0.1:8080 <token> --owner <Alice's fingerprint> --key <key>
 
-# Alice: approve Bob after he reads out his fingerprint, then share
-keystead approve 2 --fingerprint <Bob's fingerprint>
+# Alice: her next sync approves Bob, as the invite's key proves his keys are his; then share
+keystead users                       # syncs the list; Bob shows as approved
 keystead folder create Production
 keystead folder share Production 2
 keystead add "AWS root" --folder Production --username root@example.com

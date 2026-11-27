@@ -68,6 +68,10 @@ pub struct Health {
     /// left out, before.
     #[serde(default)]
     pub escrow: u8,
+    /// Whether the server keeps an invite's nonce and the proof of whoever joined with it,
+    /// so the owner's app can approve them on its own (0.18.0 and later).
+    #[serde(default)]
+    pub invite_keys: bool,
 }
 
 fn item_format_1() -> u8 {
@@ -126,6 +130,11 @@ pub struct Session {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InviteRequest {
     pub name: String,
+    /// The invite's random nonce (`invites::NONCE_LEN` bytes), from which, with the name,
+    /// the owner's app made the key on the invite line (0.18.0 and later). The server
+    /// keeps it, and lists it with whoever joins with the invite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<Bytes>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +173,11 @@ pub struct AcceptInviteRequest {
     pub device_key: DevicePublicKey,
     #[serde(default)]
     pub device_name: String,
+    /// With an invite whose line carries a key (0.18.0 and later): the key's proof of
+    /// `keys`, 32 bytes, which the server lists with the new account until the owner
+    /// approves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<Bytes>,
 }
 
 /// `POST /v1/recover/challenge`: a new device asks to recover the account with these

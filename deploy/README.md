@@ -138,9 +138,11 @@ stops working once it's used.
 In Keystead, open **People** and choose **Invite**. Send each person their invite line
 directly, for example in a private message; it works once, for seven days. Until they've
 used it, they show under People as invited, where you can revoke the invite if it went to
-the wrong place. When they've joined, approve them after they read you the fingerprint
-their Keystead shows, in person or on a call. Then share folders, or single logins, with
-them.
+the wrong place. They need Keystead 0.18.0 or later. When they've joined, your Keystead
+approves them on its own the next time it syncs: the key on the line proves the keys they
+joined with are theirs. If it says their keys don't match the invite, approve them only
+after they read you the fingerprint their Keystead shows, in person or on a call. Then
+share folders, or single logins, with them.
 
 ## Updating
 
@@ -327,6 +329,12 @@ the app on 0.17.0; an app from before still can't take a folder that big.
 Apps now keep the newest copy they've seen of every login, folder and group, and say so if
 the server hands them an older one, as a server restored from a backup does (see
 Backups).
+
+**Updating to 0.18.0.** Update the server, then the apps, in any order; older apps keep
+working. Once the owner's app and the server are both on 0.18.0, new invite lines carry a
+key, and the owner's Keystead approves whoever joins with one on its own, with no
+fingerprint to read out. Whoever joins needs Keystead 0.18.0 or later: older apps can't
+read the new lines. Invites made before keep working, with a fingerprint check.
 
 ## Backups
 

@@ -23,6 +23,7 @@ use keystead_core::encoding::Bytes;
 use keystead_core::folders::FolderEntry;
 use keystead_core::groups::GroupEntry;
 use keystead_core::ids::{DeviceId, FolderId, UserId};
+use keystead_core::invites::{NONCE_LEN, PROOF_LEN};
 use keystead_core::items::EncryptedItem;
 use keystead_core::keys::{AccountPublicKeys, DevicePublicKey, recovery_message, sign_in_message};
 use rand::RngCore;
@@ -59,6 +60,10 @@ const INVITE_LASTS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// `invites.used` for an invite the owner took back; 1 is one someone joined with.
 const TAKEN_BACK: i64 = 2;
 const MAX_NAME_LENGTH: usize = 100;
+/// The most devices one account has (0.18.0 and later): each Mac and each place the
+/// command line is set up counts, and a lost one until it's removed. It bounds what one
+/// account can make the server keep, sessions included.
+pub(crate) const MAX_DEVICES: i64 = 10;
 /// How long a line for recovering with the owner's help works.
 const RECOVERY_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
 const NOW: &str = "CAST(strftime('%s', 'now') AS INTEGER)";
@@ -341,6 +346,13 @@ pub(crate) async fn create_invite(
     Json(request): Json<InviteRequest>,
 ) -> Result<Json<Invite>, ApiError> {
     check_name(&request.name)?;
+    if let Some(nonce) = &request.nonce
+        && nonce.as_slice().len() != NONCE_LEN
+    {
+        return Err(ApiError::BadRequest(format!(
+            "an invite's nonce is {NONCE_LEN} bytes"
+        )));
+    }
     let mut tx = state.writer.begin().await?;
     require_owner(&mut tx, auth.user_id).await?;
     let mut token = [0u8; 32];
@@ -348,13 +360,14 @@ pub(crate) async fn create_invite(
     // Rows stay, used or not, so an id is never given to another invite: a list of them
     // on the owner's screen can't end up taking back someone else's.
     let expires_at: i64 = sqlx::query_scalar(&format!(
-        "INSERT INTO invites (token_hash, name, id, created_at, expires_at)
-         VALUES (?, ?, (SELECT COALESCE(MAX(id), 0) + 1 FROM invites), {NOW}, {NOW} + ?)
+        "INSERT INTO invites (token_hash, name, id, created_at, expires_at, nonce)
+         VALUES (?, ?, (SELECT COALESCE(MAX(id), 0) + 1 FROM invites), {NOW}, {NOW} + ?, ?)
          RETURNING expires_at"
     ))
     .bind(&hash(&token)[..])
     .bind(&request.name)
     .bind(INVITE_LASTS.as_secs() as i64)
+    .bind(request.nonce.as_ref().map(Bytes::as_slice))
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -415,7 +428,8 @@ pub(crate) async fn revoke_invite(
 }
 
 /// `POST /v1/invites/accept`: registers the invitee's keys and first device. The new
-/// user can sign in right away but stays unapproved until the owner checks them.
+/// user can sign in right away but stays unapproved until the owner checks them, or the
+/// owner's app checks the proof they sent, made with the key on their invite line.
 pub(crate) async fn accept_invite(
     State(state): State<AppState>,
     Json(request): Json<AcceptInviteRequest>,
@@ -423,8 +437,18 @@ pub(crate) async fn accept_invite(
     let token = URL_SAFE_NO_PAD
         .decode(&request.token)
         .map_err(|_| ApiError::Forbidden("invalid invite".into()))?;
+    if request
+        .proof
+        .as_ref()
+        .is_some_and(|proof| proof.as_slice().len() != PROOF_LEN)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "an invite's proof is {PROOF_LEN} bytes"
+        )));
+    }
     let waiting = format!(
-        "SELECT name FROM invites WHERE token_hash = ? AND used = 0 AND expires_at > {NOW}"
+        "SELECT name, nonce FROM invites
+         WHERE token_hash = ? AND used = 0 AND expires_at > {NOW}"
     );
     let gone = || {
         ApiError::Forbidden(
@@ -434,13 +458,13 @@ pub(crate) async fn accept_invite(
         )
     };
     // Looked up without the writer first (see `AppState::writer`), then again with it.
-    sqlx::query_scalar::<_, String>(&waiting)
+    sqlx::query_as::<_, (String, Option<Vec<u8>>)>(&waiting)
         .bind(&hash(&token)[..])
         .fetch_optional(&state.readers)
         .await?
         .ok_or_else(gone)?;
     let mut tx = state.writer.begin().await?;
-    let name: String = sqlx::query_scalar(&waiting)
+    let (name, nonce): (String, Option<Vec<u8>>) = sqlx::query_as(&waiting)
         .bind(&hash(&token)[..])
         .fetch_optional(&mut *tx)
         .await?
@@ -449,12 +473,18 @@ pub(crate) async fn accept_invite(
         .bind(&hash(&token)[..])
         .execute(&mut *tx)
         .await?;
+    // Both or neither: a proof means nothing without the nonce the owner's app needs to
+    // check it.
+    let (nonce, proof) = nonce.zip(request.proof.map(|proof| proof.0)).unzip();
     let user_id: i64 = sqlx::query_scalar(
-        "INSERT INTO users (name, encryption_key, signing_key) VALUES (?, ?, ?) RETURNING id",
+        "INSERT INTO users (name, encryption_key, signing_key, invite_nonce, invite_proof)
+         VALUES (?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&name)
     .bind(&request.keys.encryption.0[..])
     .bind(&request.keys.signing.0[..])
+    .bind(nonce)
+    .bind(proof)
     .fetch_one(&mut *tx)
     .await?;
     add_device(
@@ -586,6 +616,7 @@ pub(crate) async fn recover(
         Some(now) if !now.removed && now.keys == entry.keys => {}
         _ => return Err(ApiError::Unauthorized),
     }
+    let removed = make_room_for_device(&mut tx, user).await?;
     add_device(
         &mut tx,
         request.device_id,
@@ -595,7 +626,56 @@ pub(crate) async fn recover(
     )
     .await?;
     tx.commit().await?;
+    state
+        .sessions
+        .lock()
+        .expect("session lock poisoned")
+        .retain(|_, session| !removed.contains(&session.device_id));
     Ok(Json(Enrolled { user_id: user }))
+}
+
+/// How many devices an account has.
+pub(crate) async fn device_count(
+    conn: &mut SqliteConnection,
+    user: UserId,
+) -> Result<i64, ApiError> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE user_id = ?")
+            .bind(user.0)
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
+/// For a device about to be added with the account secret, which is how a Recovery Kit
+/// brings an account back: at the limit, removes the account's oldest devices to make
+/// room, and returns them. Someone who has lost every device can't remove old ones first,
+/// so the limit mustn't lock them out. Adding a device from another one stops at the limit
+/// earlier, when it starts (see `transfers::start`), saying to remove one.
+async fn make_room_for_device(
+    conn: &mut SqliteConnection,
+    user: UserId,
+) -> Result<Vec<DeviceId>, ApiError> {
+    let over = device_count(conn, user).await? - MAX_DEVICES + 1;
+    if over <= 0 {
+        return Ok(Vec::new());
+    }
+    let oldest: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM devices WHERE user_id = ? ORDER BY COALESCE(added_at, 0), rowid LIMIT ?",
+    )
+    .bind(user.0)
+    .bind(over)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut removed = Vec::with_capacity(oldest.len());
+    for id in oldest {
+        sqlx::query("DELETE FROM devices WHERE id = ?")
+            .bind(&id)
+            .execute(&mut *conn)
+            .await?;
+        removed.extend(id.parse::<DeviceId>().ok());
+    }
+    Ok(removed)
 }
 
 /// `GET /v1/devices`: the signed-in user's devices, oldest first.

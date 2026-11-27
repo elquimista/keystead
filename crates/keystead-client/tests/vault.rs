@@ -138,6 +138,7 @@ fn a_secure_enclave_style_device_joins_and_syncs() {
         },
         &invite.token,
         &invite.owner_fingerprint,
+        None,
     )
     .unwrap();
     let bob_identity = bob.whoami();
@@ -324,6 +325,7 @@ fn a_recovery_kit_brings_an_account_back_on_a_new_device() {
         bob_account("Bob's Mac"),
         &invite.token,
         &invite.owner_fingerprint,
+        None,
     )
     .unwrap();
     let error = recover(
@@ -432,6 +434,7 @@ fn team(fixture: &Fixture) -> Team {
             },
             &invite.token,
             &invite.owner_fingerprint,
+            None,
         )
         .unwrap();
         (vault, secret, signer)
@@ -3467,4 +3470,136 @@ fn an_agreement_to_escrow_that_was_withdrawn_cant_turn_it_back_on() {
     assert_eq!(latest, 2);
     bob.sync().unwrap();
     assert!(escrowed(&fixture, second));
+}
+
+/// Someone invited by `owner` joins: with the key on the invite line, or as with a line
+/// from before 0.18.0, without it.
+fn invited(fixture: &Fixture, owner: &mut Vault, name: &str, with_key: bool) -> UserId {
+    let invite = owner.invite(name).unwrap();
+    assert!(
+        invite.key.is_some(),
+        "a 0.18.0 server's invites carry a key"
+    );
+    let vault = join(
+        &fixture.profile(name),
+        NewAccount {
+            server: &invite.server,
+            secret: &AccountSecret::generate(),
+            device_id: DeviceId::random(),
+            device_name: "Test device",
+            signer: Arc::new(SoftwareDeviceKey::generate()),
+        },
+        &invite.token,
+        &invite.owner_fingerprint,
+        invite.key.as_deref().filter(|_| with_key),
+    )
+    .unwrap();
+    vault.whoami().user_id
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn the_owners_app_approves_whoever_joins_with_their_invites_key() {
+    let fixture = Fixture::start();
+    let mut alice = setup(
+        &fixture.profile("alice"),
+        NewAccount {
+            server: &fixture.url,
+            secret: &AccountSecret::generate(),
+            device_id: DeviceId::random(),
+            device_name: "Test device",
+            signer: Arc::new(SoftwareDeviceKey::generate()),
+        },
+        &fixture.setup_code,
+        "Alice",
+    )
+    .unwrap();
+    let row = |alice: &Vault, user: UserId| {
+        alice
+            .known_users()
+            .into_iter()
+            .find(|row| row.user_id == user)
+            .unwrap()
+    };
+
+    // A key cut short is refused before anything reaches the server, so the invite still
+    // works afterwards.
+    let invite = alice.invite("Sam").unwrap();
+    let sam_secret = AccountSecret::generate();
+    let account = || NewAccount {
+        server: &invite.server,
+        secret: &sam_secret,
+        device_id: DeviceId::random(),
+        device_name: "Test device",
+        signer: Arc::new(SoftwareDeviceKey::generate()),
+    };
+    let key = invite.key.clone().unwrap();
+    let cut = join(
+        &fixture.profile("sam"),
+        account(),
+        &invite.token,
+        &invite.owner_fingerprint,
+        Some(&key[..20]),
+    );
+    assert!(format!("{:#}", cut.err().unwrap()).contains("cut short"));
+    let mut sam_vault = join(
+        &fixture.profile("sam"),
+        account(),
+        &invite.token,
+        &invite.owner_fingerprint,
+        Some(&key),
+    )
+    .unwrap();
+    let sam = sam_vault.whoami().user_id;
+
+    // Alice's next sync approves Sam, once, and she can share with him at once.
+    assert_eq!(alice.sync().unwrap().approved, ["Sam"]);
+    assert!(row(&alice, sam).approved && !row(&alice, sam).invite_mismatch);
+    assert!(alice.sync().unwrap().approved.is_empty());
+    alice.create_folder("Ops").unwrap();
+    alice.share_folder("Ops", sam, Role::View).unwrap();
+
+    // Joined without the key: Alice compares fingerprints, as before.
+    let una = invited(&fixture, &mut alice, "Una", false);
+    // A server that swaps in keys of its own can't make the proof...
+    let tom = invited(&fixture, &mut alice, "Tom", true);
+    let server_keys = AccountKeys::derive(&AccountSecret::generate()).public();
+    fixture.lie(&format!(
+        "UPDATE users SET encryption_key = X'{}', signing_key = X'{}' WHERE id = {}",
+        hex(&server_keys.encryption.0),
+        hex(&server_keys.signing.0),
+        tom.0
+    ));
+    // ...nor move it to another name...
+    let vic = invited(&fixture, &mut alice, "Vic", true);
+    fixture.lie(&format!(
+        "UPDATE users SET name = 'Victor' WHERE id = {}",
+        vic.0
+    ));
+    // ...nor pass one off twice, as two people.
+    let wes = invited(&fixture, &mut alice, "Wes", true);
+    fixture.lie(&format!(
+        "INSERT INTO users (name, encryption_key, signing_key, invite_nonce, invite_proof)
+         SELECT name, encryption_key, signing_key, invite_nonce, invite_proof
+         FROM users WHERE id = {}",
+        wes.0
+    ));
+
+    assert!(alice.sync().unwrap().approved.is_empty());
+    for (user, mismatch) in [(una, false), (tom, true), (vic, true), (wes, false)] {
+        let row = row(&alice, user);
+        assert!(!row.approved, "{}", row.name);
+        assert_eq!(row.invite_mismatch, mismatch, "{}", row.name);
+    }
+    // Only the owner's app approves anyone, or can tell a proof from a forged one.
+    assert!(sam_vault.sync().unwrap().approved.is_empty());
+    assert!(
+        sam_vault
+            .known_users()
+            .iter()
+            .all(|row| !row.invite_mismatch && row.approved == [1, sam.0].contains(&row.user_id.0))
+    );
 }

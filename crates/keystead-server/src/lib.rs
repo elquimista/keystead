@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use keystead_core::api::Health;
-use keystead_core::directory::{DirectoryEntry, RetiredKeys};
+use keystead_core::directory::{DirectoryEntry, InviteProof, RetiredKeys};
 use keystead_core::encoding::Key32;
 use keystead_core::ids::UserId;
 use keystead_core::keys::AccountPublicKeys;
@@ -272,6 +272,12 @@ const MIGRATIONS: &[&str] = &[
     // account (also once escrow is off) and with its retired keys.
     "ALTER TABLE users ADD COLUMN escrow_sequence INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE retired_keys ADD COLUMN escrow_sequence INTEGER NOT NULL DEFAULT 0;",
+    // 17 (0.18.0): an invite's nonce, from the owner's app, and with whoever joined with
+    // it, the nonce and their proof made with the invite's key, so the owner's app can
+    // approve them on its own.
+    "ALTER TABLE invites ADD COLUMN nonce BLOB;
+     ALTER TABLE users ADD COLUMN invite_nonce BLOB;
+     ALTER TABLE users ADD COLUMN invite_proof BLOB;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -504,6 +510,7 @@ async fn health() -> Json<Health> {
         item_format: keystead_core::items::ITEM_FORMAT,
         membership: 2,
         escrow: 2,
+        invite_keys: true,
     })
 }
 
@@ -570,6 +577,8 @@ type UserRow = (
     Option<Vec<u8>>,
     i64,
     bool,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
 );
 
 const USER_COLUMNS: &str = "SELECT id, name, encryption_key, signing_key, approval, \
@@ -577,7 +586,11 @@ const USER_COLUMNS: &str = "SELECT id, name, encryption_key, signing_key, approv
                             escrow_sequence, \
                             EXISTS (SELECT 1 FROM recoveries r WHERE r.user_id = users.id \
                                     AND NOT r.approved \
-                                    AND r.expires_at > CAST(strftime('%s', 'now') AS INTEGER)) \
+                                    AND r.expires_at > CAST(strftime('%s', 'now') AS INTEGER)), \
+                            CASE WHEN approval IS NULL AND removed_at IS NULL \
+                                 THEN invite_nonce END, \
+                            CASE WHEN approval IS NULL AND removed_at IS NULL \
+                                 THEN invite_proof END \
                             FROM users";
 
 type RetiredRow = (
@@ -651,6 +664,8 @@ fn entry_from_row(
         escrow_consent,
         escrow_sequence,
         recovering,
+        invite_nonce,
+        invite_proof,
     ): UserRow,
     retired: Vec<RetiredRow>,
 ) -> Result<DirectoryEntry, ApiError> {
@@ -686,5 +701,11 @@ fn entry_from_row(
         escrow_consent: escrow_consent.map(Into::into),
         escrow_sequence: escrow_sequence as u64,
         recovering,
+        invite: invite_nonce
+            .zip(invite_proof)
+            .map(|(nonce, proof)| InviteProof {
+                nonce: nonce.into(),
+                proof: proof.into(),
+            }),
     })
 }
