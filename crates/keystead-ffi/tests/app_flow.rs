@@ -385,3 +385,68 @@ fn an_owner_recovers_on_a_new_mac_from_the_kit() {
     assert_eq!(new_mac.sign_out().unwrap(), None);
     assert!(!std::path::Path::new(&server.profile("new-mac")).exists());
 }
+
+/// Copying a password doesn't wait for a sync stuck on the server: the sync leaves the
+/// vault free while it waits. Here the server takes the connection and never answers.
+#[test]
+fn copying_a_password_doesnt_wait_for_a_sync() {
+    let server = Server::start();
+    let secret = account_secret();
+    let path = server.profile("owner");
+    let owner = Vault::setup(
+        path.clone(),
+        server.url.clone(),
+        server.setup_code.clone(),
+        "Olivia".into(),
+        secret.clone(),
+        new_device_id(),
+        "Test Mac".into(),
+        signer(),
+    )
+    .unwrap();
+    owner
+        .add_login(
+            None,
+            LoginFields {
+                name: "Bank".into(),
+                username: "olivia".into(),
+                url: String::new(),
+                password: "s3cret".into(),
+                notes: String::new(),
+                one_time_code: String::new(),
+            },
+        )
+        .unwrap();
+    let bank = owner.items().unwrap()[0].id.clone();
+    drop(owner);
+
+    // The same Mac, with its server moved to one that never answers.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let file = std::path::Path::new(&path);
+    let mut profile = keystead_client::profile::Profile::load(file).unwrap();
+    profile.server = format!("http://{}", silent.local_addr().unwrap());
+    profile.save(file).unwrap();
+    let vault = Vault::open(path, secret, signer()).unwrap();
+    let (taken, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let holding = std::thread::spawn(move || {
+        let (connection, _) = silent.accept().unwrap();
+        taken.0.send(()).unwrap();
+        release.1.recv().unwrap();
+        drop(connection);
+    });
+    let syncing = {
+        let vault = vault.clone();
+        std::thread::spawn(move || vault.sync())
+    };
+    taken.1.recv().unwrap();
+
+    // The sync is waiting on the server; copying doesn't.
+    let started = std::time::Instant::now();
+    assert_eq!(vault.password(bank).unwrap(), "s3cret");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+    // Once the server lets go, the sync says it couldn't sync.
+    release.0.send(()).unwrap();
+    holding.join().unwrap();
+    assert!(syncing.join().unwrap().is_err());
+}

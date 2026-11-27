@@ -9,6 +9,8 @@ What each release changes, newest first. The release workflow puts a version's s
 - Saves no longer wait while the server tidies Recently Deleted: what logins deleted over 30 days ago kept is forgotten once an hour instead, and the list is read without holding up anyone's saves. With 30,000 logins, that's about 60 ms off every save, and a list that kept everyone's saves waiting about 100 ms now takes about 6 ms and keeps nobody waiting.
 - New indexes for what saves and syncs look up, such as a login's people and a folder's members. The server adds them on its own when it starts.
 - The Mac app fetches Recently Deleted when you open it, rather than after every sync.
+- Copying a password or one-time code in the Mac app no longer waits for a sync in progress: the sync waits on the server without holding up the logins on your Mac. A server that can't be reached says so after 10 seconds rather than 30.
+- A sync that brings nothing new no longer rewrites the copy of your logins on your Mac (with 30,000 logins, about 30 MB every five minutes); the CLI's likewise. When something changes, the file is a fifth smaller than before.
 
 **Deployment**
 

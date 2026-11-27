@@ -21,9 +21,9 @@ pub use vault::{
     FolderDeletion, GroupMemberRow, GroupRow, GroupShareRow, HealthRow, HistoryRow, ImportFolder,
     ImportPlan, ImportSummary, InviteInfo, ItemRow, JoiningDevice, KdbxExport, MemberRow,
     NewAccount, NewFolder, OLD_AFTER_SECONDS, PasswordHealth, RecoveryClaim, RecoveryLine,
-    RecoveryProgress, RecoveryRequest, RenamedFolder, SyncSummary, ToChangeRow, UserRow, Vault,
-    Whoami, claim_recovery, finish_recovery, generate_password, join, recover, recovery_approved,
-    recovery_progress, setup,
+    RecoveryProgress, RecoveryRequest, RenamedFolder, SyncFetch, SyncSummary, ToChangeRow, UserRow,
+    Vault, Whoami, claim_recovery, finish_recovery, generate_password, join, recover,
+    recovery_approved, recovery_progress, setup,
 };
 
 use keystead_core::encoding::Bytes;

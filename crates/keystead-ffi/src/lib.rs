@@ -896,9 +896,12 @@ impl Vault {
         Ok(())
     }
 
-    /// Fetches changes from the server and saves them.
+    /// Fetches changes from the server and saves them. The vault is free while it waits
+    /// on the server, so copying a password meanwhile doesn't wait for the sync.
     pub fn sync(&self) -> Result<SyncResult, CoreError> {
-        Ok(self.vault()?.sync()?.into())
+        let mut fetch = self.vault()?.begin_sync();
+        fetch.fetch();
+        Ok(self.vault()?.finish_sync(fetch)?.into())
     }
 
     /// Every login's searchable fields, from the local copy.

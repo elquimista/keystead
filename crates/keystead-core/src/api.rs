@@ -717,7 +717,7 @@ pub struct Groups {
     pub former: Vec<Vec<GroupEntry>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupInfo {
     /// Every revision of the group's entry, oldest first; apps check them all.
     pub entries: Vec<GroupEntry>,

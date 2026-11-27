@@ -11,12 +11,12 @@ use keystead_core::api::{
     AcceptInviteRequest, AddFolderGroupRequest, AddGroupMemberRequest, AddMemberRequest,
     ApprovalRequest, ClaimDeviceTransferRequest, ClaimedAccountSecret, Conflict,
     CreateFolderRequest, CreateGroupRequest, DeletedItems, DeviceList, DeviceTransfer,
-    DeviceTransferState, Directory, Enrolled, Exposures, GroupFolderKey, GroupInfo, GroupMemberKey,
-    GroupRekeyRequest, GroupShare, Groups, Health, Invite, InviteRequest, Invites, ItemHistory,
-    JoinDeviceTransferRequest, KeyLink, Member, MemberKey, Members, PendingInvite, PutItemRequest,
-    RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest, Removal,
-    RemoveUserRequest, Role, RoleRequest, SendAccountSecretRequest, SetupRequest, SyncEntry,
-    SyncPage, UpdateGroupRequest,
+    DeviceTransferState, Directory, Enrolled, Exposure, Exposures, GroupFolderKey, GroupInfo,
+    GroupMemberKey, GroupRekeyRequest, GroupShare, Groups, Health, Invite, InviteRequest, Invites,
+    ItemHistory, JoinDeviceTransferRequest, KeyLink, Member, MemberKey, Members, PendingInvite,
+    PutItemRequest, RecoverRequest, RecoveryChallenge, RecoveryChallengeRequest, RekeyRequest,
+    Removal, RemoveUserRequest, Role, RoleRequest, SendAccountSecretRequest, SetupRequest,
+    SyncEntry, SyncPage, UpdateGroupRequest,
 };
 use keystead_core::directory::DirectoryEntry;
 use keystead_core::encoding::Bytes;
@@ -124,6 +124,103 @@ impl SessionTimes {
         } else {
             SessionStep::Use
         }
+    }
+}
+
+/// The connection to the server: the session, and what signing in again takes. A sync
+/// fetches with a copy of it while the vault is free (`Vault::begin_sync`).
+#[derive(Clone)]
+struct Connection {
+    server: String,
+    device_id: DeviceId,
+    signer: Arc<dyn DeviceSigner>,
+    client: Option<Client>,
+    session: Option<SessionTimes>,
+    /// Whether the server renews sessions; servers from before that answer 404.
+    server_renews: bool,
+    /// Goes up with every sign-in, renewal and sign-out, so a sync that fetched with a
+    /// copy knows whether this one moved on meanwhile.
+    generation: u64,
+}
+
+impl Connection {
+    fn new(server: &str, device_id: DeviceId, signer: Arc<dyn DeviceSigner>) -> Self {
+        Self {
+            server: server.to_owned(),
+            device_id,
+            signer,
+            client: None,
+            session: None,
+            server_renews: true,
+            generation: 0,
+        }
+    }
+
+    /// Runs a request, signing in first when there's no valid session and once more if
+    /// the server has forgotten it (for example after a restart). A session half over is
+    /// renewed first, so the device key, which may need Touch ID, is used as little as
+    /// possible. The outer error is a sign-in failure; the inner one is the request's own.
+    fn call<T>(
+        &mut self,
+        request: impl Fn(&Client) -> Result<T, Failure>,
+    ) -> Result<Result<T, Failure>> {
+        let step = match (&self.client, self.session) {
+            (Some(_), Some(session)) => session.step(Instant::now()),
+            _ => SessionStep::SignIn,
+        };
+        match step {
+            SessionStep::Use => {}
+            SessionStep::Renew => self.renew(),
+            SessionStep::SignIn => self.sign_in()?,
+        }
+        let result = request(self.client.as_ref().expect("signed in above"));
+        if let Err(Failure::Status { code: 401, .. }) = result {
+            self.sign_in()?;
+            return Ok(request(self.client.as_ref().expect("signed in above")));
+        }
+        Ok(result)
+    }
+
+    fn sign_in(&mut self) -> Result<()> {
+        let mut client = Client::new(&self.server);
+        let asked = Instant::now();
+        let session = client.sign_in(self.device_id, self.signer.as_ref())?;
+        self.session = Some(SessionTimes::new(asked, session.expires_in_seconds));
+        self.client = Some(client);
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// Swaps a session half over for a fresh one, without the device key. If that fails,
+    /// the session still works until it ends, and the next request tries again. A server
+    /// too old to renew (404) isn't asked again, and its sessions are signed in afresh; a
+    /// session the server won't renew any more (403, some hours after signing in) is used
+    /// until it ends, then the device signs in with its key.
+    fn renew(&mut self) {
+        let Some(client) = self.client.as_mut().filter(|_| self.server_renews) else {
+            return;
+        };
+        let asked = Instant::now();
+        match client.renew() {
+            Ok(session) => {
+                self.session = Some(SessionTimes::new(asked, session.expires_in_seconds));
+            }
+            Err(Failure::Status { code: 404, .. }) => self.server_renews = false,
+            Err(Failure::Status { code: 403, .. }) => {
+                if let Some(session) = &mut self.session {
+                    session.stop_renewing();
+                }
+            }
+            Err(_) => return,
+        }
+        self.generation += 1;
+    }
+
+    /// Forgets the session, after signing out.
+    fn forget(&mut self) {
+        self.client = None;
+        self.session = None;
+        self.generation += 1;
     }
 }
 
@@ -849,15 +946,98 @@ pub fn generate_password() -> String {
         .collect()
 }
 
+/// The network half of a sync. It needs nothing from the vault but a copy of its
+/// connection and where its feed stands, so an app can run it with the vault free, and
+/// opening and copying logins doesn't wait on the server: `Vault::begin_sync`, then
+/// `fetch`, then `Vault::finish_sync`, which takes in what came back. `Vault::sync` does
+/// all three.
+pub struct SyncFetch {
+    connection: Connection,
+    /// The vault's connection and profile as they were at the start, to tell whether
+    /// either moved on while this fetched.
+    connection_generation: u64,
+    changes: u64,
+    cursor: i64,
+    fetched: Fetched,
+}
+
+/// What a sync's fetch brought, in the order it asks.
+#[derive(Default)]
+struct Fetched {
+    directory: Option<Vec<DirectoryEntry>>,
+    /// The team's groups; `Some(None)` from a server before 0.4.0, which has none.
+    groups: Option<Option<Groups>>,
+    exposures: Option<Vec<Exposure>>,
+    pages: Vec<SyncPage>,
+    /// What stopped the fetch, if anything did.
+    failure: Option<anyhow::Error>,
+}
+
+impl SyncFetch {
+    /// Asks the server for everything new since the vault's last sync. Doesn't fail: what
+    /// stops it is kept, and `Vault::finish_sync` reports it.
+    pub fn fetch(&mut self) {
+        if let Err(error) = self.try_fetch() {
+            self.fetched.failure = Some(error);
+        }
+    }
+
+    fn try_fetch(&mut self) -> Result<()> {
+        let directory: Directory = self
+            .connection
+            .call(|client| client.get("/v1/directory", &[]))??;
+        self.fetched.directory = Some(directory.entries);
+        // Servers before 0.4.0 have no groups.
+        let groups = match self
+            .connection
+            .call(|client| client.get::<Groups>("/v1/groups", &[]))?
+        {
+            Ok(groups) => Some(groups),
+            Err(Failure::Status { code: 404, .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
+        self.fetched.groups = Some(groups);
+        // Servers before 0.5.0 don't keep track of passwords to change.
+        let exposures = match self
+            .connection
+            .call(|client| client.get::<Exposures>("/v1/exposures", &[]))?
+        {
+            Ok(list) => list.exposures,
+            Err(Failure::Status { code: 404, .. }) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        self.fetched.exposures = Some(exposures);
+        let mut cursor = self.cursor;
+        // Where the last page stopped inside a folder too big for one page.
+        let mut resume: Option<String> = None;
+        loop {
+            // A server on 0.17.0 or later sends a big folder in parts when asked; an
+            // older one ignores this and sends it whole.
+            let mut query = vec![
+                ("cursor", cursor.to_string()),
+                ("limit", PAGE_SIZE.to_string()),
+                ("parts", "true".to_owned()),
+            ];
+            query.extend(resume.take().map(|resume| ("resume", resume)));
+            let page: SyncPage = self
+                .connection
+                .call(|client| client.get("/v1/sync", &query))??;
+            cursor = page.cursor;
+            resume.clone_from(&page.resume);
+            let more = page.more;
+            self.fetched.pages.push(page);
+            if !more {
+                return Ok(());
+            }
+        }
+    }
+}
+
 pub struct Vault {
     path: PathBuf,
-    profile: Profile,
+    profile: Tracked,
     keys: AccountKeys,
-    signer: Arc<dyn DeviceSigner>,
-    client: Option<Client>,
-    session: Option<SessionTimes>,
-    /// Whether the server renews sessions; servers from before that answer 404.
-    server_renews: bool,
+    connection: Connection,
     /// The server stores this build's item format; checked before the first save.
     server_takes_items: bool,
     /// Whether the server keeps signed members, once asked this session.
@@ -876,6 +1056,53 @@ pub struct Vault {
     deleted: HashMap<ItemId, EncryptedItem>,
 }
 
+/// The profile, and whether it has changed since it was last written. Every change goes
+/// through `DerefMut`, which marks it, so `Vault::save` writes only after one: a sync that
+/// brings nothing new doesn't rewrite the whole file, about 1 KB per login. Reading
+/// doesn't mark it, so code that only might change something reads first.
+struct Tracked {
+    profile: Profile,
+    changed: bool,
+    /// How many times it was changed, written or not: a sync that fetched while the vault
+    /// was free checks nothing changed it meanwhile.
+    changes: u64,
+}
+
+impl Tracked {
+    /// Sets one of the profile's fields, marking it changed only if the value differs.
+    fn replace<T: PartialEq>(&mut self, field: fn(&mut Profile) -> &mut T, value: T) {
+        let slot = field(&mut self.profile);
+        if *slot != value {
+            *slot = value;
+            self.changed = true;
+            self.changes += 1;
+        }
+    }
+
+    /// Takes the server's directory, if it isn't the one the profile has.
+    fn take_directory(&mut self, entries: Vec<DirectoryEntry>) {
+        if self.profile.directory != entries {
+            self.set_directory(entries);
+        }
+    }
+}
+
+impl std::ops::Deref for Tracked {
+    type Target = Profile;
+
+    fn deref(&self) -> &Profile {
+        &self.profile
+    }
+}
+
+impl std::ops::DerefMut for Tracked {
+    fn deref_mut(&mut self) -> &mut Profile {
+        self.changed = true;
+        self.changes += 1;
+        &mut self.profile
+    }
+}
+
 impl Vault {
     /// Unlocks an enrolled device's vault. Doesn't touch the network.
     pub fn open(
@@ -888,12 +1115,13 @@ impl Vault {
         Ok(Self {
             path: path.to_owned(),
             groups: profile.group_keyring(&keys),
-            profile,
+            connection: Connection::new(&profile.server, profile.device_id, signer),
+            profile: Tracked {
+                profile,
+                changed: false,
+                changes: 0,
+            },
             keys,
-            signer,
-            client: None,
-            session: None,
-            server_renews: true,
             server_takes_items: false,
             server_membership: None,
             could_save: HashMap::new(),
@@ -913,14 +1141,15 @@ impl Vault {
         keys: AccountKeys,
         signer: Arc<dyn DeviceSigner>,
     ) -> Result<Self> {
-        let vault = Self {
+        let mut vault = Self {
             path: path.to_owned(),
-            profile,
+            connection: Connection::new(&profile.server, profile.device_id, signer),
+            profile: Tracked {
+                profile,
+                changed: true,
+                changes: 0,
+            },
             keys,
-            signer,
-            client: None,
-            session: None,
-            server_renews: true,
             server_takes_items: false,
             server_membership: None,
             could_save: HashMap::new(),
@@ -941,7 +1170,7 @@ impl Vault {
     /// has seen. A server from before 0.14.0 doesn't, so the device signs in with its key
     /// each time a session ends, every 15 minutes.
     pub fn server_renews_sessions(&self) -> bool {
-        self.server_renews
+        self.connection.server_renews
     }
 
     pub fn whoami(&self) -> Whoami {
@@ -964,10 +1193,33 @@ impl Vault {
     }
 
     /// Pulls feed pages until caught up, then saves. Every item must be signed by an
-    /// author the owner approved; anything else is dropped.
+    /// author the owner approved; anything else is dropped. Apps that open logins while
+    /// a sync waits on the server do its three steps themselves (see `SyncFetch`).
     pub fn sync(&mut self) -> Result<SyncSummary> {
+        let mut fetch = self.begin_sync();
+        fetch.fetch();
+        self.finish_sync(fetch)
+    }
+
+    /// Starts a sync: what its fetch needs, with a copy of the connection, so the vault
+    /// can be left free while it runs (see `SyncFetch`).
+    pub fn begin_sync(&self) -> SyncFetch {
+        SyncFetch {
+            connection: self.connection.clone(),
+            connection_generation: self.connection.generation,
+            changes: self.profile.changes,
+            cursor: self.profile.cursor,
+            fetched: Fetched::default(),
+        }
+    }
+
+    /// Takes in what a sync's fetch brought, then does what it calls for: new keys,
+    /// approvals, and what people who recovered are waiting for, which may ask the server
+    /// more. If the vault changed while it fetched (a login saved, say), what came back
+    /// may be from before that, so it fetches again here instead.
+    pub fn finish_sync(&mut self, fetch: SyncFetch) -> Result<SyncSummary> {
         let mut summary = SyncSummary::default();
-        let (mut folders, groups, mut duties) = self.pull(&mut summary)?;
+        let (mut folders, groups, mut duties) = self.take_fetched(fetch, &mut summary)?;
         // If it doesn't work out, they stay waiting: the next sync tries again, and the
         // owner can still approve them by comparing fingerprints, which says what's wrong.
         summary.approved = self.approve_invited().unwrap_or_default();
@@ -1023,38 +1275,78 @@ impl Vault {
         &mut self,
         summary: &mut SyncSummary,
     ) -> Result<(Vec<FolderId>, Vec<GroupId>, RecoveryDuties)> {
-        let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
-        self.profile.set_directory(directory.entries);
+        let mut fetch = self.begin_sync();
+        fetch.fetch();
+        self.take_fetched(fetch, summary)
+    }
+
+    /// Takes the fetch's connection if the vault's didn't move on meanwhile, and takes in
+    /// what it brought, unless something changed the profile meanwhile: then it pulls
+    /// again, with the vault held.
+    fn take_fetched(
+        &mut self,
+        fetch: SyncFetch,
+        summary: &mut SyncSummary,
+    ) -> Result<(Vec<FolderId>, Vec<GroupId>, RecoveryDuties)> {
+        let SyncFetch {
+            connection,
+            connection_generation,
+            changes,
+            cursor: _,
+            fetched,
+        } = fetch;
+        if self.connection.generation == connection_generation {
+            self.connection = connection;
+        }
+        if self.profile.changes != changes {
+            return self.pull(summary);
+        }
+        self.apply_fetched(fetched, summary)
+    }
+
+    /// Takes in a fetch's directory, groups, passwords to change and feed pages, in that
+    /// order, then saves. If the fetch stopped partway, what came before is taken in and
+    /// what stopped it is the error, as when each was taken in as it came.
+    fn apply_fetched(
+        &mut self,
+        fetched: Fetched,
+        summary: &mut SyncSummary,
+    ) -> Result<(Vec<FolderId>, Vec<GroupId>, RecoveryDuties)> {
+        let Fetched {
+            directory,
+            groups,
+            exposures,
+            pages,
+            failure,
+        } = fetched;
+        let Some(directory) = directory else {
+            return Err(failure.unwrap_or_else(|| anyhow::anyhow!("the sync fetched nothing")));
+        };
+        // Each list replaces the profile's only if it differs, so a sync that brings
+        // nothing new leaves the profile as it was, and `save` doesn't write it.
+        self.profile.take_directory(directory);
         self.fetch_signed_before()?;
         self.could_save.clear();
-        // Servers before 0.4.0 have no groups.
-        match self.call(|client| client.get::<Groups>("/v1/groups", &[]))? {
-            Ok(groups) => {
+        match groups {
+            Some(Some(groups)) => {
                 let listed = self.newest_groups(groups.groups, summary);
-                self.profile.team_groups = listed;
-                self.profile.former_groups = groups.former;
+                self.profile
+                    .replace(|profile| &mut profile.team_groups, listed);
+                self.profile
+                    .replace(|profile| &mut profile.former_groups, groups.former);
             }
-            Err(Failure::Status { code: 404, .. }) => self.profile.team_groups.clear(),
-            Err(error) => return Err(error.into()),
+            Some(None) => {
+                self.profile
+                    .replace(|profile| &mut profile.team_groups, Vec::new());
+            }
+            None => {}
         }
-        // Servers before 0.5.0 don't keep track of passwords to change.
-        match self.call(|client| client.get::<Exposures>("/v1/exposures", &[]))? {
-            Ok(list) => self.profile.exposures = list.exposures,
-            Err(Failure::Status { code: 404, .. }) => self.profile.exposures.clear(),
-            Err(error) => return Err(error.into()),
+        if let Some(exposures) = exposures {
+            self.profile
+                .replace(|profile| &mut profile.exposures, exposures);
         }
-        // Where the last page stopped inside a folder too big for one page.
-        let mut resume: Option<String> = None;
-        let rekey_needed = loop {
-            // A server on 0.17.0 or later sends a big folder in parts when asked; an
-            // older one ignores this and sends it whole.
-            let mut query = vec![
-                ("cursor", self.profile.cursor.to_string()),
-                ("limit", PAGE_SIZE.to_string()),
-                ("parts", "true".to_owned()),
-            ];
-            query.extend(resume.take().map(|resume| ("resume", resume)));
-            let page: SyncPage = self.call(|client| client.get("/v1/sync", &query))??;
+        let mut last = None;
+        for page in pages {
             summary.received += page.entries.len();
             // A server on 0.17.0 or later answers with a lower cursor if its change
             // numbers went back; from there on it sends what changes, as usual.
@@ -1062,11 +1354,12 @@ impl Vault {
             for entry in page.entries {
                 self.apply_entry(entry, summary);
             }
-            self.profile.cursor = page.cursor;
-            resume = page.resume;
+            self.profile
+                .replace(|profile| &mut profile.cursor, page.cursor);
             if !page.more {
                 if page.roles.is_some() {
-                    self.profile.roles = page.roles;
+                    self.profile
+                        .replace(|profile| &mut profile.roles, page.roles);
                 }
                 let duties = RecoveryDuties {
                     restore: page.restore,
@@ -1074,17 +1367,21 @@ impl Vault {
                     escrow_needed: page.escrow_needed,
                     escrow_folders: page.escrow_folders,
                 };
-                break (page.rekey_needed, page.group_rekey_needed, duties);
+                last = Some((page.rekey_needed, page.group_rekey_needed, duties));
             }
-        };
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let last = last.context("the server never sent the feed's last page")?;
         self.save()?;
-        Ok(rekey_needed)
+        Ok(last)
     }
 
     /// Everyone on the server, and whether the pinned owner approved them.
     pub fn users(&mut self) -> Result<Vec<UserRow>> {
         let directory: Directory = self.call(|client| client.get("/v1/directory", &[]))??;
-        self.profile.set_directory(directory.entries);
+        self.profile.take_directory(directory.entries);
         self.save()?;
         // As after a sync: whoever is left waits for the next try, or for the owner.
         let _ = self.approve_invited();
@@ -1308,8 +1605,7 @@ impl Vault {
             }
             _ => {}
         }
-        self.client = None;
-        self.session = None;
+        self.connection.forget();
         Ok(not_told)
     }
 
@@ -2265,8 +2561,9 @@ impl Vault {
             self.profile.seen.folders.insert(folder_id, record.reach());
         }
         let groups = &self.groups;
-        let seen = &mut self.profile.seen.items;
-        self.profile.items.retain(|_, item| {
+        let profile = &mut *self.profile;
+        let seen = &mut profile.seen.items;
+        profile.items.retain(|_, item| {
             let keep = item.folder_id != Some(folder_id) || item.reaches_directly(me, groups);
             if !keep {
                 seen.insert(item.id, item.version);
@@ -3875,7 +4172,10 @@ impl Vault {
                 continue;
             };
             if group_revision(&info.entries) >= self.group_seen(group_id) {
-                self.profile.seen.groups.remove(&group_id);
+                // Read first: a sync that changes nothing leaves the profile unchanged.
+                if self.profile.seen.groups.contains_key(&group_id) {
+                    self.profile.seen.groups.remove(&group_id);
+                }
                 newest.push(info);
                 continue;
             }
@@ -3887,77 +4187,37 @@ impl Vault {
                 .find(|held| id(held) == Some(group_id));
             newest.extend(held.cloned());
         }
-        for held in &self.profile.team_groups {
-            if let Some(group_id) = id(held)
-                && !newest.iter().any(|info| id(info) == Some(group_id))
-            {
-                let revision = group_revision(&held.entries);
-                self.profile.seen.groups.insert(group_id, revision);
-            }
+        let gone: Vec<_> = self
+            .profile
+            .team_groups
+            .iter()
+            .filter_map(|held| {
+                let group_id = id(held)?;
+                let listed = newest.iter().any(|info| id(info) == Some(group_id));
+                (!listed).then(|| (group_id, group_revision(&held.entries)))
+            })
+            .collect();
+        for (group_id, revision) in gone {
+            self.profile.seen.groups.insert(group_id, revision);
         }
         newest
     }
 
-    /// Runs a request, signing in first when there's no valid session and once more if
-    /// the server has forgotten it (for example after a restart). A session half over is
-    /// renewed first, so the device key, which may need Touch ID, is used as little as
-    /// possible. The outer error is a sign-in failure; the inner one is the request's own.
+    /// Runs a request on the vault's connection (`Connection::call`).
     fn call<T>(
         &mut self,
         request: impl Fn(&Client) -> Result<T, Failure>,
     ) -> Result<Result<T, Failure>> {
-        let step = match (&self.client, self.session) {
-            (Some(_), Some(session)) => session.step(Instant::now()),
-            _ => SessionStep::SignIn,
-        };
-        match step {
-            SessionStep::Use => {}
-            SessionStep::Renew => self.renew(),
-            SessionStep::SignIn => self.sign_in()?,
-        }
-        let result = request(self.client.as_ref().expect("signed in above"));
-        if let Err(Failure::Status { code: 401, .. }) = result {
-            self.sign_in()?;
-            return Ok(request(self.client.as_ref().expect("signed in above")));
-        }
-        Ok(result)
+        self.connection.call(request)
     }
 
-    fn sign_in(&mut self) -> Result<()> {
-        let mut client = Client::new(&self.profile.server);
-        let asked = Instant::now();
-        let session = client.sign_in(self.profile.device_id, self.signer.as_ref())?;
-        self.session = Some(SessionTimes::new(asked, session.expires_in_seconds));
-        self.client = Some(client);
+    /// Writes the profile, if it changed since it was last written.
+    fn save(&mut self) -> Result<()> {
+        if self.profile.changed {
+            self.profile.profile.save(&self.path)?;
+            self.profile.changed = false;
+        }
         Ok(())
-    }
-
-    /// Swaps a session half over for a fresh one, without the device key. If that fails,
-    /// the session still works until it ends, and the next request tries again. A server
-    /// too old to renew (404) isn't asked again, and its sessions are signed in afresh; a
-    /// session the server won't renew any more (403, some hours after signing in) is used
-    /// until it ends, then the device signs in with its key.
-    fn renew(&mut self) {
-        let Some(client) = self.client.as_mut().filter(|_| self.server_renews) else {
-            return;
-        };
-        let asked = Instant::now();
-        match client.renew() {
-            Ok(session) => {
-                self.session = Some(SessionTimes::new(asked, session.expires_in_seconds));
-            }
-            Err(Failure::Status { code: 404, .. }) => self.server_renews = false,
-            Err(Failure::Status { code: 403, .. }) => {
-                if let Some(session) = &mut self.session {
-                    session.stop_renewing();
-                }
-            }
-            Err(_) => {}
-        }
-    }
-
-    fn save(&self) -> Result<()> {
-        self.profile.save(&self.path)
     }
 }
 
@@ -4186,7 +4446,7 @@ mod tests {
         assert_eq!(holds(&vault, folder_id, &third), Some(2));
 
         // The fingerprints survive a save and a load.
-        let saved = serde_json::to_string(&vault.profile).unwrap();
+        let saved = serde_json::to_string(&*vault.profile).unwrap();
         let loaded: Profile = serde_json::from_str(&saved).unwrap();
         assert_eq!(
             loaded.folder_pins.get(&folder_id),

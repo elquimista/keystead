@@ -244,9 +244,10 @@ impl Profile {
         serde_json::from_slice(&text).with_context(|| format!("reading {}", path.display()))
     }
 
-    /// Writes the profile atomically, readable only by the current user.
+    /// Writes the profile atomically, readable only by the current user. Compact JSON:
+    /// it's about 1 KB per login, and nobody reads it but Keystead.
     pub fn save(&self, path: &Path) -> Result<()> {
-        write_private(path, &serde_json::to_vec_pretty(self)?)
+        write_private(path, &serde_json::to_vec(self)?)
     }
 
     /// The folder's current key.

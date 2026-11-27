@@ -100,6 +100,7 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
+#[derive(Clone)]
 pub struct Client {
     agent: ureq::Agent,
     base: String,
@@ -108,7 +109,11 @@ pub struct Client {
 
 impl Client {
     pub fn new(server: &str) -> Self {
-        let mut agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(30));
+        // A server that can't be reached says so in 10 seconds; one that answers gets 30
+        // for each request, enough for a page of several MB on a slow line.
+        let mut agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30));
         if let Some(tls) = tls_config() {
             agent = agent.tls_config(tls);
         }

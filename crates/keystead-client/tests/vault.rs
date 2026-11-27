@@ -3660,3 +3660,85 @@ fn new_accounts_and_devices_refuse_http_to_another_machine() {
     .unwrap();
     assert!(alice.whoami().private_connection);
 }
+
+/// A sync that brings nothing new leaves the profile file as it was, folders, groups,
+/// roles and passwords to change and all; one that brings a change writes it.
+#[test]
+fn a_sync_that_brings_nothing_new_writes_nothing() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    alice.create_group("Ops", &[bob_id]).unwrap();
+    let (overview, details) = login("AWS root", "first");
+    let aws = alice.add(Some("Production"), overview, details).unwrap();
+    // Bob loses a login he had, so its password is one to change.
+    let (overview, details) = login("Mail", "shared");
+    let mail = alice.add(None, overview, details).unwrap();
+    alice.share_item(mail, bob_id, Role::View).unwrap();
+    alice.unshare_item(mail, bob_id).unwrap();
+    alice.sync().unwrap();
+    bob.sync().unwrap();
+    assert_eq!(alice.to_change().unwrap().len(), 1);
+
+    let written = || {
+        std::fs::metadata(fixture.profile("alice"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let before = written();
+    alice.sync().unwrap();
+    alice.sync().unwrap();
+    assert_eq!(written(), before, "an idle sync rewrote the profile");
+
+    // Bob changes a password: Alice's next sync brings it, and writes it.
+    bob.edit(aws, "second").unwrap();
+    alice.sync().unwrap();
+    assert_ne!(written(), before);
+    assert_eq!(alice.open_item(aws).unwrap().1.password, "second");
+}
+
+/// A sync's fetch runs with the vault free, so an app can open logins meanwhile. If the
+/// vault saves something before the sync finishes, what the fetch brought may be from
+/// before that save: the sync fetches again rather than take it for an older copy.
+#[test]
+fn a_sync_fetches_with_the_vault_free_and_minds_saves_made_meanwhile() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice, mut bob, ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    alice.create_folder("Production").unwrap();
+    alice
+        .share_folder("Production", bob_id, Role::Edit)
+        .unwrap();
+    let (overview, details) = login("AWS root", "first");
+    let aws = alice.add(Some("Production"), overview, details).unwrap();
+    bob.sync().unwrap();
+
+    // Bob changes it, and Alice's fetch brings his version...
+    bob.edit(aws, "second").unwrap();
+    let mut fetch = alice.begin_sync();
+    fetch.fetch();
+    // ...while she opens logins and saves a newer version herself.
+    assert_eq!(alice.open_item(aws).unwrap().1.password, "first");
+    alice.edit(aws, "third").unwrap();
+    let summary = alice.finish_sync(fetch).unwrap();
+    assert_eq!(summary.older, 0);
+    assert_eq!(alice.open_item(aws).unwrap().1.password, "third");
+
+    // With nothing saved meanwhile, what it fetched is taken in as it is.
+    bob.sync().unwrap();
+    bob.edit(aws, "fourth").unwrap();
+    let mut fetch = alice.begin_sync();
+    fetch.fetch();
+    let summary = alice.finish_sync(fetch).unwrap();
+    assert_eq!((summary.received, summary.older), (1, 0));
+    assert_eq!(alice.open_item(aws).unwrap().1.password, "fourth");
+}
