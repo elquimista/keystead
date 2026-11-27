@@ -2,10 +2,11 @@ name: Release
 
 # Pushing a version tag (v0.1.0) publishes the server image to the GitHub Container
 # Registry as ghcr.io/<owner>/keystead-server, for linux/amd64 and linux/arm64, tagged
-# 0.1.0, 0.1 and latest, and attaches the Mac app to the tag's GitHub release. The tag must
-# match the version in all three places the release checklist names, and CI must pass on
-# the tagged commit first. The image doesn't wait for the Mac app, whose macOS runner can
-# queue for a long time.
+# 0.1.0, 0.1 and latest, and attaches the Mac app to the tag's GitHub release, with the
+# version's notes from CHANGELOG.md. The tag must match the version in all three places the
+# release checklist names, a final release needs its notes, and CI must pass on the tagged
+# commit first. The image doesn't wait for the Mac app, whose macOS runner can queue for a
+# long time.
 
 on:
   push:
@@ -38,6 +39,11 @@ jobs:
             echo "::error::deploy/.env.example says KEYSTEAD_VERSION=$DEPLOY_VERSION, not $VERSION."
             exit 1
           fi
+          # A final release says what it changes; a pre-release may.
+          if [[ "$VERSION" != *-* ]] && ! grep -qx "## $VERSION" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no \"## $VERSION\" section; add the release's notes there."
+            exit 1
+          fi
 
   ci:
     uses: ./.github/workflows/ci.yml
@@ -50,12 +56,12 @@ jobs:
     with:
       publish: true
     # The signing certificate, MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD, comes
-    # from the `release` environment its job names. `inherit` passes repository secrets of
-    # the same names, which the environment's take the place of, for as long as they exist.
+    # from the `release` environment its job names; the repository keeps no copy of it.
     secrets: inherit
 
   # Attaches the Mac app and its checksum to the tag's GitHub release once CI has passed,
-  # making the release, with install notes, if there isn't one yet. Its build provenance is
+  # making the release if there isn't one yet: the version's notes from CHANGELOG.md, then
+  # install notes. Its build provenance is
   # recorded too, so anyone can check this workflow built the zip from the tag. Signed with
   # the owner's Apple Development certificate, not notarized, until there's a Developer ID
   # certificate: see README.md.
@@ -67,6 +73,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: mac-app
@@ -75,29 +85,35 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: mac-app/*.zip
-      - name: Write the install notes
+      - name: Write the notes
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          cat > notes.md <<EOF
+          # What changed: the lines under "## <version>" in CHANGELOG.md, up to the next
+          # version's heading, without the blank lines around them. None for a pre-release
+          # that has no section. GitHub shows line breaks in a release as they are, so
+          # paragraphs here, as there, are one line each.
+          awk -v heading="## $VERSION" '
+            $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found && /^[[:space:]]*$/ { if (started) blank++; next }
+            found { while (blank > 0) { print ""; blank-- } print; started = 1 }
+          ' CHANGELOG.md > changes.md
+          if [ -s changes.md ]; then
+            { cat changes.md; echo; } > notes.md
+          fi
+          cat >> notes.md <<EOF
           ## Mac app
 
-          Download **Keystead-$VERSION.zip**, open it, and move Keystead to Applications. It
-          runs on Macs with Apple silicon or Intel, on macOS 14 or later.
+          Download **Keystead-$VERSION.zip**, open it, and move Keystead to Applications. It runs on Macs with Apple silicon or Intel, on macOS 14 or later.
 
-          It isn't notarized yet, so the first time it opens, macOS says it can't check it for
-          malware. In System Settings › Privacy & Security, choose **Open Anyway** next to
-          Keystead. Each new version asks once.
+          It isn't notarized yet, so the first time it opens, macOS says it can't check it for malware. In System Settings › Privacy & Security, choose **Open Anyway** next to Keystead. Each new version asks once.
 
-          To check the download, compare \`shasum -a 256 Keystead-$VERSION.zip\` with
-          Keystead-$VERSION.zip.sha256, or confirm this repository's release workflow built it
-          from this tag with \`gh attestation verify Keystead-$VERSION.zip --repo $GITHUB_REPOSITORY\`.
+          To check the download, compare \`shasum -a 256 Keystead-$VERSION.zip\` with Keystead-$VERSION.zip.sha256, or confirm this repository's release workflow built it from this tag with \`gh attestation verify Keystead-$VERSION.zip --repo $GITHUB_REPOSITORY\`.
 
           ## Server
 
-          \`ghcr.io/$OWNER/keystead-server:$VERSION\`: see
-          [deploy/README.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/deploy/README.md)
-          for updating.
+          \`ghcr.io/$OWNER/keystead-server:$VERSION\`: see [deploy/README.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/deploy/README.md) for updating.
           EOF
           cat notes.md
       - name: Attach it to the release

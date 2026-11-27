@@ -301,18 +301,19 @@ very different schedules; until then they'd add a compatibility table to keep up
    warnings`, `cargo test --workspace`), which also updates `Cargo.lock`.
 3. If whoever runs the server must do something when updating, such as updating the
    server before the apps, add it to the Updating section of `deploy/README.md`.
-4. Commit as "Release 0.2.1", then tag and push:
+4. Add a `## 0.2.1` section at the top of [`CHANGELOG.md`](CHANGELOG.md): what changed in
+   the server and in the apps, and whether the server has to be updated first. It becomes
+   the top of the tag's GitHub release.
+5. Commit as "Release 0.2.1", then tag and push:
 
    ```sh
    git tag -a v0.2.1 -m "Keystead 0.2.1"
    git push origin main v0.2.1
    ```
 
-5. Once the workflow has made the tag's GitHub release, add short notes at the top: what
-   changed in the server and in the apps, and whether the server has to be updated first.
-
-The tag must match the version in all three files (the workflow checks), and CI (the Rust
-checks and the server image) must pass on the tagged commit. The
+The tag must match the version in all three files, a final release needs its section in
+`CHANGELOG.md` (the workflow checks both), and CI (the Rust checks and the server image)
+must pass on the tagged commit. The
 [release workflow](.github/workflows/release.yml) then:
 
 - publishes `ghcr.io/elquimista/keystead-server` for `linux/amd64` and `linux/arm64`,
@@ -321,7 +322,8 @@ checks and the server image) must pass on the tagged commit. The
 - builds the Mac app on the tagged commit with the [macOS workflow](.github/workflows/macos.yml),
   checks it's the tag's version and runs on Apple silicon and Intel, and attaches
   `Keystead-0.2.1.zip` and its SHA-256 checksum to the tag's GitHub release, making the
-  release with install notes if there isn't one yet. Its build provenance is recorded, so
+  release if there isn't one yet: the version's notes from `CHANGELOG.md`, then install
+  notes. A release made by hand before keeps its notes. Its build provenance is recorded, so
   `gh attestation verify Keystead-0.2.1.zip --repo elquimista/keystead` shows it was built
   by this workflow from the tag. A pre-release's GitHub release is marked as one.
 
