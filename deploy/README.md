@@ -409,6 +409,13 @@ your server by pointing their domain at it, keeps its connections to the server 
 lets Cloudflare resume TLS sessions. Authenticated Origin Pulls, which closes the rest of
 that gap, is optional (end of step 4).
 
+**Updating to 0.20.0.** Update the server and the apps in any order. From now on an
+account the owner hasn't approved can't save logins or make folders; with an invite's key
+the owner's Keystead approves people within minutes of their joining, so ask anyone
+waiting to try again then. Fingerprints are longer (eight groups); the first five are the
+ones earlier versions show, and those still work, on Recovery Kits printed before too.
+Invite lines made by a 0.20.0 app need 0.20.0 to join.
+
 ## Backups
 
 Everything the server knows is one SQLite database in the `keystead_keystead-data`

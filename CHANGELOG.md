@@ -2,7 +2,9 @@
 
 What each release changes, newest first. The release workflow puts a version's section at the top of its GitHub release, above the install notes. GitHub shows line breaks there as they are, so each paragraph and item is one line. Releases before 0.16.0 have their notes on the [releases page](https://github.com/elquimista/keystead/releases).
 
-## Unreleased
+## 0.20.0
+
+Update the server and the apps in any order. People joining with an invite line from a 0.20.0 app need Keystead 0.20.0 or later; an older app says the fingerprint doesn't match.
 
 **Security**
 
