@@ -243,7 +243,7 @@ private struct CodeField: View {
 
     var body: some View {
         LabeledContent(title) {
-            TextField(title, text: $text, prompt: Text("1a2b-3c4d-5e6f-7a8b-9c0d"))
+            TextField(title, text: $text, prompt: Text("1a2b-3c4d-5e6f-7a8b-9c0d-1e2f-3a4b-5c6d"))
                 .labelsHidden()
                 .font(.system(.body, design: .monospaced))
                 .multilineTextAlignment(.trailing)
@@ -2397,11 +2397,11 @@ private struct InviteSheet: View {
                     } footer: {
                         FormFooter(
                             (invitation.key == nil
-                                ? "They paste it into Keystead's welcome screen. Once they've joined, "
-                                    + "they show up under People: approve them after they read you "
-                                    + "their fingerprint."
+                                ? "They paste it into Keystead's welcome screen, with Keystead "
+                                    + "0.20.0 or later. Once they've joined, they show up under "
+                                    + "People: approve them after they read you their fingerprint."
                                 : "They paste it into Keystead's welcome screen, with Keystead "
-                                    + "0.18.0 or later. Once they've joined, your Keystead approves "
+                                    + "0.20.0 or later. Once they've joined, your Keystead approves "
                                     + "them on its own.")
                             + (invitation.expiresAt == nil
                                 ? "" : " Until then, you can revoke the invite from People."))
@@ -2528,11 +2528,11 @@ private struct JoinedSheet: View {
                 let owner = model.users.first(where: \.isOwner)?.name ?? "the owner"
                 VStack(alignment: .leading, spacing: 12) {
                     Text("You've joined \(host(identity.server)). \(owner)'s Keystead approves you "
-                        + "the next time it syncs, usually within minutes; then logins shared with "
-                        + "you show up here.")
+                        + "the next time it syncs, usually within minutes; then you can add logins, "
+                        + "and logins shared with you show up here.")
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("Meanwhile you can add logins of your own. If you're still waiting "
-                        + "later, read \(owner) your fingerprint, under People.")
+                    Text("If you're still waiting later, read \(owner) your fingerprint, under "
+                        + "People.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2562,8 +2562,8 @@ private struct FingerprintSheet: View {
                         .padding(12)
                         .frame(maxWidth: .infinity)
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                    Text("Once they approve you, logins shared with you show up here. You can "
-                        + "find your fingerprint again under People.")
+                    Text("Once they approve you, you can add logins, and logins shared with you "
+                        + "show up here. You can find your fingerprint again under People.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

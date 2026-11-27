@@ -63,9 +63,12 @@ transcript(domain, f1, f2, …) = len(domain) ‖ domain ‖ len(f1) ‖ f1 ‖ 
   makes each invite's key (0.18.0 and later; see Approving with an invite's key).
 
 **Fingerprint.** `SHA-256("keystead/fingerprint/v1" ‖ encryption public key ‖ signing
-public key)`, first 10 bytes, written as five groups of four hex digits
-(`3f2a-9c1e-5b7d-4e8a-9c21`). People compare it to confirm a key belongs to who they
-think.
+public key)`, first 16 bytes (128 bits), written as eight groups of four hex digits
+(`3f2a-9c1e-5b7d-4e8a-9c21-07bd-e14f-6a30`). People compare it to confirm a key belongs to
+who they think. Before 0.20.0 it was the first 10 bytes, the first five of those groups;
+where someone gives a fingerprint (typed in, read out, on an invite or new-device line or a
+Recovery Kit), those five groups alone still match, as strong as they were, and one given
+in full must match in full. Spacing, dashes and case don't count.
 
 ### Wrapped keys
 
@@ -191,7 +194,7 @@ hand the account secret to a new one, without the recovery kit:
    name and the key's public half (`POST …/join`, no session; once per transfer). It shows
    the **transfer code**: the first 80 bits of
    `SHA-256(transcript("keystead/device-transfer-code/v1", token, transfer key))`, in five
-   groups of four hex digits like a fingerprint.
+   groups of four hex digits like a fingerprint before 0.20.0.
 3. The existing device fetches the key (`GET …/{id}`) and computes the code itself. The
    person types the new device's code into it; only if they match does it seal the account
    secret for the key with HPKE (as for wrapped keys, info `keystead/device-transfer/v1`,
@@ -790,10 +793,12 @@ Everyone who can open a folder or an item has a role there:
 | `edit` | Also save new versions: change and delete items |
 | `manage` | Also share, change roles, remove people, and give a folder a new key |
 
-A folder's creator manages it, and so does an item's owner. Sharing also takes the owner's
-approval: an account that joined with an invite and isn't approved yet keeps folders and
-items of its own, but the server refuses (403) its sharing a folder or an item with
-anyone or any group. A folder or item shared with
+A folder's creator manages it, and so does an item's owner. Saving and sharing also take
+the owner's approval: until the owner approves an account that joined with an invite, the
+server refuses (403) its saving anything (an item of its own or in a folder, a new folder)
+and its sharing a folder or an item with anyone or any group (0.20.0 and later; before,
+an account not yet approved kept folders and items of its own). An invite can leak; with
+an invite's key the owner's app approves an honest joiner at its next sync. A folder or item shared with
 a group gives the group a role, which is everyone's in it. Someone with access more than
 one way (through a folder, directly, through groups) gets the highest role. A folder
 always keeps at least one manager, a person or a group. Members and shares from before roles existed are managers, since everyone could

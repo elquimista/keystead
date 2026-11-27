@@ -6,6 +6,8 @@ What each release changes, newest first. The release workflow puts a version's s
 
 **Security**
 
+- Until the owner approves an account, the server refuses its saves: no logins, not even its own, and no folders. An invite line can leak, and whoever has it shouldn't be able to store things on your server; with an invite's key, the owner's Keystead approves an honest joiner within minutes. Older apps are told why when they try.
+- Fingerprints are longer: 128 bits, in eight groups, from the same calculation, so the first five groups are the fingerprint earlier versions show, and people on different versions can still compare them. One from before, on a Recovery Kit you printed or read out by an older app, still works. Invite, new-device and recovery lines made by 0.20.0 carry the longer one, so joining with them takes Keystead 0.20.0 or later; an older one says the fingerprint doesn't match.
 - The encryption and database libraries are updated (hpke 0.15, p256 0.14, and sqlx 0.9 with a newer SQLite), which clears the two advisories that CI's dependency check allowed in 0.19.0. Nothing stored changes: a test checks that keys, logins and sign-in signatures made by 0.19.0 still open and verify, and a server's database from 0.16.0 opens and updates as before. Building from source takes Rust 1.94 or later.
 
 ## 0.19.0

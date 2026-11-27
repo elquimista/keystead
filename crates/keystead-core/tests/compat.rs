@@ -40,9 +40,11 @@ fn data_from_0_19_0_still_reads() {
     let keys = AccountKeys::derive(&AccountSecret::from_bytes(secret));
     let me = UserId(1);
 
-    // The same secret gives the same keys, so everyone keeps their fingerprint.
+    // The same secret gives the same keys, so everyone keeps their fingerprint: 0.19.0's
+    // five groups start today's eight, and still match.
     assert_eq!(keys.public(), f.public);
-    assert_eq!(f.public.fingerprint(), f.fingerprint);
+    assert!(f.public.fingerprint().starts_with(&f.fingerprint));
+    assert!(f.public.fingerprint_matches(&f.fingerprint));
 
     // A group's secret, wrapped for a member, and the keys it gives.
     let group_secret = keys

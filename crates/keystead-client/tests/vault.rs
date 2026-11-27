@@ -3860,3 +3860,68 @@ fn password_health_scores_a_login_again_when_its_password_changes() {
     alice.edit(mail, "password").unwrap();
     assert!(weak(&mut alice));
 }
+
+/// Fingerprints as Keystead before 0.20.0 gave them, the first five of today's eight
+/// groups, still work where someone gives one: as an invite line's owner (and so a Recovery
+/// Kit's), and read out for the owner to approve. A wrong one is still refused.
+#[test]
+fn fingerprints_from_before_0_20_0_still_work() {
+    let fixture = Fixture::start();
+    let secret = AccountSecret::generate();
+    let mut alice = setup(
+        &fixture.profile("alice"),
+        NewAccount {
+            server: &fixture.url,
+            secret: &secret,
+            device_id: DeviceId::random(),
+            device_name: "Test device",
+            signer: Arc::new(SoftwareDeviceKey::generate()),
+        },
+        &fixture.setup_code,
+        "Alice",
+    )
+    .unwrap();
+    let five_groups = |fingerprint: &str| fingerprint[..24].to_owned();
+    let new_account = |secret| NewAccount {
+        server: &fixture.url,
+        secret,
+        device_id: DeviceId::random(),
+        device_name: "Test device",
+        signer: Arc::new(SoftwareDeviceKey::generate()),
+    };
+
+    let invite = alice.invite("Mallory").unwrap();
+    let wrong = format!("0000{}", &invite.owner_fingerprint[4..24]);
+    let mallory_secret = AccountSecret::generate();
+    let Err(error) = join(
+        &fixture.profile("mallory"),
+        new_account(&mallory_secret),
+        &invite.token,
+        &wrong,
+        None,
+    ) else {
+        panic!("joined with the wrong owner fingerprint");
+    };
+    assert!(format!("{error:#}").contains("Don't trust"), "{error:#}");
+
+    let invite = alice.invite("Bob").unwrap();
+    assert_eq!(invite.owner_fingerprint.split('-').count(), 8);
+    let bob_secret = AccountSecret::generate();
+    let bob = join(
+        &fixture.profile("bob"),
+        new_account(&bob_secret),
+        &invite.token,
+        &five_groups(&invite.owner_fingerprint),
+        None,
+    )
+    .unwrap();
+    let them = bob.whoami();
+    assert!(
+        alice
+            .approve(them.user_id, &format!("0000{}", &them.fingerprint[4..24]))
+            .is_err()
+    );
+    alice
+        .approve(them.user_id, &five_groups(&them.fingerprint))
+        .unwrap();
+}

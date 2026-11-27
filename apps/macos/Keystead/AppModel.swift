@@ -1787,9 +1787,9 @@ extension AppModel {
         model.phase = .unlocked
         model.hasSynced = true
         model.identity = Identity(
-            name: "Olivia", userId: 1, fingerprint: "ab12-cd34-ef56-7890-abcd",
+            name: "Olivia", userId: 1, fingerprint: "ab12-cd34-ef56-7890-abcd-1f2e-3d4c-5b6a",
             server: "https://keys.example.com", isOwner: true,
-            ownerFingerprint: "ab12-cd34-ef56-7890-abcd", escrow: false, recovering: false,
+            ownerFingerprint: "ab12-cd34-ef56-7890-abcd-1f2e-3d4c-5b6a", escrow: false, recovering: false,
             privateConnection: true)
         model.users = [demoUser(1, "Olivia", owner: true)]
         model.devices = [
@@ -2005,7 +2005,7 @@ extension AppModel {
     func showDemoWaitingForOwner() {
         showDemoWelcome(.recoverWithHelp)
         recoveryClaim = RecoveryClaimInfo(
-            userId: 2, name: "Mo", fingerprint: "7e3a-91c4-0b2d-58f6-a1e9")
+            userId: 2, name: "Mo", fingerprint: "7e3a-91c4-0b2d-58f6-a1e9-c03b-6d8e-24f7")
     }
 
     func showDemoPhase(_ phase: Phase) {

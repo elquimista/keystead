@@ -95,6 +95,7 @@ pub(crate) async fn create_folder(
     Json(request): Json<CreateFolderRequest>,
 ) -> Result<StatusCode, ApiError> {
     let mut tx = state.writer.begin().await?;
+    require_approved_to_save(&mut tx, auth.user_id).await?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM folders WHERE id = ?)")
         .bind(request.folder_id.to_string())
         .fetch_one(&mut *tx)
@@ -1049,6 +1050,7 @@ async fn save_item(
         ));
     }
     check_shape(&item)?;
+    require_approved_to_save(&mut *tx, caller).await?;
 
     // A courtesy check: clients verify signatures themselves, but rejecting bad ones here
     // keeps garbage out of everyone's feed.
@@ -2255,9 +2257,27 @@ pub(crate) async fn is_approved(
     .unwrap_or(false))
 }
 
-/// Only an account the owner approved gives anyone else access. An invite alone, which
-/// can leak, lets an account keep logins of its own; it can't put a folder or a login in
-/// a teammate's app for them to save into.
+/// Only an account the owner approved saves anything on the team's server: logins (new,
+/// changed or deleted) and folders. An invite alone can leak, and whoever has it shouldn't
+/// be able to store things there; with an invite's key, the owner's app approves an honest
+/// joiner within a minute or so of its next sync.
+pub(crate) async fn require_approved_to_save(
+    conn: &mut SqliteConnection,
+    user: UserId,
+) -> Result<(), ApiError> {
+    if is_approved(conn, user).await? {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden(
+            "the owner hasn't approved you yet, so you can't save anything; once they have, \
+             try again"
+                .into(),
+        ))
+    }
+}
+
+/// Only an account the owner approved gives anyone else access: it can't put a folder or
+/// a login in a teammate's app for them to save into.
 pub(crate) async fn require_approved_to_share(
     conn: &mut SqliteConnection,
     user: UserId,

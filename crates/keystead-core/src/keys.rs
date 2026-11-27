@@ -457,21 +457,52 @@ impl AccountPublicKeys {
             .map_err(|_| Error::BadSignature)
     }
 
-    /// The short code people compare to confirm they hold the right keys: the first 10
-    /// bytes of a SHA-256 hash of both keys, as five groups of four hex digits.
+    /// The code people compare to confirm they hold the right keys: the first 16 bytes
+    /// (128 bits) of a SHA-256 hash of both keys, as eight groups of four hex digits.
+    /// Keystead before 0.20.0 showed the first five groups (80 bits); see
+    /// [`fingerprint_matches`](Self::fingerprint_matches).
     pub fn fingerprint(&self) -> String {
         let digest = Sha256::new()
             .chain_update(b"keystead/fingerprint/v1")
             .chain_update(self.encryption.0)
             .chain_update(self.signing.0)
             .finalize();
-        hex_groups(&digest)
+        hex_groups(&digest[..16])
+    }
+
+    /// Whether a fingerprint someone gives (typed in, read out, or on an invite line or a
+    /// Recovery Kit) is these keys'; spacing, dashes and case don't matter. Its first five
+    /// groups alone, as Keystead before 0.20.0 showed and printed fingerprints, still
+    /// match, as strong as they ever were; one given in full must match in full.
+    pub fn fingerprint_matches(&self, given: &str) -> bool {
+        let given = normalize_fingerprint(given);
+        let full = self.fingerprint();
+        given == full || given == full[..EARLIER_FINGERPRINT_LEN]
     }
 }
 
 /// The first 80 bits of a digest as five groups of four hex digits: "1a2b-3c4d-…".
+/// How long a fingerprint was before 0.20.0: five groups of four, with their dashes.
+const EARLIER_FINGERPRINT_LEN: usize = 24;
+
+/// A fingerprint as typed or read out, in the form `fingerprint` gives, whatever spacing,
+/// dashes or case were used: "AB12 cd34ef56 7890-abcd" becomes "ab12-cd34-ef56-7890-abcd".
+/// Anything else typed stays in, so it can't match by accident.
+pub fn normalize_fingerprint(text: &str) -> String {
+    let characters: Vec<char> = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    characters
+        .chunks(4)
+        .map(|group| group.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 fn hex_groups(digest: &[u8]) -> String {
-    digest[..10]
+    digest
         .chunks(2)
         .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))
         .collect::<Vec<_>>()
@@ -545,7 +576,8 @@ pub fn transfer_code(transfer: &str, key: &Key32) -> String {
         "keystead/device-transfer-code/v1",
         &[transfer.as_bytes(), &key.0],
     ));
-    hex_groups(&digest)
+    // Five groups, which someone types: unchanged by the longer fingerprints of 0.20.0.
+    hex_groups(&digest[..10])
 }
 
 fn transfer_aad(transfer: &str, key: &Key32) -> Vec<u8> {
@@ -960,12 +992,51 @@ mod tests {
     }
 
     #[test]
-    fn fingerprints_are_five_groups_of_four() {
+    fn fingerprints_are_eight_groups_of_four() {
         let fingerprint = AccountKeys::derive(&AccountSecret::generate())
             .public()
             .fingerprint();
-        assert_eq!(fingerprint.len(), 24);
-        assert_eq!(fingerprint.split('-').count(), 5);
+        assert_eq!(fingerprint.len(), 39);
+        assert_eq!(fingerprint.split('-').count(), 8);
+    }
+
+    /// A fingerprint matches however it's typed; the first five groups, as Keystead before
+    /// 0.20.0 gave them, do too; anything shorter, longer or different doesn't.
+    #[test]
+    fn fingerprints_match_typed_any_way_and_in_their_earlier_short_form() {
+        let keys = AccountKeys::derive(&AccountSecret::generate()).public();
+        let full = keys.fingerprint();
+        let groups: Vec<&str> = full.split('-').collect();
+        for given in [
+            full.clone(),
+            full.to_uppercase(),
+            full.replace('-', " "),
+            full.replace('-', ""),
+            format!("  {}\n", groups.join(" ")),
+            groups[..5].join("-"),
+            groups[..5].join("").to_uppercase(),
+        ] {
+            assert!(keys.fingerprint_matches(&given), "{given:?}");
+        }
+        let other = AccountKeys::derive(&AccountSecret::generate()).public();
+        for given in [
+            groups[..4].join("-"),
+            groups[..6].join("-"),
+            groups[..7].join("-"),
+            format!("{full}-0000"),
+            other.fingerprint(),
+            other.fingerprint()[..24].to_owned(),
+        ] {
+            assert!(!keys.fingerprint_matches(&given), "{given:?}");
+        }
+        assert_eq!(
+            normalize_fingerprint("AB12 cd34ef56 7890-abcd"),
+            "ab12-cd34-ef56-7890-abcd"
+        );
+        assert_ne!(
+            normalize_fingerprint("ab12-cd34-ef56-7890-abcO"),
+            "ab12-cd34-ef56-7890-abco0"
+        );
     }
 
     #[test]

@@ -21,9 +21,7 @@ use keystead_core::ids::{FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, ITEM_FORMAT};
 use keystead_core::keys::{AccountKeys, ItemKey, WrappedKey};
 
-use super::{
-    EditOutcome, NewAccount, Owner, People, SyncSummary, Vault, check_owner, normalize, owner_entry,
-};
+use super::{EditOutcome, NewAccount, Owner, People, SyncSummary, Vault, check_owner, owner_entry};
 use crate::http::{Client, Failure, check_server_address};
 use crate::profile::{OWNER, Profile};
 
@@ -275,7 +273,7 @@ impl Vault {
         let keys = request
             .keys
             .context("they haven't used the recovery line on their new device yet")?;
-        if keys.fingerprint() != normalize(fingerprint) {
+        if !keys.fingerprint_matches(fingerprint) {
             bail!(
                 "that isn't the fingerprint of the keys their new device sent. Check it with \
                  them again; if it still doesn't match, don't approve: someone else may have \

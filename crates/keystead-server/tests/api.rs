@@ -2410,8 +2410,10 @@ async fn a_recovery_challenge_from_before_a_removal_adds_no_device() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// An invite alone can leak: until the owner approves the account, it saves nothing on the
+/// team's server (no logins of its own, no folders) and shares nothing.
 #[tokio::test]
-async fn someone_the_owner_has_not_approved_cannot_share() {
+async fn someone_the_owner_has_not_approved_cannot_save_or_share() {
     let server = Server::new().await;
     let alice = set_up_owner(&server).await;
     let bob = invite(&server, &alice, "Bob").await;
@@ -2419,23 +2421,43 @@ async fn someone_the_owner_has_not_approved_cannot_share() {
     // Mallory used an invite; the owner hasn't approved her.
     let mallory = invite(&server, &alice, "Mallory").await;
 
-    // She keeps logins and folders of her own.
-    let (own, own_key) = private_item(&server, &mallory, "Hers").await;
-    let (folder_id, key) = create_folder(&server, &mallory, "Shared - Finance").await;
-    let in_folder = new_item(&mallory, folder_id, &key, "In her folder");
-    let (status, body) = mallory.put(&server, &in_folder, None).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-
-    // But she can't put the folder in Bob's app, or share a login with him.
-    let (status, body) =
-        add_to_folder(&server, &mallory, (folder_id, &key), &bob, Role::Edit, 0).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    let keys = ItemKeys {
-        people: vec![copy_for(&bob, &own_key, own.id)],
-        ..own.keys.clone()
+    // She can't save a login of her own...
+    let own_key = ItemKey::generate();
+    let at = ItemVersion {
+        id: ItemId::random(),
+        folder_id: None,
+        owner: Some(mallory.user_id),
+        version: 1,
+        author: mallory.user_id,
     };
-    let shared = next(&mallory, &own_key, &own, keys, "own-secret");
-    let (status, body) = mallory.put(&server, &shared, Some(1)).await;
+    let keys = ItemKeys {
+        owner: Some(own_key.seal_for_owner(at.id, mallory.user_id, &mallory.keys)),
+        ..ItemKeys::default()
+    };
+    let own = seal_with(&mallory, &own_key, at, keys, "Hers", "own-secret");
+    let (status, body) = mallory.put(&server, &own, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.to_string().contains("approved you"), "{body}");
+    // ...or make a folder.
+    let folder_id = FolderId::random();
+    let key = FolderKey::generate();
+    let request = CreateFolderRequest {
+        entry: None,
+        folder_id,
+        info: FolderInfo {
+            name: "Shared - Finance".into(),
+        }
+        .seal(folder_id, &key)
+        .unwrap(),
+        wrapped_key: mallory
+            .keys
+            .public()
+            .wrap_folder_key(&key, folder_id)
+            .unwrap(),
+    };
+    let (status, body) = mallory
+        .call(&server, Method::POST, "/v1/folders", json(&request))
+        .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(bob.sync(&server, 0, 100).await.entries.is_empty());
 
@@ -2444,11 +2466,19 @@ async fn someone_the_owner_has_not_approved_cannot_share() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(decode::<Groups>(body).groups.is_empty());
 
-    // Once approved, she shares like anyone.
+    // Once approved, she saves, makes folders and shares like anyone.
     approve(&server, &alice, &mallory).await;
+    let (status, body) = mallory.put(&server, &own, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (folder_id, key) = create_folder(&server, &mallory, "Shared - Finance").await;
     let (status, body) =
         add_to_folder(&server, &mallory, (folder_id, &key), &bob, Role::Edit, 0).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let keys = ItemKeys {
+        people: vec![copy_for(&bob, &own_key, own.id)],
+        ..own.keys.clone()
+    };
+    let shared = next(&mallory, &own_key, &own, keys, "own-secret");
     let (status, body) = mallory.put(&server, &shared, Some(1)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }

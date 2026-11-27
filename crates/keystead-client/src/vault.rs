@@ -31,7 +31,7 @@ use keystead_core::items::{
 };
 use keystead_core::keys::{
     AccountKeys, AccountPublicKeys, AccountSecret, FolderKey, GroupKeys, GroupSecret, ItemKey,
-    TransferKey, recovery_message, transfer_code,
+    TransferKey, normalize_fingerprint, recovery_message, transfer_code,
 };
 use keystead_core::otp::{self, OneTimeCode};
 use rand::Rng;
@@ -921,12 +921,12 @@ fn check_owner(owner: &DirectoryEntry, expected: Owner<'_>, advice: &str) -> Res
     let self_approved = owner.verify(&owner.keys).is_ok();
     match expected {
         Owner::Fingerprint(fingerprint) => {
-            let expected = normalize(fingerprint);
-            if owner.keys.fingerprint() != expected || !self_approved {
+            if !owner.keys.fingerprint_matches(fingerprint) || !self_approved {
                 bail!(
-                    "the owner's fingerprint on this server is {}, not {expected}. Don't trust \
-                     this server; {advice}.",
-                    owner.keys.fingerprint()
+                    "the owner's fingerprint on this server is {}, not {}. Don't trust this \
+                     server; {advice}.",
+                    owner.keys.fingerprint(),
+                    normalize_fingerprint(fingerprint)
                 );
             }
         }
@@ -1561,7 +1561,7 @@ impl Vault {
             .into_iter()
             .find(|entry| entry.user_id == user)
             .with_context(|| format!("no user {user}"))?;
-        if shown.keys.fingerprint() != normalize(fingerprint) {
+        if !shown.keys.fingerprint_matches(fingerprint) {
             bail!(
                 "that isn't the fingerprint of {}'s keys on the server. Check it with them \
                  again; if it still doesn't match, don't approve: the keys may have been \
@@ -4484,22 +4484,6 @@ fn unlock_with(
     Ok(item.unlock_with(None, keys, me, groups)?)
 }
 
-/// Puts a fingerprint typed in by hand into the canonical form, whatever spacing, dashes or
-/// case were used: "AB12 cd34ef56 7890-abcd" becomes "ab12-cd34-ef56-7890-abcd". Anything
-/// else typed stays in, so it can't match by accident.
-fn normalize(fingerprint: &str) -> String {
-    let characters: Vec<char> = fingerprint
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-')
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    characters
-        .chunks(4)
-        .map(|group| group.iter().collect::<String>())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
 #[cfg(test)]
 mod tests {
     use keystead_core::keys::{AccountSecret, SoftwareDeviceKey};
@@ -4817,22 +4801,6 @@ mod tests {
         assert!(error.to_string().contains("cut short"), "{error}");
         let error = InviteInfo::parse(cut.trim_end_matches(&key)).unwrap_err();
         assert!(error.to_string().contains("cut short"), "{error}");
-    }
-
-    #[test]
-    fn fingerprints_typed_by_hand_are_read_leniently() {
-        let canonical = "ab12-cd34-ef56-7890-abcd";
-        for typed in [
-            canonical,
-            "AB12-CD34-EF56-7890-ABCD",
-            "ab12 cd34 ef56 7890 abcd",
-            "ab12cd34ef567890abcd",
-            "  ab12-cd34 ef56 7890abcd\n",
-        ] {
-            assert_eq!(normalize(typed), canonical, "{typed:?}");
-        }
-        assert_ne!(normalize("ab12-cd34-ef56-7890-abcO"), canonical);
-        assert_ne!(normalize("ab12-cd34-ef56-7890"), canonical);
     }
 
     #[test]

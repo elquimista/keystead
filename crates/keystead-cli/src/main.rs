@@ -528,9 +528,10 @@ fn run(cli: Cli) -> Result<()> {
             println!("  {}\n", invite.command());
             if invite.key.is_some() {
                 println!("Once they've joined, your next sync approves them: the key on the");
-                println!("line proves their keys are theirs. They need Keystead 0.18.0 or later.");
+                println!("line proves their keys are theirs. They need Keystead 0.20.0 or later.");
             } else {
-                println!("Then compare fingerprints with them and run:");
+                println!("They need Keystead 0.20.0 or later. Then compare fingerprints with");
+                println!("them and run:");
                 println!("  keystead approve <their user id> --fingerprint <their fingerprint>");
             }
             if invite.expires_at.is_some() {
@@ -574,10 +575,12 @@ fn run(cli: Cli) -> Result<()> {
             println!("Joined {} as {} (user {}).", me.server, me.name, me.user_id);
             println!("Your fingerprint: {}", me.fingerprint);
             if key.is_some() {
-                println!("The owner's Keystead approves you the next time it syncs. If it");
-                println!("doesn't, read them your fingerprint, in person or on a call.");
+                println!("The owner's Keystead approves you the next time it syncs; until then,");
+                println!("you can't add logins. If it doesn't, read them your fingerprint, in");
+                println!("person or on a call.");
             } else {
-                println!("Read it to the owner, in person or on a call, so they can approve you.");
+                println!("Read it to the owner, in person or on a call, so they can approve you;");
+                println!("until then, you can't add logins.");
             }
             note_where_keys_are(&home);
         }
