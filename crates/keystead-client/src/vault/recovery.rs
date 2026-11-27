@@ -634,7 +634,16 @@ impl Vault {
     /// for any not here yet. Retired keys without one verify nothing: a list that's
     /// missing, or isn't the owner's, is left out.
     pub(super) fn fetch_signed_before(&mut self) -> Result<()> {
-        for (user, revision) in self.profile.missing_signed_before() {
+        // Finding what's missing checks every directory entry's signature. With none
+        // missing last time and the profile as it was then, none is now.
+        if self.signed_before_complete == Some(self.profile.changes) {
+            return Ok(());
+        }
+        let missing = self.profile.missing_signed_before();
+        if missing.is_empty() {
+            self.signed_before_complete = Some(self.profile.changes);
+        }
+        for (user, revision) in missing {
             let path = format!("/v1/users/{user}/retired/{revision}");
             match self.call(|client| client.get::<SignedBefore>(&path, &[]))? {
                 Ok(list) if list.user_id == user && list.revision == revision => {

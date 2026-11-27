@@ -3742,3 +3742,49 @@ fn a_sync_fetches_with_the_vault_free_and_minds_saves_made_meanwhile() {
     assert_eq!((summary.received, summary.older), (1, 0));
     assert_eq!(alice.open_item(aws).unwrap().1.password, "fourth");
 }
+
+/// Once a device has synced, the server tells it which lists haven't changed rather than
+/// sending them again (0.19.0 and later), and each change still arrives: someone approved,
+/// a new group, a new role.
+#[test]
+fn syncs_keep_unchanged_lists_and_still_get_each_change() {
+    let fixture = Fixture::start();
+    let Team {
+        mut alice,
+        mut bob,
+        carol,
+        ..
+    } = team(&fixture);
+    let bob_id = bob.whoami().user_id;
+    let (overview, details) = login("Bank", "pw");
+    let bank = alice.add(None, overview, details).unwrap();
+    alice.share_item(bank, bob_id, Role::View).unwrap();
+    // The second sync sends the first one's tags, and keeps what it has.
+    bob.sync().unwrap();
+    bob.sync().unwrap();
+    assert_eq!(bob.list().unwrap()[0].role, Role::View);
+    let carol_id = carol.whoami().user_id;
+    let approved = |bob: &Vault| {
+        bob.known_users()
+            .iter()
+            .any(|user| user.user_id == carol_id && user.approved)
+    };
+    assert!(!approved(&bob));
+
+    let fingerprint = carol.whoami().fingerprint;
+    alice.approve(carol_id, &fingerprint).unwrap();
+    bob.sync().unwrap();
+    assert!(approved(&bob));
+
+    alice.create_group("Ops", &[bob_id]).unwrap();
+    bob.sync().unwrap();
+    let groups = bob.groups();
+    assert_eq!(groups.len(), 1);
+    assert!(groups[0].member);
+
+    alice.set_item_role(bank, bob_id, Role::Edit).unwrap();
+    bob.sync().unwrap();
+    assert_eq!(bob.list().unwrap()[0].role, Role::Edit);
+    bob.sync().unwrap();
+    assert_eq!(bob.list().unwrap()[0].role, Role::Edit);
+}

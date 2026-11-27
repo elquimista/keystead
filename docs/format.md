@@ -644,6 +644,13 @@ the server, so from 0.18.0 a new account or device refuses an `http://` address 
 this computer (`localhost`, a name ending in `.localhost`, `127.0.0.0/8` or `::1`). Devices
 added before keep the address they have, and say it isn't private.
 
+**Lists that seldom change** (0.19.0 and later). `GET /v1/directory`, `GET /v1/groups` and
+`GET /v1/exposures`, which clients ask for on every sync, answer with a weak `ETag` (a tag
+of the body), and `304 Not Modified` with no body to a request whose `If-None-Match` names
+it. Weak, as proxies that compress answers drop strong tags. A client sends a tag only
+while its local copy hasn't changed since it got that list, so what it keeps on a 304 is
+what the tag was given for. Older servers ignore `If-None-Match` and send the list.
+
 | Method and path | Request | Response | Who |
 | --- | --- | --- | --- |
 | `GET /v1/health` | | `Health` | Anyone |
@@ -956,7 +963,9 @@ every joined folder whole, with what changed since; a client reads such an answe
 256 MB.
 
 The last page also carries the user's `roles` (in each folder, and on each item shared
-with them or their groups directly, the highest of the ways in), and every page
+with them or their groups directly, the highest of the ways in), and from 0.19.0 their
+`roles_tag`. A client that sends that back as `roles_tag=…` gets `roles` left out while
+they're the same, and keeps its own; older servers ignore it. Every page carries
 `rekey_needed` and `group_rekey_needed`, plus, from 0.13.0, `restore`, `recovered_key`,
 `escrow_needed` and `escrow_folders` (see Recovering with the owner's help). The prototype in
 `prototypes/change-feed` shows why each item arrives exactly once.

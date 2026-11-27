@@ -38,7 +38,7 @@ use rand::rngs::OsRng;
 
 use crate::DeviceSigner;
 use crate::export::{KdbxWriter, MIN_EXPORT_PASSPHRASE};
-use crate::http::{Client, Failure, check_server_address, private_connection};
+use crate::http::{Client, Failure, Fresh, check_server_address, private_connection};
 use crate::import::ImportedLogin;
 use crate::profile::{FolderRecord, GroupRecord, OWNER, Profile, group_revision};
 
@@ -958,16 +958,29 @@ pub struct SyncFetch {
     connection_generation: u64,
     changes: u64,
     cursor: i64,
+    /// The tags of the lists the vault has, if nothing changed it since it got them.
+    tags: SyncTags,
     fetched: Fetched,
+}
+
+/// Tags of the lists a sync got, which a server on 0.19.0 or later gives, so the next one
+/// gets them only if they changed (see `Client::get_unless`, and `roles_tag` on a sync
+/// page).
+#[derive(Clone, Debug, Default)]
+struct SyncTags {
+    directory: Option<String>,
+    groups: Option<String>,
+    exposures: Option<String>,
+    roles: Option<String>,
 }
 
 /// What a sync's fetch brought, in the order it asks.
 #[derive(Default)]
 struct Fetched {
-    directory: Option<Vec<DirectoryEntry>>,
-    /// The team's groups; `Some(None)` from a server before 0.4.0, which has none.
-    groups: Option<Option<Groups>>,
-    exposures: Option<Vec<Exposure>>,
+    directory: Option<Fresh<Vec<DirectoryEntry>>>,
+    /// The team's groups; `None` inside from a server before 0.4.0, which has none.
+    groups: Option<Fresh<Option<Groups>>>,
+    exposures: Option<Fresh<Vec<Exposure>>>,
     pages: Vec<SyncPage>,
     /// What stopped the fetch, if anything did.
     failure: Option<anyhow::Error>,
@@ -983,27 +996,33 @@ impl SyncFetch {
     }
 
     fn try_fetch(&mut self) -> Result<()> {
-        let directory: Directory = self
-            .connection
-            .call(|client| client.get("/v1/directory", &[]))??;
-        self.fetched.directory = Some(directory.entries);
+        let tags = self.tags.clone();
+        let directory = self.connection.call(|client| {
+            client.get_unless::<Directory>("/v1/directory", tags.directory.as_deref())
+        })??;
+        self.fetched.directory = Some(changed(directory, |directory| directory.entries));
         // Servers before 0.4.0 have no groups.
         let groups = match self
             .connection
-            .call(|client| client.get::<Groups>("/v1/groups", &[]))?
+            .call(|client| client.get_unless::<Groups>("/v1/groups", tags.groups.as_deref()))?
         {
-            Ok(groups) => Some(groups),
-            Err(Failure::Status { code: 404, .. }) => None,
+            Ok(groups) => changed(groups, Some),
+            Err(Failure::Status { code: 404, .. }) => Fresh::Changed {
+                value: None,
+                tag: None,
+            },
             Err(error) => return Err(error.into()),
         };
         self.fetched.groups = Some(groups);
         // Servers before 0.5.0 don't keep track of passwords to change.
-        let exposures = match self
-            .connection
-            .call(|client| client.get::<Exposures>("/v1/exposures", &[]))?
-        {
-            Ok(list) => list.exposures,
-            Err(Failure::Status { code: 404, .. }) => Vec::new(),
+        let exposures = match self.connection.call(|client| {
+            client.get_unless::<Exposures>("/v1/exposures", tags.exposures.as_deref())
+        })? {
+            Ok(list) => changed(list, |list| list.exposures),
+            Err(Failure::Status { code: 404, .. }) => Fresh::Changed {
+                value: Vec::new(),
+                tag: None,
+            },
             Err(error) => return Err(error.into()),
         };
         self.fetched.exposures = Some(exposures);
@@ -1019,6 +1038,7 @@ impl SyncFetch {
                 ("parts", "true".to_owned()),
             ];
             query.extend(resume.take().map(|resume| ("resume", resume)));
+            query.extend(tags.roles.clone().map(|tag| ("roles_tag", tag)));
             let page: SyncPage = self
                 .connection
                 .call(|client| client.get("/v1/sync", &query))??;
@@ -1033,11 +1053,30 @@ impl SyncFetch {
     }
 }
 
+/// Something new with what's needed of it, or still the same.
+fn changed<T, U>(fresh: Fresh<T>, take: impl FnOnce(T) -> U) -> Fresh<U> {
+    match fresh {
+        Fresh::Changed { value, tag } => Fresh::Changed {
+            value: take(value),
+            tag,
+        },
+        Fresh::Same => Fresh::Same,
+    }
+}
+
 pub struct Vault {
     path: PathBuf,
     profile: Tracked,
     keys: AccountKeys,
     connection: Connection,
+    /// The tags of the lists the last sync got, and how many changes the profile had
+    /// then: they're sent only while it has had none since, so a list kept because the
+    /// server says it's the same is the one the tag was given for.
+    tags: SyncTags,
+    tags_at: Option<u64>,
+    /// How many changes the profile had when it last held every retired keys' list its
+    /// directory calls for (see `fetch_signed_before`).
+    signed_before_complete: Option<u64>,
     /// The server stores this build's item format; checked before the first save.
     server_takes_items: bool,
     /// Whether the server keeps signed members, once asked this session.
@@ -1116,6 +1155,9 @@ impl Vault {
             path: path.to_owned(),
             groups: profile.group_keyring(&keys),
             connection: Connection::new(&profile.server, profile.device_id, signer),
+            tags: SyncTags::default(),
+            tags_at: None,
+            signed_before_complete: None,
             profile: Tracked {
                 profile,
                 changed: false,
@@ -1144,6 +1186,9 @@ impl Vault {
         let mut vault = Self {
             path: path.to_owned(),
             connection: Connection::new(&profile.server, profile.device_id, signer),
+            tags: SyncTags::default(),
+            tags_at: None,
+            signed_before_complete: None,
             profile: Tracked {
                 profile,
                 changed: true,
@@ -1209,6 +1254,10 @@ impl Vault {
             connection_generation: self.connection.generation,
             changes: self.profile.changes,
             cursor: self.profile.cursor,
+            tags: match self.tags_at {
+                Some(at) if at == self.profile.changes => self.tags.clone(),
+                _ => SyncTags::default(),
+            },
             fetched: Fetched::default(),
         }
     }
@@ -1293,6 +1342,7 @@ impl Vault {
             connection_generation,
             changes,
             cursor: _,
+            tags,
             fetched,
         } = fetch;
         if self.connection.generation == connection_generation {
@@ -1301,17 +1351,27 @@ impl Vault {
         if self.profile.changes != changes {
             return self.pull(summary);
         }
-        self.apply_fetched(fetched, summary)
+        // Until this works out, the tags held are of lists the profile may no longer
+        // have as they were.
+        self.tags_at = None;
+        let (pulled, tags) = self.apply_fetched(fetched, tags, summary)?;
+        self.tags = tags;
+        self.tags_at = Some(self.profile.changes);
+        Ok(pulled)
     }
 
     /// Takes in a fetch's directory, groups, passwords to change and feed pages, in that
-    /// order, then saves. If the fetch stopped partway, what came before is taken in and
-    /// what stopped it is the error, as when each was taken in as it came.
+    /// order, then saves. A list the server says is the same as the one the profile has
+    /// stays. If the fetch stopped partway, what came before is taken in and what stopped
+    /// it is the error, as when each was taken in as it came. Returns the tags of the
+    /// lists the profile now has.
+    #[allow(clippy::type_complexity)]
     fn apply_fetched(
         &mut self,
         fetched: Fetched,
+        mut tags: SyncTags,
         summary: &mut SyncSummary,
-    ) -> Result<(Vec<FolderId>, Vec<GroupId>, RecoveryDuties)> {
+    ) -> Result<((Vec<FolderId>, Vec<GroupId>, RecoveryDuties), SyncTags)> {
         let Fetched {
             directory,
             groups,
@@ -1324,26 +1384,35 @@ impl Vault {
         };
         // Each list replaces the profile's only if it differs, so a sync that brings
         // nothing new leaves the profile as it was, and `save` doesn't write it.
-        self.profile.take_directory(directory);
+        if let Fresh::Changed { value, tag } = directory {
+            self.profile.take_directory(value);
+            tags.directory = tag;
+        }
         self.fetch_signed_before()?;
         self.could_save.clear();
         match groups {
-            Some(Some(groups)) => {
+            Some(Fresh::Changed {
+                value: Some(groups),
+                tag,
+            }) => {
                 let listed = self.newest_groups(groups.groups, summary);
                 self.profile
                     .replace(|profile| &mut profile.team_groups, listed);
                 self.profile
                     .replace(|profile| &mut profile.former_groups, groups.former);
+                tags.groups = tag;
             }
-            Some(None) => {
+            Some(Fresh::Changed { value: None, .. }) => {
                 self.profile
                     .replace(|profile| &mut profile.team_groups, Vec::new());
+                tags.groups = None;
             }
-            None => {}
+            Some(Fresh::Same) | None => {}
         }
-        if let Some(exposures) = exposures {
+        if let Some(Fresh::Changed { value, tag }) = exposures {
             self.profile
-                .replace(|profile| &mut profile.exposures, exposures);
+                .replace(|profile| &mut profile.exposures, value);
+            tags.exposures = tag;
         }
         let mut last = None;
         for page in pages {
@@ -1357,6 +1426,8 @@ impl Vault {
             self.profile
                 .replace(|profile| &mut profile.cursor, page.cursor);
             if !page.more {
+                // Left out when the tag sent says this device has them already.
+                tags.roles = page.roles_tag;
                 if page.roles.is_some() {
                     self.profile
                         .replace(|profile| &mut profile.roles, page.roles);
@@ -1375,7 +1446,7 @@ impl Vault {
         }
         let last = last.context("the server never sent the feed's last page")?;
         self.save()?;
-        Ok(last)
+        Ok((last, tags))
     }
 
     /// Everyone on the server, and whether the pinned owner approved them.

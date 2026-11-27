@@ -15,8 +15,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::extract::Request;
+use axum::handler::Handler;
+use axum::http::header::{ETAG, IF_NONE_MATCH};
+use axum::http::{HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use keystead_core::api::Health;
 use keystead_core::directory::{DirectoryEntry, InviteProof, RetiredKeys};
 use keystead_core::encoding::Key32;
@@ -402,6 +411,51 @@ impl AppState {
     }
 }
 
+/// A short tag of some content: the first 16 bytes of its SHA-256, base64url. Equal
+/// content, equal tag.
+pub(crate) fn content_tag(content: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    URL_SAFE_NO_PAD.encode(&Sha256::digest(content)[..16])
+}
+
+/// For the lists apps fetch on every sync (the directory, groups, passwords to change):
+/// a tag of the answer (`ETag`), and `304 Not Modified` with no body for a client that
+/// sends the tag of what it has (`If-None-Match`), so an idle sync doesn't download them
+/// again (0.19.0 and later). Weak tags, as proxies that compress answers (nginx,
+/// Cloudflare) drop strong ones. The list is still built each time.
+async fn tagged(request: Request, next: Next) -> Response {
+    let had = request
+        .headers()
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let response = next.run(request).await;
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let content = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(content) => content,
+        Err(error) => {
+            return ApiError::Internal(format!("tagging an answer: {error}")).into_response();
+        }
+    };
+    let tag = format!("W/\"{}\"", content_tag(&content));
+    let header = HeaderValue::from_str(&tag).expect("base64url fits in a header");
+    if had.as_deref().is_some_and(|had| names_tag(had, &tag)) {
+        return (StatusCode::NOT_MODIFIED, [(ETAG, header)]).into_response();
+    }
+    parts.headers.insert(ETAG, header);
+    Response::from_parts(parts, Body::from(content))
+}
+
+/// Whether an `If-None-Match` names this tag, compared weakly (RFC 9110, 13.1.2).
+fn names_tag(had: &str, tag: &str) -> bool {
+    let opaque = |tag: &str| tag.trim().trim_start_matches("W/").to_owned();
+    had.split(',')
+        .any(|one| one.trim() == "*" || opaque(one) == opaque(tag))
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
@@ -446,7 +500,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/escrow",
             put(accounts::put_escrow).delete(accounts::delete_escrow),
         )
-        .route("/v1/directory", get(accounts::directory))
+        .route(
+            "/v1/directory",
+            get(accounts::directory.layer(middleware::from_fn(tagged))),
+        )
         .route("/v1/device-transfers", post(transfers::start))
         .route("/v1/device-transfers/join", post(transfers::join))
         .route("/v1/device-transfers/claim", post(transfers::claim))
@@ -489,7 +546,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/folders/{folder_id}/groups/{group_id}",
             put(vault::set_folder_group_role).delete(vault::remove_folder_group),
         )
-        .route("/v1/groups", post(groups::create_group).get(groups::groups))
+        .route(
+            "/v1/groups",
+            post(groups::create_group).get(groups::groups.layer(middleware::from_fn(tagged))),
+        )
         .route(
             "/v1/groups/{group_id}",
             put(groups::update_group).delete(groups::delete_group),
@@ -522,7 +582,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/items/{item_id}/exposures/{user_id}",
             delete(vault::dismiss_exposure),
         )
-        .route("/v1/exposures", get(vault::exposures))
+        .route(
+            "/v1/exposures",
+            get(vault::exposures.layer(middleware::from_fn(tagged))),
+        )
         .route("/v1/password-ages", get(vault::password_ages))
         .route("/v1/deleted", get(vault::deleted_items))
         .route("/v1/deleted/{item_id}", delete(vault::purge_item))

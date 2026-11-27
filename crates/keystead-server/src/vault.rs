@@ -33,7 +33,7 @@ use sqlx::SqliteConnection;
 
 use crate::accounts::Auth;
 use crate::groups::{group_key_state, group_member_ids, group_state, parse_group};
-use crate::{ApiError, AppState, next_seq, user_entry};
+use crate::{ApiError, AppState, content_tag, next_seq, user_entry};
 
 const DEFAULT_PAGE: i64 = 500;
 /// How far a saved version may skip ahead of the one after its base (0.17.0 and later).
@@ -1600,6 +1600,9 @@ pub(crate) struct SyncParams {
     parts: bool,
     /// Where the last part ended, from that page's `resume`.
     resume: Option<String>,
+    /// The `roles_tag` of the caller's roles as the client has them (0.19.0 and later):
+    /// the last page leaves the roles out if they're still the same.
+    roles_tag: Option<String>,
 }
 
 /// `GET /v1/sync`: feed entries after the cursor, all read from one snapshot.
@@ -1660,7 +1663,7 @@ pub(crate) async fn sync(
             cursor: next_cursor,
             more: true,
             resume,
-            ..page_without_entries(&mut tx, auth.user_id, true).await?
+            ..page_without_entries(&mut tx, auth.user_id, true, None).await?
         };
         tx.commit().await?;
         return Ok(Json(page));
@@ -1793,18 +1796,19 @@ pub(crate) async fn sync(
         entries,
         cursor: next_cursor,
         more,
-        ..page_without_entries(&mut tx, auth.user_id, more).await?
+        ..page_without_entries(&mut tx, auth.user_id, more, params.roles_tag.as_deref()).await?
     };
     tx.commit().await?;
     Ok(Json(page))
 }
 
 /// What a sync page carries besides its entries: what this user should do, and on the
-/// last page their roles.
+/// last page their roles, unless `roles_tag` says the client has them.
 async fn page_without_entries(
     conn: &mut SqliteConnection,
     user: UserId,
     more: bool,
+    roles_tag: Option<&str>,
 ) -> Result<SyncPage, ApiError> {
     // Folders wait for the groups they're shared with to get their new keys first.
     let rekey_needed: Vec<String> = sqlx::query_scalar(
@@ -1849,10 +1853,15 @@ async fn page_without_entries(
     .bind(user.0)
     .fetch_all(&mut *conn)
     .await?;
-    let roles = if more {
-        None
+    // On the last page, the caller's roles and their tag; the roles only if the client
+    // doesn't have them already.
+    let (roles, roles_tag) = if more {
+        (None, None)
     } else {
-        Some(user_roles(&mut *conn, user).await?)
+        let roles = user_roles(&mut *conn, user).await?;
+        let tag = content_tag(&serde_json::to_vec(&roles)?);
+        let had = roles_tag == Some(tag.as_str());
+        ((!had).then_some(roles), Some(tag))
     };
     Ok(SyncPage {
         entries: Vec::new(),
@@ -1861,6 +1870,7 @@ async fn page_without_entries(
         resume: None,
         rekey_needed: folders,
         roles,
+        roles_tag,
         group_rekey_needed,
         restore,
         recovered_key: recovered_key

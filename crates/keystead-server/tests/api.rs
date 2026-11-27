@@ -69,6 +69,38 @@ impl Server {
         pool.close().await;
     }
 
+    /// A GET that names the tag the caller has (`If-None-Match`): the status, the tag
+    /// that comes back, and how many bytes of body.
+    async fn get_tagged(
+        &self,
+        uri: &str,
+        token: &str,
+        had: Option<&str>,
+    ) -> (StatusCode, Option<String>, usize) {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        if let Some(had) = had {
+            request = request.header(header::IF_NONE_MATCH, had);
+        }
+        let response = self
+            .router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let tag = response
+            .headers()
+            .get(header::ETAG)
+            .map(|tag| tag.to_str().unwrap().to_owned());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, tag, body.len())
+    }
+
     /// Reads one number from the database directly, for what the API doesn't show.
     async fn number(&self, sql: &str) -> i64 {
         let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&self.path);
@@ -3623,4 +3655,61 @@ async fn deleted_logins_are_listed_for_30_days_then_their_history_goes() {
     assert_eq!(listed().await, vec![recent]);
     let marker = format!("SELECT version FROM items WHERE id = '{old}'");
     assert_eq!(server.number(&marker).await, 2);
+}
+
+/// The lists apps fetch on every sync carry a tag, and a client that sends it back gets
+/// 304 and no body until the list changes. The last sync page leaves out roles the client
+/// has, by their tag.
+#[tokio::test]
+async fn unchanged_lists_come_back_as_304_and_roles_by_their_tag() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let bob = invite(&server, &alice, "Bob").await;
+    let token = alice.token().unwrap();
+    for uri in ["/v1/directory", "/v1/groups", "/v1/exposures"] {
+        let (status, tag, size) = server.get_tagged(uri, token, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(size > 0);
+        let tag = tag.unwrap();
+        assert!(tag.starts_with("W/\""), "{tag}");
+        let (status, again, size) = server.get_tagged(uri, token, Some(&tag)).await;
+        assert_eq!((status, size), (StatusCode::NOT_MODIFIED, 0), "{uri}");
+        assert_eq!(again.as_deref(), Some(tag.as_str()));
+        // Compared weakly, among several; another tag gets the list.
+        let several = format!("W/\"other\", {}", tag.trim_start_matches("W/"));
+        let (status, _, _) = server.get_tagged(uri, token, Some(&several)).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        let (status, _, _) = server.get_tagged(uri, token, Some("W/\"other\"")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Approving Bob changes the directory, and so its tag.
+    let (_, before, _) = server.get_tagged("/v1/directory", token, None).await;
+    approve(&server, &alice, &bob).await;
+    let (status, after, _) = server
+        .get_tagged("/v1/directory", token, before.as_deref())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(after, before);
+
+    // Roles come on the last page with their tag, and stay out while it's sent back.
+    let page = bob.sync(&server, 0, 100).await;
+    let tag = page.roles_tag.clone().unwrap();
+    assert!(page.roles.is_some());
+    let with_tag = |tag: &str| format!("/v1/sync?cursor={}&roles_tag={tag}", page.cursor);
+    let (status, body) = bob.call(&server, Method::GET, &with_tag(&tag), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: SyncPage = decode(body);
+    assert!(again.roles.is_none());
+    assert_eq!(again.roles_tag.as_deref(), Some(tag.as_str()));
+
+    // Once Bob's roles change, they come again, with a new tag.
+    let (folder_id, key) = create_folder(&server, &alice, "Production").await;
+    let (status, body) =
+        add_to_folder(&server, &alice, (folder_id, &key), &bob, Role::View, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (_, body) = bob.call(&server, Method::GET, &with_tag(&tag), None).await;
+    let changed: SyncPage = decode(body);
+    assert!(changed.roles.is_some());
+    assert_ne!(changed.roles_tag.as_deref(), Some(tag.as_str()));
 }

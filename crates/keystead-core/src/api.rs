@@ -788,6 +788,10 @@ pub struct SyncPage {
     /// This user's roles, on the last page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<Roles>,
+    /// A tag of the caller's roles, on the last page (0.19.0 and later). A client that
+    /// sends it back as `roles_tag` gets `roles` left out while they're the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles_tag: Option<String>,
     /// Groups this user manages that need a new key, because someone left. Folders shared
     /// with them wait for it, and aren't in `rekey_needed` until then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -10,6 +10,7 @@ What each release changes, newest first. The release workflow puts a version's s
 - New indexes for what saves and syncs look up, such as a login's people and a folder's members. The server adds them on its own when it starts.
 - The Mac app fetches Recently Deleted when you open it, rather than after every sync.
 - Copying a password or one-time code in the Mac app no longer waits for a sync in progress: the sync waits on the server without holding up the logins on your Mac. A server that can't be reached says so after 10 seconds rather than 30.
+- A sync that brings nothing new downloads almost nothing: the server says which lists (people, groups, passwords to change, your roles) haven't changed instead of sending them again, and Keystead doesn't check them all over again. For someone on a 300-person team, each such sync went from about 90 KB to under 1 KB, and the work on the Mac from about 10 ms to under 3. It takes the server and the app or CLI on 0.19.0; either one alone works as before.
 - A sync that brings nothing new no longer rewrites the copy of your logins on your Mac (with 30,000 logins, about 30 MB every five minutes); the CLI's likewise. When something changes, the file is a fifth smaller than before.
 
 **Deployment**

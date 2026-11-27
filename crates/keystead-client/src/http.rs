@@ -100,6 +100,13 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
+/// What a GET that names what the client has brought: something new, with its tag, or
+/// word that it's still the same (`Client::get_unless`).
+pub enum Fresh<T> {
+    Changed { value: T, tag: Option<String> },
+    Same,
+}
+
 #[derive(Clone)]
 pub struct Client {
     agent: ureq::Agent,
@@ -163,6 +170,34 @@ impl Client {
             request = request.query(name, value);
         }
         read(request.call())
+    }
+
+    /// A GET that sends the tag of what the client has (`If-None-Match`), if it has one;
+    /// a server on 0.19.0 or later answers 304 while it's still the same. Older servers
+    /// answer in full, without a tag.
+    pub fn get_unless<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        tag: Option<&str>,
+    ) -> Result<Fresh<T>, Failure> {
+        let mut request = self.request("GET", path);
+        if let Some(tag) = tag {
+            request = request.set("If-None-Match", tag);
+        }
+        match request.call() {
+            Ok(response) if response.status() == 304 => Ok(Fresh::Same),
+            result => {
+                let tag = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|response| response.header("ETag"))
+                    .map(str::to_owned);
+                Ok(Fresh::Changed {
+                    value: read(result)?,
+                    tag,
+                })
+            }
+        }
     }
 
     pub fn post<B: Serialize, T: DeserializeOwned>(
