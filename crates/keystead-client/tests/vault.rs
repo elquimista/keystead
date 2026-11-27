@@ -3825,3 +3825,35 @@ fn a_big_import_arrives_whole_in_batches() {
     let reopened = Vault::open(&fixture.profile("alice"), &alice_secret, alice_signer).unwrap();
     assert_eq!(reopened.list().unwrap().len(), 450);
 }
+
+/// Password Health remembers each password's score for the version it was given for, and
+/// scores a login again once a new version is saved. The vault can be used while the
+/// passwords are scored.
+#[test]
+fn password_health_scores_a_login_again_when_its_password_changes() {
+    let fixture = Fixture::start();
+    let Team { mut alice, .. } = team(&fixture);
+    let (overview, details) = login("Mail", "password");
+    let mail = alice.add(None, overview, details).unwrap();
+    let now = 1_800_000_000;
+    let weak = |alice: &mut Vault| {
+        let mut check = alice.begin_health(now).unwrap();
+        // Free meanwhile: a password opens while the check scores.
+        assert!(alice.open_item(mail).is_ok());
+        check.score();
+        let health = alice.finish_health(check).unwrap();
+        assert_eq!(health.checked, 1);
+        health
+            .rows
+            .iter()
+            .any(|row| row.item_id == mail && row.weak)
+    };
+    assert!(weak(&mut alice));
+    assert!(weak(&mut alice));
+    alice
+        .edit(mail, "violet-harbour-trombone-1987-glacier")
+        .unwrap();
+    assert!(!weak(&mut alice));
+    alice.edit(mail, "password").unwrap();
+    assert!(weak(&mut alice));
+}

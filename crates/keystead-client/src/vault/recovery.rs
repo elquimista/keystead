@@ -399,7 +399,7 @@ impl Vault {
         // one before, so this device can tell it from one it withdrew. An older server
         // takes only one without a number; then this device can't tell them apart, and
         // takes the server's word again, as before.
-        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let health: Health = self.server_health()?;
         let sequence = if health.escrow >= 2 {
             self.own_escrow_sequence()
                 .max(self.profile.escrow_off_at.unwrap_or(0))

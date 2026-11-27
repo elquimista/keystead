@@ -2,7 +2,7 @@
 //! server, the pinned owner keys, the feed cursor, and the encrypted copy of folders,
 //! items, groups and the directory. Stored as `profile.json`, the same on every platform.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -17,6 +17,29 @@ use keystead_core::ids::{DeviceId, FolderId, GroupId, ItemId, UserId};
 use keystead_core::items::{EncryptedItem, FolderInfo, Sealed};
 use keystead_core::keys::{AccountKeys, AccountPublicKeys, FolderKey, WrappedKey};
 use serde::{Deserialize, Serialize};
+
+/// [`Profile::item_role`] for many items, with the role lists as maps
+/// ([`Profile::role_lookup`]).
+pub struct RoleLookup<'a> {
+    profile: &'a Profile,
+    folders: HashMap<FolderId, Role>,
+    items: HashMap<ItemId, Role>,
+}
+
+impl RoleLookup<'_> {
+    pub fn item_role(&self, item: &EncryptedItem) -> Role {
+        self.profile.role_from(
+            item,
+            |folder_id| {
+                self.folders
+                    .get(&folder_id)
+                    .copied()
+                    .unwrap_or_else(Role::before_roles)
+            },
+            |item_id| self.items.get(&item_id).copied(),
+        )
+    }
+}
 
 /// The owner is always the server's first user.
 pub const OWNER: UserId = UserId(1);
@@ -307,21 +330,55 @@ impl Profile {
     /// What this account may do with an item: the higher of its folder role and its direct
     /// role; an item's owner always manages it.
     pub fn item_role(&self, item: &EncryptedItem) -> Role {
+        self.role_from(
+            item,
+            |folder_id| self.folder_role(folder_id),
+            |item_id| {
+                self.roles.as_ref().and_then(|roles| {
+                    roles
+                        .items
+                        .iter()
+                        .find(|role| role.item_id == item_id)
+                        .map(|role| role.role)
+                })
+            },
+        )
+    }
+
+    /// `item_role` for going through many items: the role lists as maps, built once.
+    pub fn role_lookup(&self) -> RoleLookup<'_> {
+        let mut folders = HashMap::new();
+        let mut items = HashMap::new();
+        if let Some(roles) = &self.roles {
+            for role in &roles.folders {
+                folders.entry(role.folder_id).or_insert(role.role);
+            }
+            for role in &roles.items {
+                items.entry(role.item_id).or_insert(role.role);
+            }
+        }
+        RoleLookup {
+            profile: self,
+            folders,
+            items,
+        }
+    }
+
+    /// An item's role, from its folder's role and its own, however they're looked up.
+    fn role_from(
+        &self,
+        item: &EncryptedItem,
+        folder_role: impl Fn(FolderId) -> Role,
+        direct_role: impl Fn(ItemId) -> Option<Role>,
+    ) -> Role {
         if self.roles.is_none() || item.owner == Some(self.user_id) {
             return Role::Manage;
         }
         let in_folder = item
             .folder_id
             .filter(|folder_id| self.folders.contains_key(folder_id))
-            .map(|folder_id| self.folder_role(folder_id));
-        let direct = self.roles.as_ref().and_then(|roles| {
-            roles
-                .items
-                .iter()
-                .find(|role| role.item_id == item.id)
-                .map(|role| role.role)
-        });
-        in_folder.max(direct).unwrap_or(Role::View)
+            .map(folder_role);
+        in_folder.max(direct_role(item.id)).unwrap_or(Role::View)
     }
 
     pub fn folder_name(

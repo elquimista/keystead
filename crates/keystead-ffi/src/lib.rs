@@ -1314,12 +1314,15 @@ impl Vault {
     }
 
     /// Checks the passwords of the logins you can change: weak ones, ones other logins
-    /// share, and ones set over a year ago. Passwords are opened in memory only.
+    /// share, and ones set over a year ago. Passwords are opened in memory only. Scoring
+    /// them leaves the vault free, so copying a password meanwhile doesn't wait.
     pub fn password_health(&self) -> Result<PasswordHealth, CoreError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs() as i64);
-        let health = self.vault()?.password_health(now)?;
+        let mut check = self.vault()?.begin_health(now)?;
+        check.score();
+        let health = self.vault()?.finish_health(check)?;
         Ok(PasswordHealth {
             logins: health
                 .rows

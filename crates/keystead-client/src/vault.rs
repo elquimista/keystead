@@ -1,5 +1,6 @@
 //! An unlocked vault: the profile plus the account keys, able to sign in and act.
 
+use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -46,7 +47,7 @@ mod health;
 mod membership;
 mod recovery;
 
-pub use health::{HealthRow, OLD_AFTER_SECONDS, PasswordHealth};
+pub use health::{HealthCheck, HealthRow, OLD_AFTER_SECONDS, PasswordHealth};
 use recovery::RecoveryDuties;
 pub use recovery::{
     ApprovedRecovery, RecoveryClaim, RecoveryLine, RecoveryProgress, RecoveryRequest,
@@ -86,6 +87,8 @@ const PAGE_SIZE: i64 = 500;
 /// The most logins an import saves in one request, and about the most bytes.
 const BATCH_LOGINS: usize = 200;
 const BATCH_BYTES: usize = 1_000_000;
+/// How long what the server says it can do is taken as still true.
+const HEALTH_KEPT: Duration = Duration::from_secs(5 * 60);
 /// Sign in again this long before the server's session would expire.
 const SESSION_MARGIN: Duration = Duration::from_secs(60);
 
@@ -1085,6 +1088,11 @@ pub struct Vault {
     /// Whether the server saves several logins in one request (0.19.0 and later), once
     /// an import has asked.
     server_takes_batches: Option<bool>,
+    /// Password Health's verdict on each login's password, weak or not, for the version
+    /// it was given for: a digest of that version's signature. Never the password.
+    health_scores: HashMap<ItemId, ([u8; 32], bool)>,
+    /// The server's health, and when it was asked (see `server_health`).
+    health: RefCell<Option<(Instant, Health)>>,
     /// Whether the server keeps signed members, once asked this session.
     /// What the server says it keeps signed (see `membership_level`), once asked.
     server_membership: Option<u8>,
@@ -1172,6 +1180,8 @@ impl Vault {
             keys,
             server_takes_items: false,
             server_takes_batches: None,
+            health_scores: HashMap::new(),
+            health: RefCell::new(None),
             server_membership: None,
             could_save: HashMap::new(),
             history: HashMap::new(),
@@ -1204,6 +1214,8 @@ impl Vault {
             keys,
             server_takes_items: false,
             server_takes_batches: None,
+            health_scores: HashMap::new(),
+            health: RefCell::new(None),
             server_membership: None,
             could_save: HashMap::new(),
             history: HashMap::new(),
@@ -1491,7 +1503,7 @@ impl Vault {
     /// carries a key made from a random nonce and `name`, so this app can approve whoever
     /// joins with it on its own (see [`Vault::approve_invited`]).
     pub fn invite(&mut self, name: &str) -> Result<InviteInfo> {
-        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let health: Health = self.server_health()?;
         let nonce = health.invite_keys.then(InviteKey::new_nonce);
         let request = InviteRequest {
             name: name.to_owned(),
@@ -2686,6 +2698,25 @@ impl Vault {
         let me = self.profile.user_id;
         let mut folders = HashMap::new();
         let mut rows = Vec::new();
+        // Looked up once per listing, not once per login: roles, people's names, and the
+        // team's groups, each of which is checked against its signatures.
+        let roles = self.profile.role_lookup();
+        let mut names: HashMap<UserId, &str> = HashMap::new();
+        for entry in &self.profile.directory {
+            names.entry(entry.user_id).or_insert(&entry.name);
+        }
+        let name = |user: UserId| {
+            names
+                .get(&user)
+                .map_or_else(|| format!("user {user}"), |name| (*name).to_owned())
+        };
+        let on_team: HashSet<GroupId> = self
+            .profile
+            .team_groups
+            .iter()
+            .filter_map(|info| info.entries.first().map(|entry| entry.group_id))
+            .collect();
+        let mut group_names: HashMap<GroupId, String> = HashMap::new();
         for item in self.openable_items() {
             let folder = match item.folder_id {
                 Some(folder_id) if self.profile.folders.contains_key(&folder_id) => {
@@ -2713,32 +2744,32 @@ impl Vault {
                 continue;
             };
             let overview = item.open_overview(&key)?;
+            let mut shared_with_groups = Vec::new();
+            for copy in &item.keys.groups {
+                if on_team.contains(&copy.group_id) {
+                    let group = group_names
+                        .entry(copy.group_id)
+                        .or_insert_with(|| self.profile.group_name(copy.group_id));
+                    shared_with_groups.push(group.clone());
+                }
+            }
             rows.push(ItemRow {
                 id: item.id,
                 folder: folder.map(|(_, name)| name.clone()),
                 name: overview.name,
                 username: overview.username,
                 url: overview.url,
-                owner: item
-                    .owner
-                    .filter(|&owner| owner != me)
-                    .map(|owner| self.profile.user_name(owner)),
+                owner: item.owner.filter(|&owner| owner != me).map(name),
                 shared_with: item
                     .keys
                     .people
                     .iter()
                     .filter(|person| person.user_id != me)
-                    .map(|person| self.profile.user_name(person.user_id))
+                    .map(|person| name(person.user_id))
                     .collect(),
-                shared_with_groups: item
-                    .keys
-                    .groups
-                    .iter()
-                    .filter(|copy| self.profile.group_exists(copy.group_id))
-                    .map(|copy| self.profile.group_name(copy.group_id))
-                    .collect(),
+                shared_with_groups,
                 shared_with_me: folder.is_none() && item.owner != Some(me),
-                role: self.profile.item_role(item),
+                role: roles.item_role(item),
                 has_one_time_code: overview.one_time_code,
             });
         }
@@ -3005,9 +3036,28 @@ impl Vault {
         Ok((item.open_overview(&key)?, item.open_details(&key)?))
     }
 
+    /// What the server says it is and can do, asked at most every few minutes over the
+    /// connection already open: some actions depend on it, and a server updated meanwhile
+    /// shows within that time.
+    fn server_health(&self) -> Result<Health> {
+        if let Some((asked, health)) = &*self.health.borrow()
+            && asked.elapsed() < HEALTH_KEPT
+        {
+            return Ok(health.clone());
+        }
+        let client = self
+            .connection
+            .client
+            .clone()
+            .unwrap_or_else(|| Client::new(&self.profile.server));
+        let health: Health = client.get("/v1/health", &[])?;
+        *self.health.borrow_mut() = Some((Instant::now(), health.clone()));
+        Ok(health)
+    }
+
     /// The server's version, as (major, minor).
     fn server_version(&self) -> Result<(u64, u64)> {
-        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let health: Health = self.server_health()?;
         let mut parts = health
             .version
             .split('.')
@@ -3356,7 +3406,7 @@ impl Vault {
     ) -> Result<ImportSummary> {
         self.check_server_takes_items()?;
         if logins.iter().any(|login| !login.details.otp.is_empty()) {
-            let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+            let health: Health = self.server_health()?;
             if health.item_format < 4 {
                 bail!(NEEDS_0_6);
             }
@@ -4039,6 +4089,12 @@ impl Vault {
                 .folder_keys(&self.keys, &self.groups, folder_id)?,
             _ => Vec::new(),
         };
+        self.item_key_with(item, &folder_keys)
+    }
+
+    /// [`item_key`](Self::item_key) with the keys of the item's folder (if it's in one of
+    /// ours) already unwrapped, for going through many items.
+    fn item_key_with(&self, item: &EncryptedItem, folder_keys: &[FolderKey]) -> Result<ItemKey> {
         // In a folder with signed roles, only the copy sealed with the folder's key
         // counts: whoever saved it then knew a key of the folder's, or kept the copy of
         // someone who did. A copy made out to this account alone could be anyone's.
@@ -4053,7 +4109,7 @@ impl Vault {
         }
         unlock_with(
             item,
-            &folder_keys,
+            folder_keys,
             &self.keys,
             self.profile.user_id,
             &self.groups,
@@ -4067,7 +4123,7 @@ impl Vault {
         if self.server_takes_items {
             return Ok(());
         }
-        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let health: Health = self.server_health()?;
         if health.item_format < 2 {
             bail!(NEEDS_0_2);
         }
@@ -4083,7 +4139,7 @@ impl Vault {
             return Ok(details);
         }
         details.otp = otp::normalize(&details.otp)?;
-        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let health: Health = self.server_health()?;
         if health.item_format < 4 {
             bail!(NEEDS_0_6);
         }
@@ -4092,7 +4148,7 @@ impl Vault {
 
     /// Servers older than 0.4.0 have no groups, and don't store items shared with them.
     fn check_server_has_groups(&mut self) -> Result<()> {
-        let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+        let health: Health = self.server_health()?;
         if health.item_format < 3 {
             bail!(NEEDS_0_4);
         }

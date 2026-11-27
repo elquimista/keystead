@@ -18,12 +18,12 @@ pub use export::MIN_EXPORT_PASSPHRASE;
 pub use import::{ImportedLogin, read_kdbx};
 pub use vault::{
     ApprovedRecovery, DeletedRow, DeviceRow, DeviceSetupLine, EditOutcome, FOLDER_SEPARATOR,
-    FolderDeletion, GroupMemberRow, GroupRow, GroupShareRow, HealthRow, HistoryRow, ImportFolder,
-    ImportPlan, ImportSummary, InviteInfo, ItemRow, JoiningDevice, KdbxExport, MemberRow,
-    NewAccount, NewFolder, OLD_AFTER_SECONDS, PasswordHealth, RecoveryClaim, RecoveryLine,
-    RecoveryProgress, RecoveryRequest, RenamedFolder, SyncFetch, SyncSummary, ToChangeRow, UserRow,
-    Vault, Whoami, claim_recovery, finish_recovery, generate_password, join, recover,
-    recovery_approved, recovery_progress, setup,
+    FolderDeletion, GroupMemberRow, GroupRow, GroupShareRow, HealthCheck, HealthRow, HistoryRow,
+    ImportFolder, ImportPlan, ImportSummary, InviteInfo, ItemRow, JoiningDevice, KdbxExport,
+    MemberRow, NewAccount, NewFolder, OLD_AFTER_SECONDS, PasswordHealth, RecoveryClaim,
+    RecoveryLine, RecoveryProgress, RecoveryRequest, RenamedFolder, SyncFetch, SyncSummary,
+    ToChangeRow, UserRow, Vault, Whoami, claim_recovery, finish_recovery, generate_password, join,
+    recover, recovery_approved, recovery_progress, setup,
 };
 
 use keystead_core::encoding::Bytes;

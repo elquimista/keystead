@@ -12,7 +12,7 @@ use keystead_core::folders::FolderEntry;
 use keystead_core::ids::{FolderId, GroupId, UserId};
 
 use super::Vault;
-use crate::http::{Client, Failure};
+use crate::http::Failure;
 use crate::profile::{FolderRecord, OWNER};
 
 const NOT_SIGNED: &str = "nobody has signed for this folder's members yet. One of its managers \
@@ -40,7 +40,7 @@ impl Vault {
         let level = match self.server_membership {
             Some(level) => level,
             None => {
-                let health: Health = Client::new(&self.profile.server).get("/v1/health", &[])?;
+                let health: Health = self.server_health()?;
                 self.server_membership = Some(health.membership);
                 health.membership
             }
