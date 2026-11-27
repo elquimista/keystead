@@ -15,7 +15,9 @@ use keystead_core::api::{
     RecoveryChallengeRequest, RekeyRequest, Role, RoleRequest, Session, SetupRequest,
     SignInRequest, SyncEntry, SyncPage, UpdateGroupRequest, ViaGroup,
 };
-use keystead_core::api::{FolderEntryRequest, Health, Invites, Removal, RemoveUserRequest};
+use keystead_core::api::{
+    DeletedItems, FolderEntryRequest, Health, Invites, Removal, RemoveUserRequest,
+};
 use keystead_core::directory::{DirectoryEntry, InviteProof};
 use keystead_core::encoding::Bytes;
 use keystead_core::folders::FolderEntry;
@@ -36,6 +38,7 @@ use tower::ServiceExt;
 
 struct Server {
     router: Router,
+    state: AppState,
     path: PathBuf,
     setup_code: String,
 }
@@ -51,7 +54,8 @@ impl Server {
         let state = AppState::open(&path).await.unwrap();
         let setup_code = state.pending_setup_code().await.unwrap().unwrap();
         Self {
-            router: router(state),
+            router: router(state.clone()),
+            state,
             path,
             setup_code,
         }
@@ -63,6 +67,15 @@ impl Server {
         let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
         sqlx::raw_sql(sql).execute(&pool).await.unwrap();
         pool.close().await;
+    }
+
+    /// Reads one number from the database directly, for what the API doesn't show.
+    async fn number(&self, sql: &str) -> i64 {
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&self.path);
+        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+        let number = sqlx::query_scalar(sql).fetch_one(&pool).await.unwrap();
+        pool.close().await;
+        number
     }
 
     async fn call(
@@ -1317,7 +1330,7 @@ async fn a_database_from_0_1_0_is_upgraded() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 17);
+    assert_eq!(version, 18);
     pool.close().await;
     let _ = std::fs::remove_file(&path);
 }
@@ -3552,4 +3565,62 @@ async fn invites_keep_their_nonce_and_the_proof_until_the_owner_approves() {
     sam.user_id = waiting.user_id;
     approve(&server, &alice, &sam).await;
     assert_eq!(listed().await.invite, None);
+}
+
+/// Recently Deleted lists a login for 30 days. After that it's left out, and the server's
+/// hourly tidy forgets its history; its deletion marker stays, for everyone's devices.
+#[tokio::test]
+async fn deleted_logins_are_listed_for_30_days_then_their_history_goes() {
+    let server = Server::new().await;
+    let alice = set_up_owner(&server).await;
+    let (folder_id, key) = create_folder(&server, &alice, "Production").await;
+    let mut deleted = Vec::new();
+    for name in ["AWS root", "Old VPN"] {
+        let item = new_item(&alice, folder_id, &key, name);
+        let (status, body) = alice.put(&server, &item, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let at = ItemVersion {
+            id: item.id,
+            folder_id: Some(folder_id),
+            owner: None,
+            version: 2,
+            author: alice.user_id,
+        };
+        let tombstone = EncryptedItem::tombstone(at, item.keys.clone(), &alice.keys);
+        let (status, body) = alice.put(&server, &tombstone, Some(1)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        deleted.push(item.id);
+    }
+    let listed = async || {
+        let (status, body) = alice.call(&server, Method::GET, "/v1/deleted", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = decode::<DeletedItems>(body).items;
+        items
+            .into_iter()
+            .map(|item| item.deleted.id)
+            .collect::<Vec<_>>()
+    };
+    let [old, recent] = deleted[..] else {
+        unreachable!()
+    };
+    assert_eq!(listed().await, vec![recent, old]);
+
+    // One was deleted 31 days ago: it's no longer listed, though its history waits for
+    // the next tidy.
+    server
+        .sql(&format!(
+            "UPDATE items SET saved_at = saved_at - 31 * 86400 WHERE id = '{old}'"
+        ))
+        .await;
+    assert_eq!(listed().await, vec![recent]);
+    let history = |id: ItemId| format!("SELECT COUNT(*) FROM item_history WHERE item_id = '{id}'");
+    assert_eq!(server.number(&history(old)).await, 1);
+
+    // The tidy forgets that history, and only that; the deletion marker stays.
+    server.state.tidy().await.unwrap();
+    assert_eq!(server.number(&history(old)).await, 0);
+    assert_eq!(server.number(&history(recent)).await, 1);
+    assert_eq!(listed().await, vec![recent]);
+    let marker = format!("SELECT version FROM items WHERE id = '{old}'");
+    assert_eq!(server.number(&marker).await, 2);
 }

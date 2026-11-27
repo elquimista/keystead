@@ -40,6 +40,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Housekeeping (forgetting what deleted logins kept past 30 days), now and every hour.
+    let tidying = state.clone();
+    tokio::spawn(async move {
+        let mut hourly = tokio::time::interval(Duration::from_secs(60 * 60));
+        loop {
+            hourly.tick().await;
+            if let Err(error) = tidying.tidy().await {
+                eprintln!("couldn't tidy the database: {error}");
+            }
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind(listen).await?;
     println!(
         "keystead-server {} listening on {listen}, data in {}",

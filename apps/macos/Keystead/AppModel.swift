@@ -975,7 +975,11 @@ final class AppModel {
             message = "Couldn't sync (\(describe(error))). Showing the copy on this Mac."
         }
         await reloadLocal()
-        await reloadDeleted()
+        // Recently Deleted only while it's shown, and once after unlocking, so Delete knows
+        // whether the server keeps deleted logins. Showing it fetches it afresh.
+        if section == .recentlyDeleted || !hasSynced {
+            await reloadDeleted()
+        }
         await reloadInvites()
     }
 
@@ -989,8 +993,12 @@ final class AppModel {
         }
     }
 
-    /// Loads Recently Deleted on its own, like the device list.
-    private func reloadDeleted() async {
+    /// Loads Recently Deleted on its own, like the device list: when it's shown, and after
+    /// a sync while it is.
+    func reloadDeleted() async {
+        #if DEBUG
+        if isDemo { return }
+        #endif
         do {
             let deleted = try await perform { try $0.deletedLogins() }
             update(\.keepsDeleted, to: deleted != nil)

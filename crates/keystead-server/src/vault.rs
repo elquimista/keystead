@@ -1167,8 +1167,7 @@ pub(crate) async fn put_item(
 
     // The version being replaced joins the item's history, which keeps the last
     // `HISTORY_KEPT`. A deleted item's history stays `DELETED_KEPT_DAYS`, so it can be
-    // brought back.
-    purge_deleted(&mut tx).await?;
+    // brought back; `AppState::tidy` forgets it after that.
     if let Some(current) = current.as_ref().filter(|current| !current.deleted) {
         sqlx::query(
             "INSERT INTO item_history (item_id, version, saved_at, body)
@@ -1345,8 +1344,10 @@ const HISTORY_KEPT: i64 = 10;
 const DELETED_KEPT_DAYS: i64 = 30;
 
 /// Forgets the history (and passwords to change) of items deleted more than
-/// `DELETED_KEPT_DAYS` ago; their deletion markers stay, for everyone's devices.
-pub(crate) async fn purge_deleted(conn: &mut SqliteConnection) -> Result<(), ApiError> {
+/// `DELETED_KEPT_DAYS` ago; their deletion markers stay, for everyone's devices. Run by
+/// `AppState::tidy` every hour, so saves don't wait on it; the index `items_deleted`
+/// makes it look only at deleted items.
+pub(crate) async fn purge_deleted(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
     let expired = format!(
         "SELECT id FROM items WHERE COALESCE(json_extract(body, '$.deleted'), 0)
          AND saved_at < CAST(strftime('%s', 'now') AS INTEGER) - {}",
@@ -1362,25 +1363,28 @@ pub(crate) async fn purge_deleted(conn: &mut SqliteConnection) -> Result<(), Api
 
 /// `GET /v1/deleted`: items deleted in the last `DELETED_KEPT_DAYS` that the caller can
 /// change, each with its deletion marker and its last version before it, newest first.
+/// Read only, from a reader: older ones, whose history waits for the next
+/// `AppState::tidy`, are left out here.
 pub(crate) async fn deleted_items(
     State(state): State<AppState>,
     auth: Auth,
 ) -> Result<Json<DeletedItems>, ApiError> {
-    let mut tx = state.writer.begin().await?;
-    purge_deleted(&mut tx).await?;
-    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+    let mut conn = state.readers.acquire().await?;
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(&format!(
         "SELECT i.saved_at, i.body, h.body FROM items i
          JOIN item_history h ON h.item_id = i.id
-         WHERE COALESCE(json_extract(i.body, '$.deleted'), 0) AND i.saved_at IS NOT NULL
+         WHERE COALESCE(json_extract(i.body, '$.deleted'), 0)
+           AND i.saved_at >= CAST(strftime('%s', 'now') AS INTEGER) - {}
            AND h.version = (SELECT MAX(version) FROM item_history WHERE item_id = i.id)
          ORDER BY i.saved_at DESC",
-    )
-    .fetch_all(&mut *tx)
+        DELETED_KEPT_DAYS * 86_400
+    ))
+    .fetch_all(&mut *conn)
     .await?;
     let mut items = Vec::new();
     for (deleted_at, deleted, last) in rows {
         let deleted: EncryptedItem = serde_json::from_str(&deleted)?;
-        if item_role(&mut tx, auth.user_id, &deleted).await? >= Some(Role::Edit) {
+        if item_role(&mut conn, auth.user_id, &deleted).await? >= Some(Role::Edit) {
             items.push(DeletedItem {
                 deleted_at,
                 deleted,
@@ -1388,7 +1392,6 @@ pub(crate) async fn deleted_items(
             });
         }
     }
-    tx.commit().await?;
     Ok(Json(DeletedItems { items }))
 }
 

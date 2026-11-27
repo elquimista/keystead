@@ -110,6 +110,9 @@ struct VaultView: View {
                     // Its list comes from the check; with none yet, nothing to compare.
                     if model.health != nil { keepSelectionIfListed() }
                 }
+            } else if model.section == .recentlyDeleted {
+                // Fetched when shown, rather than with every sync.
+                Task { await model.reloadDeleted() }
             } else {
                 keepSelectionIfListed()
             }

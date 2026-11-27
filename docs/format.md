@@ -862,7 +862,8 @@ as a new version, and doesn't count as a new password (see below), since it isn'
 
 **Recently deleted** (0.9.0 and later). Deleting an item saves its deletion marker as
 usual, and the server keeps its earlier versions (and passwords to change) for 30 days
-after it, then forgets them; the marker stays, for everyone's devices. `GET /v1/deleted`
+after it, then forgets them within the hour (0.19.0 tidies hourly, earlier servers at the
+next save); the marker stays, for everyone's devices. `GET /v1/deleted`
 lists the items deleted in that time that the caller can change, each with its signed
 marker, its last version before it, and when it was deleted. Clients verify both and
 decrypt the last version to show it. Saving a live version on top of a deletion marker

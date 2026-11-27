@@ -278,6 +278,17 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE invites ADD COLUMN nonce BLOB;
      ALTER TABLE users ADD COLUMN invite_nonce BLOB;
      ALTER TABLE users ADD COLUMN invite_proof BLOB;",
+    // 18 (0.19.0): indexes for what saves, syncs and Recently Deleted look up. Deleted
+    // items by when they were deleted, and only those: a query uses it only if it says
+    // `COALESCE(json_extract(body, '$.deleted'), 0)` exactly so. A login's direct access
+    // and a folder's members, which their primary keys don't lead with. And the copies
+    // people who recovered are waiting for, which every sync looks for.
+    "CREATE INDEX items_deleted ON items (saved_at)
+         WHERE COALESCE(json_extract(body, '$.deleted'), 0);
+     CREATE INDEX item_access_item ON item_access (item_id);
+     CREATE INDEX members_folder ON members (folder_id);
+     CREATE INDEX members_pending ON members (folder_id) WHERE pending;
+     CREATE INDEX item_access_pending ON item_access (item_id) WHERE pending;",
 ];
 
 /// Shared by every request. Writes go through one connection so change numbers commit in
@@ -312,6 +323,11 @@ impl AppState {
             .await?;
         sqlx::raw_sql(SCHEMA).execute(&writer).await?;
         migrate(&writer).await?;
+        // What SQLite knows about the tables, for its query plans: gathered now for any
+        // that need it, which takes a moment at most, then kept up by `tidy`.
+        sqlx::query("PRAGMA optimize = 0x10002")
+            .execute(&writer)
+            .await?;
         let readers = SqlitePoolOptions::new()
             .max_connections(8)
             .connect_with(options)
@@ -372,6 +388,17 @@ impl AppState {
         )
         .fetch_optional(&self.readers)
         .await
+    }
+
+    /// Housekeeping, which the server does at start and then every hour: forgets the
+    /// history of logins deleted more than 30 days ago, and keeps what SQLite knows about
+    /// the tables up to date. Saves and requests don't wait on it.
+    pub async fn tidy(&self) -> Result<(), sqlx::Error> {
+        let mut tx = self.writer.begin().await?;
+        vault::purge_deleted(&mut tx).await?;
+        tx.commit().await?;
+        sqlx::query("PRAGMA optimize").execute(&self.writer).await?;
+        Ok(())
     }
 }
 
